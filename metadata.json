@@ -1,0 +1,7 @@
+{
+  "name": "Jump And Say",
+  "description": "A motion-controlled platformer game where you jump to select the correct English words. Uses your webcam to detect movement.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

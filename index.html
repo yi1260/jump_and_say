@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
+    <meta name="theme-color" content="#2D1B00" />
+    <title>Jump And Say</title>
+    <link rel="manifest" href="/manifest.json" />
+    
+    <!-- Fonts: 'Fredoka' for that friendly, rounded look -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://fastly.jsdelivr.net" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&display=swap" rel="stylesheet">
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['"Fredoka"', 'sans-serif'],
+              display: ['"Fredoka"', 'sans-serif'],
+            },
+            colors: {
+              kenney: {
+                blue: '#4c99ff',
+                green: '#77b039',
+                red: '#ff5c5c',
+                yellow: '#ffcc00',
+                brown: '#a67c52',
+                dark: '#333333',
+                light: '#f5f5f5',
+              }
+            },
+            boxShadow: {
+              'kenney': '0 6px 0 rgba(0,0,0,0.2)',
+              'kenney-active': '0 2px 0 rgba(0,0,0,0.2)',
+            },
+            borderRadius: {
+              'kenney': '24px',
+            },
+            borderWidth: {
+              'kenney': '4px',
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      body {
+        overscroll-behavior: none;
+        user-select: none;
+        -webkit-user-select: none;
+        background-color: #4c99ff;
+        color: #333333;
+        font-family: 'Fredoka', sans-serif;
+      }
+      
+      .kenney-panel {
+        background-color: white;
+        border: 4px solid #333333;
+        border-radius: 32px;
+        box-shadow: 0 8px 0 #333333;
+      }
+
+      .kenney-button {
+    position: relative;
+    background-color: #77b039;
+    border: 4px solid #333333;
+    border-radius: 20px;
+    color: white;
+    padding: 12px 24px;
+    font-weight: 900;
+    text-transform: uppercase;
+    transition: all 0.1s ease;
+    box-shadow: 0 8px 0 #333333;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    letter-spacing: 0.05em;
+  }
+  .kenney-button-circle {
+    position: relative;
+    background-color: #ff5c5c;
+    border: 4px solid #333333;
+    border-radius: 50%;
+    color: white;
+    width: 48px;
+    height: 48px;
+    font-weight: 900;
+    transition: all 0.1s ease;
+    box-shadow: 0 6px 0 #333333;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  @media (min-width: 768px) {
+    .kenney-button-circle {
+      width: 64px;
+      height: 64px;
+    }
+  }
+  .kenney-button:active, .kenney-button-circle:active {
+    transform: translateY(4px);
+    box-shadow: 0 4px 0 #333333;
+  }
+  .kenney-button-red {
+    background-color: #ff5c5c;
+  }
+
+      .kenney-button-blue { background-color: #4c99ff; }
+      .kenney-button-red { background-color: #ff5c5c; }
+      .kenney-button-yellow { background-color: #ffcc00; color: #333333; }
+
+      /* Animations */
+      @keyframes bounce-horizontal-large {
+        0%, 100% { transform: translateX(0); }
+        50% { transform: translateX(-30px); }
+      }
+      @keyframes bounce-horizontal-large-reverse {
+        0%, 100% { transform: translateX(0); }
+        50% { transform: translateX(30px); }
+      }
+      .animate-bounce-horizontal-large {
+        animation: bounce-horizontal-large 1s infinite;
+      }
+      .animate-bounce-horizontal-large-reverse {
+        animation: bounce-horizontal-large-reverse 1s infinite;
+      }
+
+      /* Hide scrollbar for Chrome, Safari and Opera */
+      .scrollbar-hide::-webkit-scrollbar {
+        display: none;
+      }
+
+      /* Hide scrollbar for IE, Edge and Firefox */
+      .scrollbar-hide {
+        -ms-overflow-style: none;  /* IE and Edge */
+        scrollbar-width: none;  /* Firefox */
+      }
+    </style>
+    
+    <!-- MediaPipe Pose (v0.5.1675469404) - Multi-CDN Fallback -->
+    <script>
+      (function() {
+        'use strict';
+        const CDNS = [
+          'https://fastly.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
+          'https://unpkg.com/@mediapipe/pose@0.5.1675469404/',
+          'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
+          'https://cdnjs.cloudflare.com/ajax/libs/mediapipe/0.5.1675469404/'
+        ];
+        const FALLBACK_DELAY = 3000;
+        let loadedCount = 0;
+
+        function loadScript(url, onSuccess, onError) {
+          const script = document.createElement('script');
+          script.src = url + 'pose.js';
+          script.crossOrigin = 'anonymous';
+          script.onload = function() {
+            console.log('[CDN] Successfully loaded from: ' + url);
+            onSuccess(url);
+          };
+          script.onerror = function() {
+            console.warn('[CDN] Failed to load from: ' + url);
+            onError();
+          };
+          document.head.appendChild(script);
+        }
+
+        function tryNextCDN(index) {
+          if (index >= CDNS.length) {
+            console.error('[CDN] All CDNs failed, retrying from first...');
+            setTimeout(function() { tryNextCDN(0); }, FALLBACK_DELAY);
+            return;
+          }
+          loadScript(CDNS[index], function(successUrl) {
+            window.__MEDIAPIPE_CDN__ = successUrl;
+            loadCameraUtils(successUrl);
+          }, function() {
+            loadedCount++;
+            if (loadedCount >= 2) {
+              tryNextCDN(index + 1);
+            } else {
+              setTimeout(function() { tryNextCDN(index); }, FALLBACK_DELAY);
+            }
+          });
+        }
+
+        function loadCameraUtils(cdnUrl) {
+          const script = document.createElement('script');
+          script.src = cdnUrl + 'camera_utils.js';
+          script.crossOrigin = 'anonymous';
+          script.onload = function() {
+            console.log('[CDN] Camera utils loaded from: ' + cdnUrl);
+          };
+          script.onerror = function() {
+            console.warn('[CDN] Failed to load camera_utils, trying fallback...');
+            const fallbackCdn = CDNS[1];
+            const fallbackScript = document.createElement('script');
+            fallbackScript.src = fallbackCdn + 'camera_utils.js';
+            fallbackScript.crossOrigin = 'anonymous';
+            fallbackScript.onload = function() {
+              console.log('[CDN] Camera utils loaded from fallback: ' + fallbackCdn);
+            };
+            document.head.appendChild(fallbackScript);
+          };
+          document.head.appendChild(script);
+        }
+
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', function() { tryNextCDN(0); });
+        } else {
+          tryNextCDN(0);
+        }
+      })();
+    </script>
+    
+    <script>
+      // Prevent TensorFlow from auto-loading
+      if (window.tf) {
+        console.log('TensorFlow detected, disabling auto-initialization');
+      }
+
+      // Production-safe logging system
+      const LOG_LEVEL = {
+        DEBUG: 0,
+        INFO: 1,
+        WARN: 2,
+        ERROR: 3
+      };
+      const CURRENT_LOG_LEVEL = import.meta?.PROD ? LOG_LEVEL.WARN : LOG_LEVEL.INFO;
+
+      function log(level, tag, message, data) {
+        if (level < CURRENT_LOG_LEVEL) return;
+        const prefix = `[${tag}]`;
+        if (level === LOG_LEVEL.DEBUG) console.debug(prefix, message, data);
+        else if (level === LOG_LEVEL.INFO) console.info(prefix, message, data);
+        else if (level === LOG_LEVEL.WARN) console.warn(prefix, message, data);
+        else console.error(prefix, message, data);
+      }
+
+      // Global error handler for MediaPipe loading issues
+      window.addEventListener('error', function(event) {
+        const msg = event.message || '';
+        if (msg.includes('tensorflow') || msg.includes('tfjs')) {
+          log(2, 'TF', 'TensorFlow load attempt detected (expected to be ignored)');
+          return true;
+        }
+        if (msg.includes('WASM')) {
+          log(2, 'WASM', 'MediaPipe WASM loading info: ' + msg.substring(0, 80));
+          return true;
+        }
+      }, true);
+
+      // Suppress unhandled promise rejections from resource loading
+      window.addEventListener('unhandledrejection', function(event) {
+        const reason = String(event.reason || '');
+        if (reason.includes('tensorflow') ||
+            reason.includes('tfjs') ||
+            reason.includes('WASM') ||
+            reason.includes('SyntaxError') ||
+            reason.includes('does not support image input') ||
+            reason.includes('/Users/liushuai') ||
+            reason.includes('Cannot read')) {
+          log(2, 'REJECT', 'Expected initialization message (ignored)');
+          event.preventDefault();
+        }
+      });
+
+      // Clean up service workers
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(registrations) {
+          for(let registration of registrations) {
+            registration.unregister();
+          }
+        });
+      }
+    </script>
+</head>
+  <body class="overflow-hidden m-0 p-0 font-sans">
+    <div id="root" class="w-full h-full absolute inset-0 z-10"></div>
+  <script type="module" src="/index.tsx"></script>
+</body>
+</html>
