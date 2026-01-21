@@ -28,6 +28,13 @@ export default defineConfig(({ mode }) => {
           },
           workbox: {
             globPatterns: ['**/*.{js,css,html,ico,png,svg,mp3,ogg,ttf}'],
+            globIgnores: [
+              '**/node_modules/**/*',
+              'sw.js',
+              'workbox-*.js',
+              '**/asserts/kenney/Sprites/**/*',
+              '**/asserts/kenney/Vector/backup/**/*'
+            ],
             runtimeCaching: [
               {
                 urlPattern: /^https:\/\/cdn\.maskmysheet\.com\/raz_aa\/.*/i,

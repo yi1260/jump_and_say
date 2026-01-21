@@ -6,9 +6,12 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "postinstall": "mkdir -p public/mediapipe && cp -r node_modules/@mediapipe/pose/* public/mediapipe/ && cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/"
   },
   "dependencies": {
+    "@mediapipe/camera_utils": "^0.3.1675466862",
+    "@mediapipe/pose": "^0.5.1675469404",
     "framer-motion": "^12.23.26",
     "phaser": "3.80.0",
     "react": "18.3.1",

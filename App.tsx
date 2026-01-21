@@ -48,6 +48,23 @@ export default function App() {
       window.setBGMVolume?.(0.2);
     } else {
       window.setBGMVolume?.(0.3);
+      
+      // Force exit fullscreen when entering MENU or THEME_SELECTION
+      if (newPhase === GamePhase.MENU || newPhase === GamePhase.THEME_SELECTION) {
+        const doc = document as any;
+        const isFull = !!(doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement);
+        if (isFull) {
+            if (document.exitFullscreen) {
+              document.exitFullscreen().catch(() => {});
+            } else if (doc.webkitExitFullscreen) {
+              doc.webkitExitFullscreen();
+            } else if (doc.mozCancelFullScreen) {
+              doc.mozCancelFullScreen();
+            } else if (doc.msExitFullscreen) {
+              doc.msExitFullscreen();
+            }
+        }
+      }
     }
   };
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -523,8 +540,10 @@ export default function App() {
     setPhase(GamePhase.TUTORIAL);
     setInitStatus('Loading theme images...');
     
-    // Preload the selected theme's images in parallel
-    const preloadPromise = Promise.all(selectedThemes.map(id => preloadThemeImages(id))).then(() => {
+    // Only preload the FIRST selected theme's images
+    // Subsequent themes will be preloaded in the background during gameplay
+    const firstThemeId = selectedThemes[0];
+    const preloadPromise = preloadThemeImages(firstThemeId).then(() => {
       setInitStatus('Images loaded!');
       setThemeImagesLoaded(true);
     }).catch(error => {
@@ -882,59 +901,38 @@ export default function App() {
                </div>
              )}
 
-            <button 
-              onTouchStart={(e) => {
-                // Handle touch immediately and prevent mouse events
-                e.preventDefault(); 
-                toggleFullscreen(e);
-              }}
-              onClick={(e) => {
-                  // Only handle clicks if they are NOT from touch interactions
-                  // (preventDefault in touchStart should prevent this, but just in case)
-                  toggleFullscreen(e);
-              }}
-              style={{ pointerEvents: 'auto', touchAction: 'none' }}
-              className="kenney-button-circle group scale-90 md:scale-100 bg-kenney-yellow"
-              title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
-            >
-              {isFullscreen ? (
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-5 h-5 md:w-8 md:h-8 group-hover:scale-110 transition-transform">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 9V4.5M9 9H4.5M9 9L3 3m12 6V4.5M15 9h4.5M15 9l6-6M9 15v4.5M9 15H4.5M9 15l-6 6m12-6v4.5M15 15h4.5M15 15l6 6" />
-                </svg>
-              ) : (
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-5 h-5 md:w-8 md:h-8 group-hover:scale-110 transition-transform">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
-                </svg>
-              )}
-            </button>
+            {/* Fullscreen Toggle - Only in PLAYING/TUTORIAL phase */}
+            {phase !== GamePhase.THEME_SELECTION && (
+                <button 
+                  onTouchStart={(e) => {
+                    // Handle touch immediately and prevent mouse events
+                    e.preventDefault(); 
+                    toggleFullscreen(e);
+                  }}
+                  onClick={(e) => {
+                      // Only handle clicks if they are NOT from touch interactions
+                      // (preventDefault in touchStart should prevent this, but just in case)
+                      toggleFullscreen(e);
+                  }}
+                  style={{ pointerEvents: 'auto', touchAction: 'none' }}
+                  className="kenney-button-circle group scale-90 md:scale-100 bg-kenney-yellow"
+                  title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+                >
+                  {isFullscreen ? (
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-5 h-5 md:w-8 md:h-8 group-hover:scale-110 transition-transform">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 9V4.5M9 9H4.5M9 9L3 3m12 6V4.5M15 9h4.5M15 9l6-6M9 15v4.5M9 15H4.5M9 15l-6 6m12-6v4.5M15 15h4.5M15 15l6 6" />
+                    </svg>
+                  ) : (
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-5 h-5 md:w-8 md:h-8 group-hover:scale-110 transition-transform">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
+                    </svg>
+                  )}
+                </button>
+            )}
           </div>
       )}
 
-      {/* Fullscreen toggle for Main Menu specifically */}
-      {phase === GamePhase.MENU && (
-        <button 
-          onTouchStart={(e) => {
-            e.preventDefault();
-            toggleFullscreen(e);
-          }}
-          onClick={(e) => {
-              toggleFullscreen(e);
-          }}
-          style={{ pointerEvents: 'auto', touchAction: 'none' }}
-          className="fixed top-4 md:top-6 left-4 md:left-6 z-[999] kenney-button-circle group scale-90 md:scale-100 bg-kenney-yellow mobile-landscape-control"
-          title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
-        >
-          {isFullscreen ? (
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-5 h-5 md:w-8 md:h-8 group-hover:scale-110 transition-transform">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 9V4.5M9 9H4.5M9 9L3 3m12 6V4.5M15 9h4.5M15 9l6-6M9 15v4.5M9 15H4.5M9 15l-6 6m12-6v4.5M15 15h4.5M15 15l6 6" />
-            </svg>
-          ) : (
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-5 h-5 md:w-8 md:h-8 group-hover:scale-110 transition-transform">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
-            </svg>
-          )}
-        </button>
-      )}
+      {/* Fullscreen toggle for Main Menu specifically - REMOVED per user request */}
 
       {/* 4. Score HUD - REMOVED redundant fixed panel, now integrated above */}
 
@@ -1002,9 +1000,10 @@ export default function App() {
                         SELECT THEME
                     </h2>
                     <div className="w-full overflow-y-auto overflow-x-hidden pb-3 px-0.5 md:px-2 scrollbar-hide min-h-0 flex-1 will-change-transform">
-                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 md:gap-2.5 px-1 md:px-0 auto-rows-min pb-24">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 md:gap-2.5 px-1 md:px-0 auto-rows-min pb-32">
                             {themes.map((theme, index) => {
                                 const isSelected = selectedThemes.includes(theme.id as ThemeId);
+                                const selectionIndex = selectedThemes.indexOf(theme.id as ThemeId);
                                 return (
                                 <button
                                     key={theme.id}
@@ -1038,12 +1037,14 @@ export default function App() {
                                             ]
                                         }} />
                                         
-                                        {/* Checkmark Overlay for Selected */}
+                                        {/* Selection Order Number Overlay */}
                                         {isSelected && (
                                             <div className="absolute inset-0 flex items-center justify-center z-20 bg-kenney-green/20 backdrop-blur-[1px] rounded-xl">
-                                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-8 h-8 md:w-10 md:h-10 text-kenney-dark drop-shadow-lg animate-bounce-short">
-                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                                                </svg>
+                                                <div className="w-8 h-8 md:w-12 md:h-12 bg-kenney-green border-2 md:border-4 border-white rounded-full flex items-center justify-center shadow-lg animate-bounce-short">
+                                                    <span className="text-lg md:text-2xl font-black text-white leading-none">
+                                                        {selectionIndex + 1}
+                                                    </span>
+                                                </div>
                                             </div>
                                         )}
                                         
@@ -1069,8 +1070,8 @@ export default function App() {
                         </div>
                     </div>
                     
-                    {/* START BUTTON FIXED BOTTOM */}
-                    <div className="absolute bottom-6 left-0 right-0 flex justify-center px-4 pointer-events-none z-50">
+                    {/* START BUTTON FIXED BOTTOM - Adjusted for non-fullscreen layouts */}
+                    <div className="absolute bottom-10 sm:bottom-14 md:bottom-20 left-0 right-0 flex justify-center px-4 pointer-events-none z-50">
                          <button 
                             onClick={handleStartGame}
                             disabled={selectedThemes.length === 0}

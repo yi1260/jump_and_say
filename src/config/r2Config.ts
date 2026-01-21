@@ -5,7 +5,7 @@ export const getR2ImageUrl = (imagePath: string): string => {
 };
 
 export const getR2ThemesListUrl = (): string => {
-  return `${R2_BASE_URL}/themes-list.json`;
+  return '/themes/themes-list.json';
 };
 
 export const handleR2Error = (error: unknown, context: string): never => {

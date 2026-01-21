@@ -152,7 +152,8 @@ export class MainScene extends Phaser.Scene {
     this.themeWordPool = [];
     this.questionCounter = 0;
     this.totalQuestions = 0;
-    this.currentBgIndex = 0;
+    // Randomize background for each level/restart
+    this.currentBgIndex = Phaser.Math.Between(0, 6);
     this.wrongAttempts = 0;
 
     // 每次初始化或重启场景时，重置 React 层的结算状态
@@ -632,6 +633,11 @@ export class MainScene extends Phaser.Scene {
     // this.time.delayedCall(2000, () => {
     //   this.spawnQuestion();
     // });
+
+    // Sync initial background to React UI
+    if (this.onBackgroundUpdate) {
+        this.onBackgroundUpdate(this.currentBgIndex);
+    }
   }
 
   handleResize(gameSize: Phaser.Structs.Size) { 
@@ -918,15 +924,6 @@ export class MainScene extends Phaser.Scene {
 
     // 更新小蜜蜂抓着的文字
     this.updateBeeWord(this.currentQuestion.question);
-
-    // 每 3 个题目更换一次背景
-    if (this.questionCounter % 3 === 0) {
-      this.currentBgIndex = (this.currentBgIndex + 1) % 7;
-      console.log('Background update:', this.currentBgIndex);
-      if (this.onBackgroundUpdate) {
-        this.onBackgroundUpdate(this.currentBgIndex);
-      }
-    }
 
     // 清理旧的方块及其视觉容器
     this.blocks.children.iterate((b: any) => {

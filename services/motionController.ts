@@ -182,7 +182,7 @@ export class MotionController {
         }
       }
 
-      const loadCDN = window.__MEDIAPIPE_CDN__ || 'https://fastly.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/';
+      const loadCDN = window.__MEDIAPIPE_CDN__ || '/mediapipe/';
       log(1, 'INIT', 'Using CDN: ' + loadCDN);
 
       try {
