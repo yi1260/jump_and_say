@@ -272,15 +272,6 @@
           event.preventDefault();
         }
       });
-
-      // Clean up service workers
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.getRegistrations().then(function(registrations) {
-          for(let registration of registrations) {
-            registration.unregister();
-          }
-        });
-      }
     </script>
 </head>
   <body class="overflow-hidden m-0 p-0 font-sans">

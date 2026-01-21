@@ -29,11 +29,7 @@ export async function loadThemes(): Promise<Theme[]> {
     );
 
     cachedThemes = themesWithAvailability;
-    
-    // Start background preloading of theme images
-    // We start with the first few themes as they are most likely to be played
-    startBackgroundPreloading(themesWithAvailability);
-    
+
     return themesWithAvailability;
   } catch (error) {
     handleR2Error(error, 'Error loading themes');
@@ -45,7 +41,8 @@ export async function loadThemes(): Promise<Theme[]> {
  */
 let globalPreloadQueue: { url: string; themeId: string }[] = [];
 let isPreloadingActive = false;
-const MAX_CONCURRENT_DOWNLOADS = 4;
+let isHighPriorityLoading = false; // Flag to pause background preloading
+const MAX_CONCURRENT_DOWNLOADS = 6;
 let activeDownloads = 0;
 
 function startBackgroundPreloading(themes: Theme[]) {
@@ -60,8 +57,9 @@ function startBackgroundPreloading(themes: Theme[]) {
     
     if (theme.questions) {
       theme.questions.forEach(q => {
+        const imageName = q.image.replace(/\.(png|jpg|jpeg)$/i, '.webp');
         globalPreloadQueue.push({
-          url: getR2ImageUrl(q.image),
+          url: getR2ImageUrl(imageName),
           themeId: theme.id
         });
       });
@@ -69,7 +67,12 @@ function startBackgroundPreloading(themes: Theme[]) {
   });
 
   if (!isPreloadingActive) {
-    processPreloadQueue();
+    const start = () => processPreloadQueue();
+    if ('requestIdleCallback' in window) {
+      (window as any).requestIdleCallback(start);
+    } else {
+      setTimeout(start, 3000);
+    }
   }
 }
 
@@ -98,6 +101,13 @@ export function prioritizeThemeInQueue(themeId: string) {
 }
 
 function processPreloadQueue() {
+  if (isHighPriorityLoading) {
+    // Pause background loading if high priority loading is active
+    // We will resume when the high priority task finishes
+    isPreloadingActive = false;
+    return;
+  }
+
   if (globalPreloadQueue.length === 0) {
     isPreloadingActive = false;
     console.log('[Preloader] All background assets preloaded');
@@ -107,6 +117,12 @@ function processPreloadQueue() {
   isPreloadingActive = true;
 
   while (activeDownloads < MAX_CONCURRENT_DOWNLOADS && globalPreloadQueue.length > 0) {
+    // Double check flag inside loop
+    if (isHighPriorityLoading) {
+      isPreloadingActive = false;
+      return;
+    }
+
     const item = globalPreloadQueue.shift();
     if (item) {
       activeDownloads++;
@@ -118,14 +134,21 @@ function processPreloadQueue() {
   }
 }
 
-function preloadSingleImage(url: string): Promise<void> {
+function preloadSingleImage(url: string, retries = 0): Promise<void> {
   return new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => resolve();
     img.onerror = () => {
       // Silently fail for background preloads to avoid console spam
-      resolve(); 
+      // But retry once if it's a network error
+      if (retries < 1) {
+          setTimeout(() => {
+              preloadSingleImage(url, retries + 1).then(resolve);
+          }, 1000);
+      } else {
+          resolve(); 
+      }
     };
     img.src = url;
   });
@@ -147,52 +170,112 @@ export async function preloadThemeImages(themeId: string): Promise<void> {
     return;
   }
 
+  // PAUSE background preloading
+  isHighPriorityLoading = true;
+
   // Remove images for this theme from the background queue since we are loading them now
   // This prevents double-loading and prioritizes this theme
   const themeUrls = new Set(theme.questions.map(q => getR2ImageUrl(q.image)));
   globalPreloadQueue = globalPreloadQueue.filter(item => !themeUrls.has(item.url));
   
-  console.log(`[preloadThemeImages] Preloading ${theme.questions.length} images for theme: ${themeId}`);
+  console.log(`[preloadThemeImages] Preloading ${theme.questions.length} images for theme: ${themeId}. (Background active downloads: ${activeDownloads})`);
+  const startTime = performance.now();
+
+  // Use a batch processing approach to avoid overwhelming the browser/network
+  const BATCH_SIZE = 4;
+  const questions = theme.questions;
   
-  const loadPromises = theme.questions.map((q, index) => {
-    return new Promise<void>((resolve) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      
-      // Add timeout to prevent hanging
-      const timeout = setTimeout(() => {
-        console.warn(`[preloadThemeImages] Timeout loading: ${q.image} (${index + 1}/${theme.questions.length})`);
-        resolve();
-      }, 10000); // 10 second timeout per image
-      
-      img.onload = () => {
-        clearTimeout(timeout);
-        // Only log every 5 images or the last one to reduce noise
-        if ((index + 1) % 5 === 0 || (index + 1) === theme.questions.length) {
-          console.log(`[preloadThemeImages] Progress: ${index + 1}/${theme.questions.length}`);
-        }
-        resolve();
+  for (let i = 0; i < questions.length; i += BATCH_SIZE) {
+    const batch = questions.slice(i, i + BATCH_SIZE);
+    const batchStartTime = performance.now();
+    console.log(`[preloadThemeImages] Starting batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(questions.length / BATCH_SIZE)} (Items ${i + 1}-${Math.min(i + BATCH_SIZE, questions.length)})`);
+    
+    const batchPromises = batch.map((q, batchIndex) => {
+      const globalIndex = i + batchIndex;
+      const imgStartTime = performance.now();
+      const imageName = q.image.replace(/\.(png|jpg|jpeg)$/i, '.webp');
+      const imgUrl = getR2ImageUrl(imageName);
+
+      const loadWithRetry = (retriesLeft: number): Promise<void> => {
+        return new Promise<void>((resolve) => {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            
+            // Increase timeout to 15 seconds
+            const timeout = setTimeout(() => {
+              const duration = (performance.now() - imgStartTime).toFixed(2);
+              console.warn(`[preloadThemeImages] ❌ Timeout loading: ${q.image} (${globalIndex + 1}/${theme.questions.length}) - ${duration}ms. Retries left: ${retriesLeft}`);
+              
+              if (retriesLeft > 0) {
+                  console.log(`[preloadThemeImages] 🔄 Retrying: ${q.image}`);
+                  resolve(loadWithRetry(retriesLeft - 1));
+              } else {
+                  console.warn(`[preloadThemeImages] Timeout details: URL=${imgUrl}`);
+                  resolve();
+              }
+            }, 15000); 
+            
+            img.onload = () => {
+              clearTimeout(timeout);
+              const duration = (performance.now() - imgStartTime).toFixed(2);
+              
+              // Simple heuristic: if it loads extremely fast (< 50ms), it's likely from cache (memory or disk)
+              // Note: Service Worker cache hits might take slightly longer but still be fast
+              // Precise network vs cache detection for Images is limited without Performance API entries which might be restricted by CORS
+              const isFastLoad = parseFloat(duration) < 50;
+              const sourceLabel = isFastLoad ? '📦 CACHE (Likely)' : '🌐 CDN';
+              
+              console.log(`[preloadThemeImages] ✅ Loaded: ${q.image} (${globalIndex + 1}/${theme.questions.length}) - ${duration}ms [${sourceLabel}]`);
+              resolve();
+            };
+    
+            img.onerror = (e) => {
+              clearTimeout(timeout);
+              const duration = (performance.now() - imgStartTime).toFixed(2);
+              console.warn(`[preloadThemeImages] ❌ Failed to preload: ${q.image} - ${duration}ms`);
+              
+              if (retriesLeft > 0) {
+                  console.log(`[preloadThemeImages] 🔄 Retrying after error: ${q.image}`);
+                  setTimeout(() => {
+                      resolve(loadWithRetry(retriesLeft - 1));
+                  }, 500); // Wait a bit before retry
+              } else {
+                  console.warn(`[preloadThemeImages] Failure details: URL=${imgUrl}`, e);
+                  resolve();
+              }
+            };
+            
+            try {
+              console.log(`[preloadThemeImages] ⏳ Requesting: ${q.image} (${globalIndex + 1}/${theme.questions.length})`);
+              img.src = imgUrl;
+            } catch (err) {
+              console.warn(`[preloadThemeImages] Error setting image src:`, err);
+              resolve();
+            }
+          });
       };
-      img.onerror = () => {
-        clearTimeout(timeout);
-        console.warn(`[preloadThemeImages] Failed to preload: ${q.image}`);
-        resolve();
-      };
-      try {
-        img.src = getR2ImageUrl(q.image);
-      } catch (err) {
-        console.warn(`[preloadThemeImages] Error setting image src:`, err);
-        resolve();
-      }
+
+      return loadWithRetry(1); // Try once, then retry once (total 2 attempts)
     });
-  });
+
+    try {
+      // Wait for the current batch to finish before starting the next one
+      await Promise.allSettled(batchPromises);
+      const batchDuration = (performance.now() - batchStartTime).toFixed(2);
+      console.log(`[preloadThemeImages] Batch ${Math.floor(i / BATCH_SIZE) + 1} completed in ${batchDuration}ms`);
+    } catch (error) {
+      console.error(`[preloadThemeImages] Error processing batch starting at ${i}:`, error);
+    }
+  }
+
+  const totalDuration = (performance.now() - startTime).toFixed(2);
+  console.log(`[preloadThemeImages] Preloading completed for theme: ${themeId} in ${totalDuration}ms`);
   
-  try {
-    // Use Promise.allSettled instead of Promise.all to continue even if some fail
-    await Promise.allSettled(loadPromises);
-    console.log(`[preloadThemeImages] Preloading completed for theme: ${themeId}`);
-  } catch (error) {
-    console.error(`[preloadThemeImages] Error preloading images for ${themeId}:`, error);
+  // RESUME background preloading
+  isHighPriorityLoading = false;
+  // Restart queue processing if there are items left
+  if (globalPreloadQueue.length > 0) {
+      processPreloadQueue();
   }
 }
 

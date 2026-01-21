@@ -1,4 +1,3 @@
-import { getR2ImageUrl, getR2ThemesListUrl, handleR2Error } from '@/src/config/r2Config';
 import Phaser from 'phaser';
 import { prioritizeThemeInQueue } from '../../gameConfig';
 import { motionController } from '../../services/motionController';
@@ -41,7 +40,9 @@ export class MainScene extends Phaser.Scene {
   private score: number = 0;
   private themeScore: number = 0; // 当前主题获得的分数
   private currentQuestion: QuestionData | null = null;
-  private currentTheme: ThemeId = ''; // Default
+  private currentThemes: ThemeId[] = [];
+  private currentThemeIndex: number = 0;
+  private currentTheme: ThemeId = ''; 
   private themeData: Theme | null = null;
   private beeContainer?: Phaser.GameObjects.Container;
   private beeSprite?: Phaser.GameObjects.Sprite;
@@ -94,6 +95,7 @@ export class MainScene extends Phaser.Scene {
   private isGameOver: boolean = false;
   private imagesLoading: boolean = false;
   private imagesLoaded: boolean = false;
+  private hasPreloadedNext: boolean = false;
   private loadingPromise: Promise<void> | null = null;
 
   declare add: Phaser.GameObjects.GameObjectFactory;
@@ -109,20 +111,31 @@ export class MainScene extends Phaser.Scene {
   }
 
   init(data: {
-    onScoreUpdate: (s: number, total: number) => void;
-    onGameOver: () => void;
-    onGameRestart?: () => void;
-    onQuestionUpdate?: (q: string) => void;
-    onBackgroundUpdate?: (index: number) => void;
     theme: ThemeId;
     dpr?: number;
   }) {
-    this.onScoreUpdate = data.onScoreUpdate;
-    this.onGameOver = data.onGameOver;
-    this.onGameRestart = data.onGameRestart || null;
-    this.onQuestionUpdate = data.onQuestionUpdate || null;
-    this.onBackgroundUpdate = data.onBackgroundUpdate || null;
-    this.currentTheme = data.theme || '';
+    const callbacks = this.registry.get('callbacks') || {};
+    this.onScoreUpdate = callbacks.onScoreUpdate || null;
+    this.onGameOver = callbacks.onGameOver || null;
+    this.onGameRestart = callbacks.onGameRestart || null;
+    this.onQuestionUpdate = callbacks.onQuestionUpdate || null;
+    this.onBackgroundUpdate = callbacks.onBackgroundUpdate || null;
+
+    const initialThemes = this.registry.get('initialThemes');
+    const initialTheme = this.registry.get('initialTheme'); // Fallback
+
+    if (Array.isArray(initialThemes) && initialThemes.length > 0) {
+        this.currentThemes = initialThemes;
+    } else if (initialTheme) {
+        this.currentThemes = [initialTheme];
+    } else {
+        this.currentThemes = [];
+    }
+
+    this.currentTheme = data.theme || this.currentThemes[0] || '';
+    this.currentThemeIndex = this.currentThemes.indexOf(this.currentTheme);
+    if (this.currentThemeIndex === -1) this.currentThemeIndex = 0;
+
     this.score = 0;
     this.themeScore = 0;
     this.targetLaneIndex = 1;
@@ -133,6 +146,14 @@ export class MainScene extends Phaser.Scene {
     this.isGameOver = false;
     this.imagesLoading = false;  // 重置加载状态标志
     this.imagesLoaded = false;
+    this.hasPreloadedNext = false;
+    this.currentQuestion = null;
+    this.themeData = null;
+    this.themeWordPool = [];
+    this.questionCounter = 0;
+    this.totalQuestions = 0;
+    this.currentBgIndex = 0;
+    this.wrongAttempts = 0;
 
     // 每次初始化或重启场景时，重置 React 层的结算状态
     if (this.onGameRestart) {
@@ -140,39 +161,61 @@ export class MainScene extends Phaser.Scene {
     }
     this.dpr = data.dpr || 1;
     this.lastQuestionWord = '';
-    
-    // Load theme data from JSON
-    this.loadThemeData();
+    this.gameScale = this.scale?.height ? this.scale.height / 1080 : 1;
   }
 
-  private async loadThemeData() {
-    try {
-      const response = await fetch(getR2ThemesListUrl());
-      if (!response.ok) {
-        handleR2Error(new Error(`HTTP ${response.status}`), 'Failed to load themes list');
-      }
-      const themeList = await response.json();
-      const theme = themeList.themes.find((t: Theme) => t.id === this.currentTheme);
-      
-      if (!theme) {
-        handleR2Error(new Error(`Theme ${this.currentTheme} not found`), 'loadThemeData');
-      }
-      
-      this.themeData = theme;
-      
-      // Initialize word pool from questions
-      this.themeWordPool = this.themeData.questions.map(q => q.question.replace(/^[Tt]he\s+/i, '').replace(/\s+/g, '_').toUpperCase());
-      this.totalQuestions = this.themeWordPool.length;
-      Phaser.Utils.Array.Shuffle(this.themeWordPool);
-      
-      // 立即通知 UI 初始进度
-      if (this.onScoreUpdate) this.onScoreUpdate(this.score, this.totalQuestions);
-    } catch (error) {
-      handleR2Error(error, 'Error loading theme data');
-      this.themeData = null;
-      this.themeWordPool = [];
-      this.totalQuestions = 0;
+  private initThemeDataFromCache() {
+    const themeList = this.cache.json.get('themes_list');
+    const themes = themeList?.themes || [];
+    const theme = themes.find((t: Theme) => t.id === this.currentTheme);
+
+    if (!theme) {
+      // 降级方案：如果缓存中没有，尝试重新加载 (虽然理论上 PreloadScene 已经处理了)
+      console.warn(`[MainScene] Theme ${this.currentTheme} not found in cache. Attempting fallback fetch...`);
+      this.loadThemeDataFallback();
+      return;
     }
+
+    this.setupThemeData(theme);
+  }
+
+  private setupThemeData(theme: Theme) {
+    this.themeData = theme;
+    this.themeWordPool = this.themeData.questions.map(q =>
+      q.question.replace(/^[Tt]he\s+/i, '').replace(/\s+/g, '_').toUpperCase()
+    );
+    this.totalQuestions = this.themeWordPool.length;
+    Phaser.Utils.Array.Shuffle(this.themeWordPool);
+
+    if (this.onScoreUpdate) this.onScoreUpdate(this.score, this.totalQuestions);
+    
+    // 如果之前因为没有数据而无法生成题目，现在尝试生成
+    if (!this.currentQuestion) {
+        this.time.delayedCall(100, () => this.spawnQuestion());
+    }
+  }
+
+  private async loadThemeDataFallback() {
+      try {
+        // 动态引入避免循环依赖
+        const { getR2ThemesListUrl } = await import('@/src/config/r2Config');
+        const response = await fetch(getR2ThemesListUrl());
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        
+        const themeList = await response.json();
+        // 更新缓存供后续使用
+        this.cache.json.add('themes_list', themeList);
+        
+        const theme = themeList.themes.find((t: Theme) => t.id === this.currentTheme);
+        if (theme) {
+            console.log(`[MainScene] Fallback load successful for ${this.currentTheme}`);
+            this.setupThemeData(theme);
+        } else {
+            console.error(`[MainScene] Theme ${this.currentTheme} still not found after fallback`);
+        }
+      } catch (err) {
+          console.error('[MainScene] Fallback load failed:', err);
+      }
   }
 
   private dpr: number = 1;
@@ -224,6 +267,10 @@ export class MainScene extends Phaser.Scene {
   }
 
   preload() {
+    console.time('[MainScene] preload');
+    // 确保跨域加载图片时带上 Origin 头，否则 WebGL 渲染会因污染报错
+    this.load.crossOrigin = 'anonymous';
+    
     this.generateInternalTextures();
 
     // 加载进度日志与配置 (生产环境减少日志)
@@ -239,83 +286,6 @@ export class MainScene extends Phaser.Scene {
     this.load.on('loaderror', (file: any) => {
       if (isDev) console.error('Error loading:', file.src || file.key);
     });
-
-    // 加载音效资源 (同时提供 ogg 和 mp3 以确保 iOS 兼容性)
-    const soundBase = 'asserts/kenney/Sounds/';
-    this.load.audio('sfx_jump', [
-        `${soundBase}sfx_jump-high.mp3`,
-        `${soundBase}sfx_jump-high.ogg`
-    ]);
-    this.load.audio('sfx_success', [
-        `${soundBase}sfx_coin.mp3`,
-        `${soundBase}sfx_coin.ogg`
-    ]);
-    this.load.audio('sfx_failure', [
-        `${soundBase}sfx_disappear.mp3`,
-        `${soundBase}sfx_disappear.ogg`
-    ]);
-    this.load.audio('sfx_bump', [
-        `${soundBase}sfx_bump.mp3`,
-        `${soundBase}sfx_bump.ogg`
-    ]);
-
-    const kenneyBase = '/asserts/kenney/Vector/';
-    
-    const { width, height } = this.scale;
-    const baseWidth = 1920;
-    const baseHeight = 1080;
-    const minBaseWidth = 1280;
-    const minBaseHeight = 720;
-    const safeBaseWidth = Math.max(width, minBaseWidth);
-    const safeBaseHeight = Math.max(height, minBaseHeight);
-    const scaleFactor = Math.min(safeBaseWidth / baseWidth, safeBaseHeight / baseHeight);
-    const dprScale = this.dpr || window.devicePixelRatio || 1;
-    
-    // 高清晰度方案：大幅提高纹理加载尺寸，避免放大导致的模糊
-    // 奖励物品会放大到 2.2 倍，所以加载尺寸需要足够大
-    const targetRewardSize = Math.round(80 * this.gameScale * dprScale * 4);
-    const targetBeeSize = Math.round(100 * this.gameScale * dprScale * 2);
-    
-    const bgTextureWidth = Math.round(1024 * scaleFactor * dprScale);
-    const charTextureSize = Math.round(160 * this.gameScale * dprScale * 2);
-    const tileTextureSize = Math.round(160 * this.gameScale * dprScale * 2);
-    
-    this.load.svg('p1_stand', `${kenneyBase}Characters/character_pink_idle.svg`, { width: charTextureSize, height: charTextureSize });
-    this.load.svg('p1_jump', `${kenneyBase}Characters/character_pink_jump.svg`, { width: charTextureSize, height: charTextureSize });
-    this.load.svg('p1_walk_a', `${kenneyBase}Characters/character_pink_walk_a.svg`, { width: charTextureSize, height: charTextureSize });
-    this.load.svg('p1_walk_b', `${kenneyBase}Characters/character_pink_walk_b.svg`, { width: charTextureSize, height: charTextureSize });
-    
-    this.load.svg('tile_box', `${kenneyBase}Tiles/block_empty.svg`, { width: tileTextureSize, height: tileTextureSize });
-    // this.load.svg('sign_right', `${kenneyBase}Tiles/sign_right.svg`, { width: tileTextureSize, height: tileTextureSize });
-    // this.load.svg('sign_left', `${kenneyBase}Tiles/sign_left.svg`, { width: tileTextureSize, height: tileTextureSize });
-    
-    // 加载小蜜蜂素材
-    this.load.svg('bee_a', `${kenneyBase}Enemies/bee_a.svg`, { width: targetBeeSize, height: targetBeeSize });
-    this.load.svg('bee_b', `${kenneyBase}Enemies/bee_b.svg`, { width: targetBeeSize, height: targetBeeSize });
-    
-    this.load.svg('star_gold', `${kenneyBase}Tiles/star.svg`, { width: targetRewardSize, height: targetRewardSize });
-    // 加载惊喜奖励素材
-    this.load.svg('mushroom_red', `${kenneyBase}Tiles/mushroom_red.svg`, { width: targetRewardSize, height: targetRewardSize });
-    this.load.svg('mushroom_brown', `${kenneyBase}Tiles/mushroom_brown.svg`, { width: targetRewardSize, height: targetRewardSize });
-    this.load.svg('gem_blue', `${kenneyBase}Tiles/gem_blue.svg`, { width: targetRewardSize, height: targetRewardSize });
-    this.load.svg('gem_red', `${kenneyBase}Tiles/gem_red.svg`, { width: targetRewardSize, height: targetRewardSize });
-    this.load.svg('gem_green', `${kenneyBase}Tiles/gem_green.svg`, { width: targetRewardSize, height: targetRewardSize });
-    this.load.svg('gem_yellow', `${kenneyBase}Tiles/gem_yellow.svg`, { width: targetRewardSize, height: targetRewardSize });
-    this.load.svg('grass', `${kenneyBase}Tiles/grass.svg`, { width: targetRewardSize, height: targetRewardSize });
-    this.load.svg('grass_purple', `${kenneyBase}Tiles/grass_purple.svg`, { width: targetRewardSize, height: targetRewardSize });
-    
-    this.load.svg('icon_retry', `${kenneyBase}Tiles/replay_256dp.svg`, { width: tileTextureSize, height: tileTextureSize });
-    this.load.svg('icon_next', `${kenneyBase}Tiles/keyboard_double_arrow_right_256dp.svg`, { width: tileTextureSize, height: tileTextureSize });
-    
-    // particle_wood: 使用内部生成的纹理代替缺失的 SVG
-    this.generateWoodParticleTexture();
-
-    // Load theme images from themes-list.json
-    try {
-      this.load.json('themes_list', getR2ThemesListUrl());
-    } catch (error) {
-      handleR2Error(error, 'Failed to load themes-list.json');
-    }
   }
 
   generateInternalTextures() {
@@ -337,7 +307,7 @@ export class MainScene extends Phaser.Scene {
     s.destroy();
 
     // 3. Player
-    const basePlayerSize = 120; // 调大基础尺寸
+    const basePlayerSize = 180; // 调大基础尺寸，匹配 visualPlayerSize
     const playerSize = Math.round(basePlayerSize * this.gameScale * this.dpr);
     const bot = this.make.graphics({x: 0, y: 0});
     bot.fillStyle(C_AMBER, 0.3);
@@ -354,7 +324,7 @@ export class MainScene extends Phaser.Scene {
     bot.destroy();
 
     // 4. Bubble Texture (Optimized)
-    const bSize = 256;
+    const bSize = 320;
     const bubble = this.make.graphics({x: 0, y: 0});
     bubble.fillStyle(C_GOLD, 0.3);
     bubble.fillCircle(bSize/2, bSize/2, bSize/2 - 2);
@@ -404,6 +374,28 @@ export class MainScene extends Phaser.Scene {
     g.destroy();
   }
 
+  private preloadNonCriticalAssets() {
+    const kenneyBase = '/asserts/kenney/Vector/';
+    const dprScale = Math.min(this.dpr || window.devicePixelRatio || 1, 2);
+    const safeRewardSize = Math.min(512, Math.max(192, Math.round(220 * this.gameScale * dprScale)));
+    const safeIconSize = Math.min(512, Math.max(192, Math.round(200 * this.gameScale * dprScale)));
+
+    if (!this.textures.exists('star_gold')) {
+      this.load.svg('star_gold', `${kenneyBase}Tiles/star.svg`, { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('mushroom_red', `${kenneyBase}Tiles/mushroom_red.svg`, { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('mushroom_brown', `${kenneyBase}Tiles/mushroom_brown.svg`, { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('gem_blue', `${kenneyBase}Tiles/gem_blue.svg`, { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('gem_red', `${kenneyBase}Tiles/gem_red.svg`, { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('gem_green', `${kenneyBase}Tiles/gem_green.svg`, { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('gem_yellow', `${kenneyBase}Tiles/gem_yellow.svg`, { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('grass', `${kenneyBase}Tiles/grass.svg`, { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('grass_purple', `${kenneyBase}Tiles/grass_purple.svg`, { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('icon_retry', `${kenneyBase}Tiles/replay_256dp.svg`, { width: safeIconSize, height: safeIconSize });
+      this.load.svg('icon_next', `${kenneyBase}Tiles/keyboard_double_arrow_right_256dp.svg`, { width: safeIconSize, height: safeIconSize });
+      this.load.start();
+    }
+  }
+
   private async loadThemeImages(themeId?: string) {
     const targetThemeId = themeId || this.currentTheme;
     const isCurrentTheme = targetThemeId === this.currentTheme;
@@ -432,75 +424,45 @@ export class MainScene extends Phaser.Scene {
       return Promise.resolve();
     }
     
-    // 使用 Phaser 的加载器并行加载所有图片，这样可以更好地处理 Mipmap 和过滤
-    let hasNewImages = false;
-    targetTheme.questions.forEach((q: any) => {
-      try {
-        // Force .webp extension for CDN images
-        const imageName = q.image.replace(/\.(png|jpg|jpeg)$/i, '.webp');
-        const imagePath = getR2ImageUrl(imageName);
+    // --- Load Theme Assets ---
+    // NO-OP: All theme assets are now guaranteed to be loaded by PreloadScene
+    // We just check if they are missing as a safety net, but we don't block
+    
+    // Check if all textures are already in Phaser's cache
+    const missingQuestions = targetTheme.questions.filter((q: any) => {
         const key = `theme_${targetThemeId}_${q.image.replace(/\.(png|jpg|jpeg|webp)$/i, '')}`;
-        
-        if (!this.textures.exists(key)) {
-          this.load.image(key, imagePath);
-          hasNewImages = true;
-          console.log(`[loadThemeImages] Loading: ${key}`);
-        }
-      } catch (err) {
-        console.warn(`[loadThemeImages] Error processing image ${q.image}:`, err);
-      }
+        return !this.textures.exists(key);
     });
 
-    if (hasNewImages) {
-      const promise = new Promise<void>((resolve) => {
-        let loadedCount = 0;
-        const totalCount = targetTheme.questions.length;
-        
-        this.load.on('filecomplete', (key: string) => {
-          if (key.startsWith(`theme_${targetThemeId}_`)) {
-            loadedCount++;
-            if (isCurrentTheme) {
-              console.log(`[loadThemeImages] Progress: ${loadedCount}/${totalCount}`);
-            }
-          }
-        });
-        
-        this.load.once('complete', () => {
-          console.log(`[loadThemeImages] Complete: ${loadedCount}/${totalCount} images loaded`);
-          // 加载完成后，确保所有新加载的纹理都使用线性过滤
-          targetTheme.questions.forEach((q: any) => {
+    if (missingQuestions.length > 0) {
+        console.warn(`[MainScene] Missing ${missingQuestions.length} textures for ${targetThemeId}, loading fallback...`);
+        const { getR2ImageUrl } = await import('@/src/config/r2Config');
+        missingQuestions.forEach((q: any) => {
+            const imageName = q.image.replace(/\.(png|jpg|jpeg)$/i, '.webp');
+            const imagePath = getR2ImageUrl(imageName);
             const key = `theme_${targetThemeId}_${q.image.replace(/\.(png|jpg|jpeg|webp)$/i, '')}`;
-            if (this.textures.exists(key)) {
-              this.textures.get(key).setFilter(Phaser.Textures.FilterMode.LINEAR);
+            if (!this.textures.exists(key)) {
+                this.load.image(key, imagePath);
             }
-          });
-          if (isCurrentTheme) {
-            this.imagesLoaded = true;
-            this.imagesLoading = false;
-            this.loadingPromise = null;
-          }
-          resolve();
         });
-        this.load.once('loaderror', (file: any) => {
-          console.warn(`[loadThemeImages] Error loading some images for theme: ${targetThemeId}`);
-          if (isCurrentTheme) {
-            this.imagesLoading = false;
-            this.loadingPromise = null;
-          }
-          // 即使有错误也继续，防止卡死
-          resolve();
-        });
-        this.load.start();
-      });
 
-      if (isCurrentTheme) {
-        this.imagesLoading = true;
-        this.loadingPromise = promise;
-      }
-      return promise;
+        if (isCurrentTheme) {
+          this.imagesLoading = true;
+        }
+
+        return new Promise<void>((resolve) => {
+            this.load.once('complete', () => {
+                if (isCurrentTheme) {
+                  this.imagesLoading = false;
+                  this.imagesLoaded = true;
+                  this.loadingPromise = null;
+                }
+                resolve();
+            });
+            this.load.start();
+        });
     }
 
-    console.log(`[loadThemeImages] All images for theme ${targetThemeId} already loaded!`);
     if (isCurrentTheme) {
       this.imagesLoading = false;
       this.imagesLoaded = true;
@@ -514,35 +476,41 @@ export class MainScene extends Phaser.Scene {
    */
   private async preloadNextTheme() {
     try {
-      const themesList = this.cache.json.get('themes_list');
-      if (!themesList) return;
+      let nextThemeId = '';
       
-      const themes = themesList.themes || [];
-      const currentIndex = themes.findIndex((t: Theme) => t.id === this.currentTheme);
-      if (currentIndex === -1) return;
-      
-      const nextIndex = (currentIndex + 1) % themes.length;
-      const nextThemeId = themes[nextIndex].id;
+      if (this.currentThemes.length > 0) {
+        const nextIndex = (this.currentThemeIndex + 1) % this.currentThemes.length;
+        nextThemeId = this.currentThemes[nextIndex];
+      } else {
+         const themesList = this.cache.json.get('themes_list');
+         if (!themesList) return;
+         const themes = themesList.themes || [];
+         const currentIndex = themes.findIndex((t: Theme) => t.id === this.currentTheme);
+         if (currentIndex === -1) return;
+         const nextIndex = (currentIndex + 1) % themes.length;
+         nextThemeId = themes[nextIndex].id;
+      }
       
       console.log(`[preloadNextTheme] Starting background preload for: ${nextThemeId}`);
       
       // Prioritize this theme in the global queue (browser cache warmup)
       prioritizeThemeInQueue(nextThemeId);
-
-      // 使用 requestIdleCallback 或 setTimeout 降低对当前游戏的性能影响
-      const preloadFn = () => this.loadThemeImages(nextThemeId);
-      
-      if ('requestIdleCallback' in window) {
-        (window as any).requestIdleCallback(preloadFn);
-      } else {
-        setTimeout(preloadFn, 2000);
-      }
     } catch (err) {
       console.warn('[preloadNextTheme] Error:', err);
     }
   }
 
   create() {
+    console.timeEnd('[MainScene] preload');
+    this.initThemeDataFromCache();
+
+    const startBgLoad = () => this.preloadNonCriticalAssets();
+    if ('requestIdleCallback' in window) {
+      (window as any).requestIdleCallback(startBgLoad);
+    } else {
+      setTimeout(startBgLoad, 0);
+    }
+
     // 开始异步加载主题图片
     this.loadThemeImages();
 
@@ -550,6 +518,12 @@ export class MainScene extends Phaser.Scene {
     this.textures.getTextureKeys().forEach(key => {
         this.textures.get(key).setFilter(Phaser.Textures.FilterMode.LINEAR);
     });
+
+    // 启用 FXAA 后处理管线，显著减少边缘锯齿
+    if (this.renderer instanceof Phaser.Renderer.WebGL.WebGLRenderer) {
+        // @ts-ignore - FXAAPipeline is available in Phaser 3.80+ but might be missing in types
+        this.cameras.main.setPostPipeline(Phaser.Renderer.WebGL.Pipelines.FXAAPipeline);
+    }
 
     const { width, height } = this.scale;
     this.recalcLayout(width, height);
@@ -654,10 +628,10 @@ export class MainScene extends Phaser.Scene {
         emitting: false
     });
 
-    // 增加初始等待时间，让幼儿观察一下场景
-    this.time.delayedCall(2000, () => {
-      this.spawnQuestion();
-    });
+    // 移除重复的 delayedCall，统一由 setupThemeData 触发
+    // this.time.delayedCall(2000, () => {
+    //   this.spawnQuestion();
+    // });
   }
 
   handleResize(gameSize: Phaser.Structs.Size) { 
@@ -919,8 +893,11 @@ export class MainScene extends Phaser.Scene {
       console.log('[spawnQuestion] Waiting for theme images to load...');
       await this.loadThemeImages();
       console.log('[spawnQuestion] Theme images ready, proceeding with question spawn');
-      
-      // 后台预加载下一个主题
+    }
+    
+    // 确保下一关预加载逻辑只执行一次
+    if (!this.hasPreloadedNext) {
+      this.hasPreloadedNext = true;
       this.preloadNextTheme();
     }
     
@@ -951,6 +928,14 @@ export class MainScene extends Phaser.Scene {
       }
     }
 
+    // 清理旧的方块及其视觉容器
+    this.blocks.children.iterate((b: any) => {
+        const visuals = b.getData('visuals');
+        if (visuals) {
+            visuals.destroy();
+        }
+        return true;
+    });
     this.blocks.clear(true, true);
 
     // 如果小蜜蜂容器已经存在但被销毁了（比如场景重启），需要重置引用
@@ -1298,6 +1283,14 @@ export class MainScene extends Phaser.Scene {
 
         this.physics.add.overlap(this.player, block, () => {
             if (this.isInteractionActive && block.getData('canHit') && this.player.body!.velocity.y < 0) {
+                // Add recoil logic to prevent passing through
+                const recoilForce = 400;
+                this.player.setVelocityY(recoilForce);
+                // Correct position
+                if (this.player.body) {
+                   this.player.y = block.y + (block.body.height / 2) + this.player.body.height;
+                }
+
                 this.handleOptionInteraction(opt.id, block, container);
             }
         });
@@ -1344,27 +1337,19 @@ export class MainScene extends Phaser.Scene {
         this.cameras.main.once('camerafadeoutcomplete', async () => {
             let nextTheme = this.currentTheme;
             if (id === 'next') {
-                try {
-                    const response = await fetch('/themes/themes-list.json');
-                    if (response.ok) {
-                        const themeList = await response.json();
-                        const themes = themeList.themes || [];
-                        const currentIndex = themes.findIndex((t: Theme) => t.id === this.currentTheme);
-                        const nextIndex = (currentIndex + 1) % themes.length;
-                        nextTheme = themes[nextIndex].id;
-                    }
-                } catch (error) {
-                    console.error('Error loading themes list:', error);
+                if (this.currentThemes.length > 0) {
+                    const nextIndex = (this.currentThemeIndex + 1) % this.currentThemes.length;
+                    nextTheme = this.currentThemes[nextIndex];
+                } else {
+                    const themeList = this.cache.json.get('themes_list');
+                    const themes = themeList?.themes || [];
+                    const currentIndex = themes.findIndex((t: Theme) => t.id === this.currentTheme);
+                    const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % themes.length : 0;
+                    nextTheme = themes[nextIndex]?.id || this.currentTheme;
                 }
             }
 
-            this.scene.restart({ 
-                onScoreUpdate: this.onScoreUpdate, 
-                onGameOver: this.onGameOver, 
-                onGameRestart: this.onGameRestart,
-                onQuestionUpdate: this.onQuestionUpdate,
-                theme: nextTheme
-            });
+            this.scene.start('PreloadScene', { theme: nextTheme });
         });
     });
   }

@@ -82,17 +82,17 @@ define(['./workbox-ca84f546'], (function (workbox) { 'use strict';
     "revision": "3ca0b8505b4bec776b69afdba2768812"
   }, {
     "url": "index.html",
-    "revision": "0.sp6nbg0hct8"
+    "revision": "0.3nrpgofqfdc"
   }], {});
   workbox.cleanupOutdatedCaches();
   workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("index.html"), {
     allowlist: [/^\/$/]
   }));
-  workbox.registerRoute(/^https:\/\/cdn\.maskmysheet\.com\/raz_aa\/.*\.(png|jpg|jpeg|svg|json)/, new workbox.CacheFirst({
-    "cacheName": "raz-cdn-cache",
+  workbox.registerRoute(/^https:\/\/cdn\.maskmysheet\.com\/raz_aa\/.*/i, new workbox.CacheFirst({
+    "cacheName": "raz-aa-cdn-cache",
     plugins: [new workbox.ExpirationPlugin({
-      maxEntries: 500,
-      maxAgeSeconds: 2592000
+      maxEntries: 1000,
+      maxAgeSeconds: 31536000
     }), new workbox.CacheableResponsePlugin({
       statuses: [0, 200]
     })]

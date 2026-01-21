@@ -370,7 +370,7 @@ export class MotionController {
 
     // Reset neutralBodyX to 0.5 (center) on tracking loss to clear bad calibration
     if (this.consecutiveMissedDetections >= this.maxMissedFrames) {
-      log(2, 'TRACK', `Tracking lost for ${this.maxMissedFrames} frames (${reason}), gradual reset`);
+      // log(2, 'TRACK', `Tracking lost for ${this.maxMissedFrames} frames (${reason}), gradual reset`);
 
       const gradualReturnRate = 0.02;
       this.lastNoseXForGradual = this.lastNoseXForGradual * (1 - gradualReturnRate) + 0.5 * gradualReturnRate;

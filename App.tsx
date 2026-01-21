@@ -23,7 +23,7 @@ export enum GamePhase {
 export default function App() {
   const [score, setScore] = useState(0);
   const [totalQuestions, setTotalQuestions] = useState(0);
-  const [selectedTheme, setSelectedTheme] = useState<ThemeId>('');
+  const [selectedThemes, setSelectedThemes] = useState<ThemeId[]>([]);
   const [isPortrait, setIsPortrait] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showCompletion, setShowCompletion] = useState(false);
@@ -503,8 +503,19 @@ export default function App() {
     setPhase(GamePhase.MENU);
   };
 
-  const handleThemeSelect = async (theme: ThemeId) => {
-    setSelectedTheme(theme);
+  const handleThemeSelect = (themeId: ThemeId) => {
+    setSelectedThemes(prev => {
+      if (prev.includes(themeId)) {
+        return prev.filter(id => id !== themeId);
+      } else {
+        return [...prev, themeId];
+      }
+    });
+  };
+
+  const handleStartGame = async () => {
+    if (selectedThemes.length === 0) return;
+
     setBgIndex(0);
     setThemeImagesLoaded(false); // Reset when selecting a new theme
     
@@ -513,7 +524,7 @@ export default function App() {
     setInitStatus('Loading theme images...');
     
     // Preload the selected theme's images in parallel
-    const preloadPromise = preloadThemeImages(theme).then(() => {
+    const preloadPromise = Promise.all(selectedThemes.map(id => preloadThemeImages(id))).then(() => {
       setInitStatus('Images loaded!');
       setThemeImagesLoaded(true);
     }).catch(error => {
@@ -937,7 +948,8 @@ export default function App() {
               onGameOver={handleGameOver}
               onGameRestart={handleGameRestart}
               onBackgroundUpdate={setBgIndex}
-              theme={selectedTheme}
+              // @ts-ignore
+              themes={selectedThemes}
             />
           </div>
         </>
@@ -985,20 +997,24 @@ export default function App() {
 
             {/* THEME SELECTION */}
             {phase === GamePhase.THEME_SELECTION && (
-                <div className="text-center w-full max-w-[98vw] lg:max-w-[95vw] px-2 md:px-4 flex flex-col items-center justify-center h-full max-h-screen py-2 md:py-4 gap-2 md:gap-3 overflow-hidden">
+                <div className="text-center w-full max-w-[98vw] lg:max-w-[95vw] px-2 md:px-4 flex flex-col items-center justify-center h-full max-h-screen py-2 md:py-4 gap-2 md:gap-3 overflow-hidden relative">
                     <h2 className="text-lg sm:text-2xl md:text-4xl lg:text-5xl font-black text-white mb-1 md:mb-2 tracking-wide uppercase drop-shadow-[0_4px_0_#333333] italic shrink-0 mobile-landscape-title">
                         SELECT THEME
                     </h2>
-                    <div className="w-full overflow-y-auto pb-3 px-0.5 md:px-2 scrollbar-hide min-h-0 max-h-[calc(100vh-110px)] md:max-h-[calc(100vh-140px)] will-change-transform">
-                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 md:gap-2.5 px-1 md:px-0 auto-rows-min">
-                            {themes.map((theme) => (
+                    <div className="w-full overflow-y-auto overflow-x-hidden pb-3 px-0.5 md:px-2 scrollbar-hide min-h-0 flex-1 will-change-transform">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 md:gap-2.5 px-1 md:px-0 auto-rows-min pb-24">
+                            {themes.map((theme, index) => {
+                                const isSelected = selectedThemes.includes(theme.id as ThemeId);
+                                return (
                                 <button
                                     key={theme.id}
                                     onClick={() => theme.isAvailable !== false && handleThemeSelect(theme.id as ThemeId)}
                                     className={`group relative overflow-hidden rounded-xl transition-all duration-200 will-change-transform ${
                                         theme.isAvailable === false 
                                           ? 'opacity-35 grayscale cursor-not-allowed' 
-                                          : 'hover:scale-110 hover:shadow-xl active:scale-95'
+                                          : isSelected 
+                                            ? 'ring-4 ring-kenney-green scale-95 opacity-100 shadow-inner'
+                                            : 'hover:scale-105 hover:shadow-xl active:scale-95'
                                     }`}
                                     disabled={theme.isAvailable === false}
                                     title={theme.name}
@@ -1008,7 +1024,7 @@ export default function App() {
                                     }}
                                 >
                                     {/* Theme Card with soft color - shorter */}
-                                    <div className="relative w-full h-20 sm:h-24 md:h-28 lg:h-32 bg-white p-1.5 md:p-2 flex flex-col items-center justify-center border-2 md:border-3 border-kenney-dark rounded-xl shadow-lg group-hover:shadow-2xl transition-all will-change-transform">
+                                    <div className={`relative w-full h-16 sm:h-20 md:h-24 lg:h-28 bg-white p-1.5 md:p-2 flex flex-col items-center justify-center border-2 md:border-3 border-kenney-dark rounded-xl shadow-lg transition-all will-change-transform ${isSelected ? 'bg-gray-100' : 'group-hover:shadow-2xl'}`}>
                                         {/* Cute dots pattern background */}
                                         <div className="absolute inset-0 opacity-5 pointer-events-none rounded-xl" style={{
                                             backgroundImage: 'radial-gradient(circle, #333333 1px, transparent 1px)',
@@ -1018,9 +1034,18 @@ export default function App() {
                                         {/* Soft colored background circle */}
                                         <div className="absolute inset-1 rounded-lg opacity-15 pointer-events-none" style={{
                                             background: ['#4c99ff', '#77b039', '#ff5c5c', '#ffcc00', '#a67c52'][
-                                                theme.id.charCodeAt(0) % 5
+                                                index % 5
                                             ]
                                         }} />
+                                        
+                                        {/* Checkmark Overlay for Selected */}
+                                        {isSelected && (
+                                            <div className="absolute inset-0 flex items-center justify-center z-20 bg-kenney-green/20 backdrop-blur-[1px] rounded-xl">
+                                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-8 h-8 md:w-10 md:h-10 text-kenney-dark drop-shadow-lg animate-bounce-short">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                                                </svg>
+                                            </div>
+                                        )}
                                         
                                         {/* Content - centered */}
                                         <div className="relative z-10 w-full h-full flex flex-col items-center justify-center px-0.5">
@@ -1040,84 +1065,81 @@ export default function App() {
                                         </div>
                                     ) : null}
                                 </button>
-                            ))}
+                            )})}
                         </div>
                     </div>
-                </div>
-            )}
-
-            {/* LOADING / CALIBRATING (SILENT STATUS) */}
-            {!motionController.isStarted && phase === GamePhase.TUTORIAL && (
-                <div className="fixed bottom-10 left-1/2 transform -translate-x-1/2 z-[110] kenney-panel px-6 py-2 flex items-center gap-3 bg-white/90 backdrop-blur-sm scale-75 md:scale-100">
-                    <div className="w-5 h-5 border-4 border-kenney-blue border-t-transparent rounded-full animate-spin"></div>
-                    <p className="text-sm font-black text-kenney-dark uppercase tracking-widest animate-pulse">
-                        {initStatus}
-                    </p>
+                    
+                    {/* START BUTTON FIXED BOTTOM */}
+                    <div className="absolute bottom-6 left-0 right-0 flex justify-center px-4 pointer-events-none z-50">
+                         <button 
+                            onClick={handleStartGame}
+                            disabled={selectedThemes.length === 0}
+                            className={`pointer-events-auto kenney-button kenney-button-handdrawn px-8 py-3 text-xl md:text-2xl shadow-2xl transition-all transform duration-300 ${selectedThemes.length > 0 ? 'scale-100 opacity-100 translate-y-0' : 'scale-50 opacity-0 translate-y-10'}`}
+                        >
+                            START GAME ({selectedThemes.length})
+                        </button>
+                    </div>
                 </div>
             )}
 
             {/* TUTORIAL */}
             {phase === GamePhase.TUTORIAL && (
-                <div className="text-center w-full max-w-5xl px-4 md:px-8 flex flex-col items-center h-full max-h-screen py-[2vh] md:py-[4vh] gap-[2vh] md:gap-[4vh] overflow-hidden">
-                    {/* Loading Progress Bar for Theme Images */}
-                    {initStatus.includes('Loading') && (
-                        <div className="fixed top-[15vh] left-1/2 transform -translate-x-1/2 z-[110] kenney-panel px-6 py-3 flex flex-col items-center gap-2 bg-white/95 backdrop-blur-sm scale-75 md:scale-100">
-                            <div className="w-6 h-6 border-4 border-kenney-blue border-t-transparent rounded-full animate-spin"></div>
-                            <p className="text-sm font-black text-kenney-dark uppercase tracking-widest animate-pulse">
-                                {initStatus}
-                            </p>
-                        </div>
-                    )}
+                <div className="text-center w-full max-w-5xl px-4 md:px-8 flex flex-col items-center h-full max-h-screen pt-[8vh] md:pt-[12vh] gap-[3vh] md:gap-[5vh] overflow-hidden">
                     
-                    <h2 className="text-[4vw] sm:text-[5vw] md:text-[6vw] font-normal text-white mb-[1vh] italic tracking-tight uppercase drop-shadow-[0_4px_0_#333333] md:drop-shadow-[0_6px_0_#333333] rotate-[-1deg] shrink-0 mobile-landscape-title landscape-compact-title">
+                    <h2 className="text-[4vw] sm:text-[5vw] md:text-[6vw] font-normal text-white italic tracking-tight uppercase drop-shadow-[0_4px_0_#333333] md:drop-shadow-[0_6px_0_#333333] rotate-[-1deg] shrink-0 mobile-landscape-title landscape-compact-title leading-none">
                         HOW TO PLAY
                     </h2>
                     
-                    <div className="w-full flex-1 flex flex-col items-center justify-center min-h-0 gap-[2vh] md:gap-[4vh]">
-                        <div className="grid grid-cols-2 gap-[2vw] md:gap-[4vw] w-full max-w-4xl min-h-0 mobile-landscape-tutorial-grid">
-                            <div className="kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card">
-                                <div className="flex-1 flex items-center justify-center min-h-0">
-                                    <img src="/asserts/kenney/Vector/Characters/character_pink_walk_a.svg" className="w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce-horizontal-large mobile-landscape-card-img landscape-compact-img" alt="" />
+                    <div className="w-full flex-1 flex flex-col items-center justify-start min-h-0 gap-[3vh] md:gap-[5vh]">
+                        <div className="grid grid-cols-2 gap-[3vw] md:gap-[5vw] w-full max-w-4xl min-h-0 mobile-landscape-tutorial-grid">
+                            <div className="kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
+                                <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-4">
+                                    <img src="/asserts/kenney/Vector/Characters/character_pink_walk_a.svg" className="w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce-horizontal-large mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
                                 </div>
-                                <div className="shrink-0 flex flex-col items-center">
-                                    <h3 className="text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark uppercase tracking-tighter italic mobile-landscape-card-text">MOVE</h3>
-                                    <p className="hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.5vw] md:text-[2vw] uppercase tracking-tight">Tilt your body</p>
+                                <div className="shrink-0 flex flex-col items-center gap-1">
+                                    <h3 className="text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark uppercase tracking-tighter italic mobile-landscape-card-text drop-shadow-sm">MOVE</h3>
+                                    <p className="hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">Tilt your body</p>
                                 </div>
                             </div>
 
-                            <div className="kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card">
-                                <div className="flex-1 flex items-center justify-center min-h-0">
-                                    <img src="/asserts/kenney/Vector/Characters/character_pink_jump.svg" className="w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce mobile-landscape-card-img landscape-compact-img" alt="" />
+                            <div className="kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
+                                <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-4">
+                                    <img src="/asserts/kenney/Vector/Characters/character_pink_jump.svg" className="w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
                                 </div>
-                                <div className="shrink-0 flex flex-col items-center">
-                                    <h3 className="text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark uppercase tracking-tighter italic mobile-landscape-card-text">JUMP</h3>
-                                    <p className="hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.5vw] md:text-[2vw] uppercase tracking-tight">Jump to hit blocks</p>
+                                <div className="shrink-0 flex flex-col items-center gap-1">
+                                    <h3 className="text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark uppercase tracking-tighter italic mobile-landscape-card-text drop-shadow-sm">JUMP</h3>
+                                    <p className="hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">Jump to hit blocks</p>
                                 </div>
                             </div>
                         </div>
 
-                        <button 
-                            onClick={() => {
-                                setBgIndex(0);
-                                setHasShownEmoji(true);
-                                // Force fullscreen again when entering gameplay
-                                enterFullscreenAndLockOrientation();
-                                setPhase(GamePhase.PLAYING);
-                            }}
-                            disabled={!motionController.isStarted || !themeImagesLoaded}
-                            className={`kenney-button kenney-button-handdrawn px-[4vw] sm:px-[6vw] md:px-[8vw] py-[2vh] sm:py-[2.5vh] md:py-[3vh] text-[3vw] sm:text-[4vw] md:text-[5vw] hover:scale-110 transition-transform shadow-2xl shrink-0 mobile-landscape-button landscape-compact-button ${(!motionController.isStarted || !themeImagesLoaded) ? 'opacity-50 grayscale cursor-not-allowed' : ''}`}>
-                            {(motionController.isStarted && themeImagesLoaded) ? 'GO!' : 'LOADING...'}
-                        </button>
+                        <div className="flex flex-col items-center gap-2">
+                            <button 
+                                onClick={() => {
+                                    setBgIndex(0);
+                                    setHasShownEmoji(true);
+                                    // Force fullscreen again when entering gameplay
+                                    enterFullscreenAndLockOrientation();
+                                    setPhase(GamePhase.PLAYING);
+                                }}
+                                disabled={!motionController.isStarted || !themeImagesLoaded}
+                                className={`kenney-button kenney-button-handdrawn px-8 sm:px-16 md:px-24 py-3 sm:py-5 md:py-6 hover:scale-105 active:scale-95 transition-all shadow-2xl shrink-0 mobile-landscape-button landscape-compact-button flex items-center justify-center gap-3 md:gap-4 min-w-[160px] md:min-w-[240px] ${(!motionController.isStarted || !themeImagesLoaded) ? 'opacity-100 bg-gray-400 border-gray-600 cursor-wait' : 'bg-kenney-green border-kenney-dark'}`}>
+                                {(motionController.isStarted && themeImagesLoaded) ? (
+                                    <>
+                                        <span className="drop-shadow-md text-2xl sm:text-4xl md:text-5xl font-black leading-none pb-1">GO!</span>
+                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-6 h-6 sm:w-8 sm:h-8 md:w-10 md:h-10 animate-pulse filter drop-shadow-md">
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+                                        </svg>
+                                    </>
+                                ) : (
+                                    <>
+                                        <div className="w-5 h-5 sm:w-6 sm:h-6 md:w-8 md:h-8 border-[3px] md:border-[4px] border-white/30 border-t-white rounded-full animate-spin"></div>
+                                        <span className="text-base sm:text-xl md:text-2xl font-black tracking-widest leading-none">LOADING...</span>
+                                    </>
+                                )}
+                            </button>
+                        </div>
                     </div>
-                    
-                    {!motionController.isStarted && (
-                        <button 
-                            onClick={() => window.location.reload()}
-                            className="mt-[2vh] text-kenney-red font-black uppercase text-[2vw] md:text-[3vw] hover:underline flex items-center gap-[1vw] shrink-0">
-                            <img src="/asserts/kenney/Vector/Tiles/block_exclamation.svg" className="w-[2vw] h-[2vw] md:w-[3vw] md:h-[3vw]" alt="" />
-                            Stuck? Reload
-                        </button>
-                    )}
                 </div>
             )}
 
