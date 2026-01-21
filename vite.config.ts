@@ -18,6 +18,17 @@ export default defineConfig(({ mode }) => {
           },
         },
       },
+      build: {
+        chunkSizeWarningLimit: 2000,
+        rollupOptions: {
+          output: {
+            manualChunks: {
+              'phaser': ['phaser'],
+              'react-vendor': ['react', 'react-dom', 'framer-motion'],
+            }
+          }
+        }
+      },
       plugins: [
         react(), 
         basicSsl(),
@@ -27,6 +38,7 @@ export default defineConfig(({ mode }) => {
             enabled: true
           },
           workbox: {
+            maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
             globPatterns: ['**/*.{js,css,html,ico,png,svg,mp3,ogg,ttf}'],
             globIgnores: [
               '**/node_modules/**/*',
