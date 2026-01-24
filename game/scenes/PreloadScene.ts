@@ -24,6 +24,35 @@ export class PreloadScene extends Phaser.Scene {
       this.scene.start('MainScene', { theme: this.currentTheme, dpr: this.registry.get('dpr') || 1 });
     });
 
+    // Add retry logic for failed assets
+    this.load.on('loaderror', (file: Phaser.Loader.File) => {
+        console.warn(`[Loader] Error loading ${file.key} from ${file.url}`);
+        
+        // Custom retry logic
+        // We add a 'retries' property to the file object to track attempts
+        const retries = (file as any).retries || 0;
+        if (retries < 3) {
+            console.log(`[Loader] Retrying ${file.key} (Attempt ${retries + 1}/3)...`);
+            (file as any).retries = retries + 1;
+            
+            // Re-add the file to the loader queue
+            // We need to use a slightly different URL to avoid browser cache issues if it was a network error?
+            // Actually, for CDN errors, we usually want to retry the SAME url unless we have a fallback.
+            // But Phaser 3 doesn't easily support "retry this file".
+            // We have to manually load it again.
+            
+            // Small delay before retry
+            setTimeout(() => {
+                if (typeof file.url === 'string') {
+                    this.load.image(file.key, file.url);
+                    this.load.start(); // Restart loader if it stopped
+                }
+            }, 1000 * (retries + 1));
+        } else {
+            console.error(`[Loader] Failed to load ${file.key} after 3 attempts.`);
+        }
+    });
+
     // --- Load Theme Assets ---
     // Ensure cross-origin loading for WebGL
     this.load.crossOrigin = 'anonymous';

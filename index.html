@@ -156,19 +156,31 @@
           'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
           'https://cdnjs.cloudflare.com/ajax/libs/mediapipe/0.5.1675469404/'
         ];
-        const FALLBACK_DELAY = 3000;
+        // 尝试加载的超时时间
+        const LOAD_TIMEOUT = 5000;
+        const FALLBACK_DELAY = 1000;
         let loadedCount = 0;
 
         function loadScript(url, onSuccess, onError) {
           const script = document.createElement('script');
           script.src = url + 'pose.js';
           script.crossOrigin = 'anonymous';
+          
+          let timeoutId = setTimeout(() => {
+             console.warn('[CDN] Timeout loading from: ' + url);
+             script.onerror();
+          }, LOAD_TIMEOUT);
+
           script.onload = function() {
+            clearTimeout(timeoutId);
             console.log('[CDN] Successfully loaded from: ' + url);
             onSuccess(url);
           };
           script.onerror = function() {
+            clearTimeout(timeoutId);
             console.warn('[CDN] Failed to load from: ' + url);
+            // Remove the failed script tag to keep DOM clean
+            script.remove();
             onError();
           };
           document.head.appendChild(script);
@@ -177,19 +189,18 @@
         function tryNextCDN(index) {
           if (index >= CDNS.length) {
             console.error('[CDN] All CDNs failed, retrying from first...');
-            setTimeout(function() { tryNextCDN(0); }, FALLBACK_DELAY);
+            setTimeout(function() { tryNextCDN(0); }, FALLBACK_DELAY * 2);
             return;
           }
+          
+          console.log('[CDN] Trying source ' + index + ': ' + CDNS[index]);
+          
           loadScript(CDNS[index], function(successUrl) {
             window.__MEDIAPIPE_CDN__ = successUrl;
             loadCameraUtils(successUrl);
           }, function() {
-            loadedCount++;
-            if (loadedCount >= 2) {
-              tryNextCDN(index + 1);
-            } else {
-              setTimeout(function() { tryNextCDN(index); }, FALLBACK_DELAY);
-            }
+            // Immediately try next one on error
+            tryNextCDN(index + 1);
           });
         }
 
