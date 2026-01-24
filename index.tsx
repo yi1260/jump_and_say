@@ -2,9 +2,15 @@ import ReactDOM from 'react-dom/client';
 import { registerSW } from 'virtual:pwa-register';
 import App from './App';
 
-// Initialize Eruda for mobile debugging in development
-if (import.meta.env.DEV) {
-  import('eruda').then((eruda) => eruda.default.init());
+// Initialize Eruda for mobile debugging in development or if debug param is present
+const urlParams = new URLSearchParams(window.location.search);
+const isDebug = import.meta.env.DEV || urlParams.get('debug') === 'true';
+
+if (isDebug) {
+  import('eruda').then((eruda) => {
+    eruda.default.init();
+    console.log('Eruda initialized');
+  });
 }
 
 // Register Service Worker for caching and offline support
