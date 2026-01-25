@@ -202,10 +202,19 @@ export class MotionController {
     isJumping: false,
     rawNoseX: 0.5,
     rawNoseY: 0.5,
-    rawShoulderY: 0.5
+    rawShoulderY: 0.5,
+    smoothedState: {
+        x: 0,
+        bodyX: 0.5,
+        isJumping: false,
+        rawNoseX: 0.5,
+        rawNoseY: 0.5,
+        rawShoulderY: 0.5
+    }
   };
 
   // Smoothed state for display/UI (to hide low FPS)
+  // DEPRECATED: Use state.smoothedState instead
   public smoothedState: MotionState = {
     x: 0,
     bodyX: 0.5,
@@ -602,12 +611,21 @@ export class MotionController {
         // Even if we skip AI processing, we must smooth the output values 
         // to make the game feel responsive (60 FPS visual, 15 FPS AI)
         const lerpFactor = 0.2; // Smooth movement
-        this.smoothedState.bodyX = this.smoothedState.bodyX * (1 - lerpFactor) + this.state.bodyX * lerpFactor;
-        this.smoothedState.rawNoseX = this.smoothedState.rawNoseX * (1 - lerpFactor) + this.state.rawNoseX * lerpFactor;
-        this.smoothedState.rawNoseY = this.smoothedState.rawNoseY * (1 - lerpFactor) + this.state.rawNoseY * lerpFactor;
+        
+        // Ensure state.smoothedState is initialized
+        if (!this.state.smoothedState) {
+            this.state.smoothedState = { ...this.state };
+        }
+
+        this.state.smoothedState.bodyX = (this.state.smoothedState.bodyX || 0.5) * (1 - lerpFactor) + this.state.bodyX * lerpFactor;
+        this.state.smoothedState.rawNoseX = (this.state.smoothedState.rawNoseX || 0.5) * (1 - lerpFactor) + this.state.rawNoseX * lerpFactor;
+        this.state.smoothedState.rawNoseY = (this.state.smoothedState.rawNoseY || 0.5) * (1 - lerpFactor) + this.state.rawNoseY * lerpFactor;
         // Sync discrete states
-        this.smoothedState.x = this.state.x;
-        this.smoothedState.isJumping = this.state.isJumping;
+        this.state.smoothedState.x = this.state.x;
+        this.state.smoothedState.isJumping = this.state.isJumping;
+
+        // Sync legacy smoothedState property for compatibility
+        this.smoothedState = this.state.smoothedState;
 
         if (this.frameSkipCounter % this.FRAME_SKIP_INTERVAL !== 0) {
             // Skip this frame but keep loop running
