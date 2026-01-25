@@ -682,9 +682,10 @@ export default function App() {
                     if (timestamp - lastUpdateTime >= 30) {
                         if (motionController.state) {
                             if (motionController.isNoseDetected) {
+                                const overlayState = motionController.smoothedState || motionController.state;
                                 setNosePosition({
-                                    x: motionController.state.rawNoseX,
-                                    y: motionController.state.rawNoseY
+                                    x: overlayState.rawNoseX,
+                                    y: overlayState.rawNoseY
                                 });
                                 consecutiveMissedFrames = 0;
                             } else {

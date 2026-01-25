@@ -73,10 +73,15 @@ export class MotionController {
   // Smoothing vars
   private currentHeadX: number = 0.5;
   private smoothedHeadY: number = 0.5;
+  private smoothedNoseX: number = 0.5;
+  private smoothedNoseY: number = 0.5;
+  private smoothedFaceSize: number = 0;
+  private jumpCandidateFrames: number = 0;
+  private jumpArmed: boolean = true;
   
   // Jump Logic
   private lastJumpTime: number = 0;
-  private readonly JUMP_COOLDOWN = 600;
+  private readonly JUMP_COOLDOWN = 800;
 
   async init() {
     if (this.initPromise) return this.initPromise;
@@ -148,6 +153,11 @@ export class MotionController {
     // Reset state
     this.currentHeadX = 0.5;
     this.smoothedHeadY = 0.5;
+    this.smoothedNoseX = 0.5;
+    this.smoothedNoseY = 0.5;
+    this.smoothedFaceSize = 0;
+    this.jumpCandidateFrames = 0;
+    this.jumpArmed = true;
     this.state.isJumping = false;
     this.state.bodyX = 0.5;
     this.state.rawNoseX = 0.5;
@@ -171,6 +181,7 @@ export class MotionController {
   private onResults(results: any) {
       if (!results.detections || results.detections.length === 0) {
           this.isNoseDetected = false;
+          this.jumpCandidateFrames = 0;
           return;
       }
 
@@ -190,18 +201,25 @@ export class MotionController {
 
       const now = performance.now();
       const elapsed = now - this.lastFrameTime;
-      // Handle first frame delta
-      const dtSec = elapsed > 0 ? elapsed / 1000 : 0.033;
+      const dtSec = Math.max(0.016, elapsed > 0 && elapsed < 500 ? elapsed / 1000 : 0.033);
+      const noseAlpha = 1 - Math.exp(-dtSec / 0.08);
+      const faceSize = (typeof bbox?.width === 'number' ? bbox.width : 0) * (typeof bbox?.height === 'number' ? bbox.height : 0);
+      if (this.smoothedFaceSize <= 0) {
+          this.smoothedFaceSize = faceSize;
+      } else {
+          this.smoothedFaceSize = this.smoothedFaceSize * 0.95 + faceSize * 0.05;
+      }
+      const faceSizeRatio = this.smoothedFaceSize > 0 ? Math.abs(faceSize - this.smoothedFaceSize) / this.smoothedFaceSize : 0;
 
       // --- 1. Update X (Horizontal) ---
       // Smooth interpolation
       this.currentHeadX = this.currentHeadX * 0.7 + mirroredX * 0.3;
       
       this.state.bodyX = this.currentHeadX;
-      // rawNoseX/rawNoseY are used by the Live View overlay, which mirrors the video in CSS
-      // Keep these in CAMERA coordinates (not mirrored), the UI will apply (1 - x)
       this.state.rawNoseX = rawFaceX;
       this.state.rawNoseY = rawFaceY;
+      this.smoothedNoseX = this.smoothedNoseX * (1 - noseAlpha) + rawFaceX * noseAlpha;
+      this.smoothedNoseY = this.smoothedNoseY * (1 - noseAlpha) + rawFaceY * noseAlpha;
 
       // Lane Logic
       let targetLane = 0;
@@ -228,21 +246,29 @@ export class MotionController {
       const velocity = dy / dtSec;
       
       // Update smoothed baseline (follow head slowly to adapt to height)
-      this.smoothedHeadY = this.smoothedHeadY * 0.9 + rawFaceY * 0.1;
+      this.smoothedHeadY = this.smoothedHeadY * 0.96 + rawFaceY * 0.04;
       this.state.rawShoulderY = this.smoothedHeadY;
 
       // Jump Trigger
       // Velocity > 1.2 (Fast upward)
       // Displacement > 0.04 (Significant distance)
-      if (velocity > 1.2 && dy > 0.04 && !this.state.isJumping) {
-          if (now - this.lastJumpTime > this.JUMP_COOLDOWN) {
+      if (faceSizeRatio < 0.35) {
+          if (!this.jumpArmed && dy < 0.03) {
+              this.jumpArmed = true;
+          }
+          const isCandidate = velocity > 1.9 && dy > 0.07;
+          this.jumpCandidateFrames = isCandidate ? Math.min(3, this.jumpCandidateFrames + 1) : Math.max(0, this.jumpCandidateFrames - 1);
+          if (this.jumpArmed && this.jumpCandidateFrames >= 2 && !this.state.isJumping && now - this.lastJumpTime > this.JUMP_COOLDOWN) {
               log(1, 'JUMP', `Jump! Vel: ${velocity.toFixed(2)}, Dy: ${dy.toFixed(2)}`);
               this.state.isJumping = true;
               this.lastJumpTime = now;
+              this.jumpCandidateFrames = 0;
+              this.jumpArmed = false;
               this.onMotionDetected?.('jump');
-              
-              setTimeout(() => { this.state.isJumping = false; }, 400);
+              setTimeout(() => { this.state.isJumping = false; }, 450);
           }
+      } else {
+          this.jumpCandidateFrames = 0;
       }
 
       // --- 3. Sync Smoothed State ---
@@ -251,8 +277,8 @@ export class MotionController {
       }
       
       this.state.smoothedState.bodyX = this.state.bodyX;
-      this.state.smoothedState.rawNoseX = this.state.rawNoseX;
-      this.state.smoothedState.rawNoseY = this.state.rawNoseY;
+      this.state.smoothedState.rawNoseX = this.smoothedNoseX;
+      this.state.smoothedState.rawNoseY = this.smoothedNoseY;
       this.state.smoothedState.x = this.state.x;
       this.state.smoothedState.isJumping = this.state.isJumping;
       
