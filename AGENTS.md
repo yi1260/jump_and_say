@@ -330,7 +330,7 @@ CDN URL Structure:
 **Path Auto-Correction**:
 The `getR2AssetUrl()` function automatically corrects legacy paths:
 ```typescript
-getR2AssetUrl('asserts/kenney/...')  // Auto-corrected to 'assets/kenney/...'
+getR2AssetUrl('assets/kenney/...')  // Auto-corrected to 'assets/kenney/...'
 getR2AssetUrl('/assets/kenney/...') // Leading slash removed
 ```
 
@@ -800,7 +800,7 @@ public/themes/
    - No local asset files in repository
    - MediaPipe files copied via postinstall script
    - Use `getR2AssetUrl()` and `getR2ImageUrl()` for all asset URLs
-   - Path auto-correction: `asserts/` → `assets/`
+   - Path auto-correction: `assets/` → `assets/`
 
 4. **Mobile-First Camera Handling**:
    - Test on real devices, not just emulators

@@ -12,10 +12,10 @@ export const getR2AssetUrl = (path: string): string => {
   // Remove leading slash if present
   let cleanPath = path.startsWith('/') ? path.substring(1) : path;
   
-  // Replace local 'asserts' directory name with CDN 'assets' directory name
+  // Replace local 'assets' directory name with CDN 'assets' directory name
   // Also handle cases where user might have already updated code to 'assets/'
-  if (cleanPath.startsWith('asserts/')) {
-    cleanPath = cleanPath.replace('asserts/', 'assets/');
+  if (cleanPath.startsWith('assets/')) {
+    cleanPath = cleanPath.replace('assets/', 'assets/');
   }
   
   return `${R2_BASE_URL}/${cleanPath}`;
