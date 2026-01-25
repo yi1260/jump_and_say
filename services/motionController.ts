@@ -100,18 +100,23 @@ export class MotionController {
         const faceDetection = new window.FaceDetection({
             locateFile: (file: string) => {
                 const cdnBase = window.__MEDIAPIPE_FACE_DETECTION_CDN__ || 'https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/';
-                // Force file name only to avoid path issues
                 const fileName = file.split('/').pop();
                 return `${cdnBase}${fileName}`;
             }
         });
 
+        // Use CPU mode to avoid GPU inference errors (solutions_wasm.embind.cc issues)
+        // Face Detection is lightweight enough for CPU
         faceDetection.setOptions({
-            modelSelection: 0, // 0 for short-range (front camera), 1 for full-range
-            minDetectionConfidence: 0.5
+            modelSelection: 0, 
+            minDetectionConfidence: 0.5,
+            selfieMode: true // Let MediaPipe handle mirroring if possible, though we do it manually too
         });
 
         faceDetection.onResults(this.onResults.bind(this));
+        
+        // Initialize the graph
+        await faceDetection.initialize();
         
         this.faceDetector = faceDetection;
         this.isReady = true;
