@@ -1,4 +1,4 @@
-import { getR2ImageUrl, getR2ThemesListUrl } from '@/src/config/r2Config';
+import { getR2AssetUrl, getR2ImageUrl, getR2ThemesListUrl } from '@/src/config/r2Config';
 import Phaser from 'phaser';
 import { Theme, ThemeId } from '../../types';
 
@@ -79,25 +79,34 @@ export class PreloadScene extends Phaser.Scene {
   }
 
   private loadGameAssets() {
-    const soundBase = 'asserts/kenney/Sounds/';
+    // Determine base URL: use R2 if in production (import.meta.env.PROD), otherwise local
+    // const useR2 = import.meta.env.PROD; 
+    // Actually, user wants to solve speed issues, so we should prefer R2 if possible.
+    // Let's use a helper that can be toggled or use R2 by default for these assets.
+    // For now, let's stick to the requested change to use R2.
+    
+    const soundBase = 'assets/kenney/Sounds/';
+    const kenneyBase = 'assets/kenney/Vector/';
+    
+    // Helper to get full URL
+    const getUrl = (path: string) => getR2AssetUrl(path);
+
     this.load.audio('sfx_jump', [
-        `${soundBase}sfx_jump-high.mp3`,
-        `${soundBase}sfx_jump-high.ogg`
+        getUrl(`${soundBase}sfx_jump-high.mp3`),
+        getUrl(`${soundBase}sfx_jump-high.ogg`)
     ]);
     this.load.audio('sfx_success', [
-        `${soundBase}sfx_coin.mp3`,
-        `${soundBase}sfx_coin.ogg`
+        getUrl(`${soundBase}sfx_coin.mp3`),
+        getUrl(`${soundBase}sfx_coin.ogg`)
     ]);
     this.load.audio('sfx_failure', [
-        `${soundBase}sfx_disappear.mp3`,
-        `${soundBase}sfx_disappear.ogg`
+        getUrl(`${soundBase}sfx_disappear.mp3`),
+        getUrl(`${soundBase}sfx_disappear.ogg`)
     ]);
     this.load.audio('sfx_bump', [
-        `${soundBase}sfx_bump.mp3`,
-        `${soundBase}sfx_bump.ogg`
+        getUrl(`${soundBase}sfx_bump.mp3`),
+        getUrl(`${soundBase}sfx_bump.ogg`)
     ]);
-
-    const kenneyBase = '/asserts/kenney/Vector/';
     
     const { height } = this.scale;
     const gameScale = height / 1080;
@@ -108,21 +117,21 @@ export class PreloadScene extends Phaser.Scene {
     const tileTextureSize = Math.round(320 * gameScale * dprScale);
     
     if (!this.textures.exists('p1_stand')) {
-        this.load.svg('p1_stand', `${kenneyBase}Characters/character_pink_idle.svg`, { width: charTextureSize, height: charTextureSize });
-        this.load.svg('p1_jump', `${kenneyBase}Characters/character_pink_jump.svg`, { width: charTextureSize, height: charTextureSize });
-        this.load.svg('p1_walk_a', `${kenneyBase}Characters/character_pink_walk_a.svg`, { width: charTextureSize, height: charTextureSize });
-        this.load.svg('p1_walk_b', `${kenneyBase}Characters/character_pink_walk_b.svg`, { width: charTextureSize, height: charTextureSize });
+        this.load.svg('p1_stand', getUrl(`${kenneyBase}Characters/character_pink_idle.svg`), { width: charTextureSize, height: charTextureSize });
+        this.load.svg('p1_jump', getUrl(`${kenneyBase}Characters/character_pink_jump.svg`), { width: charTextureSize, height: charTextureSize });
+        this.load.svg('p1_walk_a', getUrl(`${kenneyBase}Characters/character_pink_walk_a.svg`), { width: charTextureSize, height: charTextureSize });
+        this.load.svg('p1_walk_b', getUrl(`${kenneyBase}Characters/character_pink_walk_b.svg`), { width: charTextureSize, height: charTextureSize });
     }
         
     if (!this.textures.exists('tile_box')) {
-        this.load.svg('tile_box', `${kenneyBase}Tiles/block_empty.svg`, { width: tileTextureSize, height: tileTextureSize });
+        this.load.svg('tile_box', getUrl(`${kenneyBase}Tiles/block_empty.svg`), { width: tileTextureSize, height: tileTextureSize });
     }
         
     if (!this.textures.exists('bee_a')) {
-        this.load.svg('bee_a', `${kenneyBase}Enemies/bee_a.svg`, { width: targetBeeSize, height: targetBeeSize });
+        this.load.svg('bee_a', getUrl(`${kenneyBase}Enemies/bee_a.svg`), { width: targetBeeSize, height: targetBeeSize });
     }
     if (!this.textures.exists('bee_b')) {
-        this.load.svg('bee_b', `${kenneyBase}Enemies/bee_b.svg`, { width: targetBeeSize, height: targetBeeSize });
+        this.load.svg('bee_b', getUrl(`${kenneyBase}Enemies/bee_b.svg`), { width: targetBeeSize, height: targetBeeSize });
     }
   }
 

@@ -376,25 +376,30 @@ export class MainScene extends Phaser.Scene {
   }
 
   private preloadNonCriticalAssets() {
-    const kenneyBase = '/asserts/kenney/Vector/';
-    const dprScale = Math.min(this.dpr || window.devicePixelRatio || 1, 2);
-    const safeRewardSize = Math.min(512, Math.max(192, Math.round(220 * this.gameScale * dprScale)));
-    const safeIconSize = Math.min(512, Math.max(192, Math.round(200 * this.gameScale * dprScale)));
+    // 动态引入 getR2AssetUrl
+    import('@/src/config/r2Config').then(({ getR2AssetUrl }) => {
+        const kenneyBase = 'assets/kenney/Vector/';
+        const getUrl = (path: string) => getR2AssetUrl(path);
 
-    if (!this.textures.exists('star_gold')) {
-      this.load.svg('star_gold', `${kenneyBase}Tiles/star.svg`, { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('mushroom_red', `${kenneyBase}Tiles/mushroom_red.svg`, { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('mushroom_brown', `${kenneyBase}Tiles/mushroom_brown.svg`, { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('gem_blue', `${kenneyBase}Tiles/gem_blue.svg`, { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('gem_red', `${kenneyBase}Tiles/gem_red.svg`, { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('gem_green', `${kenneyBase}Tiles/gem_green.svg`, { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('gem_yellow', `${kenneyBase}Tiles/gem_yellow.svg`, { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('grass', `${kenneyBase}Tiles/grass.svg`, { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('grass_purple', `${kenneyBase}Tiles/grass_purple.svg`, { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('icon_retry', `${kenneyBase}Tiles/replay_256dp.svg`, { width: safeIconSize, height: safeIconSize });
-      this.load.svg('icon_next', `${kenneyBase}Tiles/keyboard_double_arrow_right_256dp.svg`, { width: safeIconSize, height: safeIconSize });
-      this.load.start();
-    }
+        const dprScale = Math.min(this.dpr || window.devicePixelRatio || 1, 2);
+        const safeRewardSize = Math.min(512, Math.max(192, Math.round(220 * this.gameScale * dprScale)));
+        const safeIconSize = Math.min(512, Math.max(192, Math.round(200 * this.gameScale * dprScale)));
+    
+        if (!this.textures.exists('star_gold')) {
+          this.load.svg('star_gold', getUrl(`${kenneyBase}Tiles/star.svg`), { width: safeRewardSize, height: safeRewardSize });
+          this.load.svg('mushroom_red', getUrl(`${kenneyBase}Tiles/mushroom_red.svg`), { width: safeRewardSize, height: safeRewardSize });
+          this.load.svg('mushroom_brown', getUrl(`${kenneyBase}Tiles/mushroom_brown.svg`), { width: safeRewardSize, height: safeRewardSize });
+          this.load.svg('gem_blue', getUrl(`${kenneyBase}Tiles/gem_blue.svg`), { width: safeRewardSize, height: safeRewardSize });
+          this.load.svg('gem_red', getUrl(`${kenneyBase}Tiles/gem_red.svg`), { width: safeRewardSize, height: safeRewardSize });
+          this.load.svg('gem_green', getUrl(`${kenneyBase}Tiles/gem_green.svg`), { width: safeRewardSize, height: safeRewardSize });
+          this.load.svg('gem_yellow', getUrl(`${kenneyBase}Tiles/gem_yellow.svg`), { width: safeRewardSize, height: safeRewardSize });
+          this.load.svg('grass', getUrl(`${kenneyBase}Tiles/grass.svg`), { width: safeRewardSize, height: safeRewardSize });
+          this.load.svg('grass_purple', getUrl(`${kenneyBase}Tiles/grass_purple.svg`), { width: safeRewardSize, height: safeRewardSize });
+          this.load.svg('icon_retry', getUrl(`${kenneyBase}Tiles/replay_256dp.svg`), { width: safeIconSize, height: safeIconSize });
+          this.load.svg('icon_next', getUrl(`${kenneyBase}Tiles/keyboard_double_arrow_right_256dp.svg`), { width: safeIconSize, height: safeIconSize });
+          this.load.start();
+        }
+    });
   }
 
   private async loadThemeImages(themeId?: string) {

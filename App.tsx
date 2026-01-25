@@ -4,6 +4,7 @@ import GameBackground from './components/GameBackground';
 import { GameCanvas } from './components/GameCanvas';
 import { loadThemes, preloadThemeImages } from './gameConfig';
 import { motionController } from './services/motionController';
+import { getR2AssetUrl } from './src/config/r2Config';
 import { Theme, ThemeId } from './types';
 
 declare global {
@@ -104,7 +105,7 @@ export default function App() {
     const initBGM = async () => {
       if (isPlaying) return;
       
-      bgmAudio = new Audio('/asserts/kenney/Sounds/funny-kids-video-322163.mp3');
+      bgmAudio = new Audio(getR2AssetUrl('assets/kenney/Sounds/funny-kids-video-322163.mp3'));
       bgmAudio.loop = true;
       bgmAudio.volume = 0.3;
       bgmAudio.preload = 'auto';
@@ -220,7 +221,7 @@ export default function App() {
     style.innerHTML = `
       @font-face {
         font-family: 'FredokaLocal';
-        src: url('/asserts/Fredoka/static/Fredoka-Bold.ttf') format('truetype');
+        src: url('${getR2AssetUrl('assets/Fredoka/static/Fredoka-Bold.ttf')}') format('truetype');
         font-weight: bold;
         font-style: normal;
         font-display: swap;
@@ -830,7 +831,7 @@ export default function App() {
       {/* Background Image Overlay */}
       <div 
         className="absolute inset-0 z-0 opacity-30 pointer-events-none bg-repeat bg-center"
-        style={{ backgroundImage: `url('/asserts/kenney/Vector/Backgrounds/background_clouds.svg')`, backgroundSize: '800px' }}
+        style={{ backgroundImage: `url('${getR2AssetUrl('assets/kenney/Vector/Backgrounds/background_clouds.svg')}')`, backgroundSize: '800px' }}
       />
 
       {/* 1. Camera HUD */}
@@ -894,7 +895,7 @@ export default function App() {
             {/* Score Panel Integrated with Back Button for alignment */}
              {phase === GamePhase.PLAYING && (
                <div className="score-panel kenney-panel px-3 md:px-5 py-1 md:py-2 flex items-center gap-2 md:gap-4 transition-all bg-white/90 backdrop-blur-sm shadow-[0_4px_0_#333333] border-[3px] md:border-[4px]">
-                 <img src="/asserts/kenney/Vector/Tiles/star.svg" className="w-6 h-6 md:w-12 md:h-12" alt="Score" />
+                 <img src={getR2AssetUrl('assets/kenney/Vector/Tiles/star.svg')} className="w-6 h-6 md:w-12 md:h-12" alt="Score" />
                  <span className="text-xl md:text-4xl font-black text-kenney-dark tabular-nums tracking-tight">
                    {score} / {totalQuestions}
                  </span>
@@ -970,7 +971,7 @@ export default function App() {
                     {/* Top: Player Character */}
                     <div className="relative shrink-0">
                       <img 
-                        src="/asserts/kenney/Vector/Characters/character_pink_jump.svg" 
+                        src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')}
                         className="w-16 h-16 sm:w-20 sm:h-20 md:w-48 md:h-48 lg:w-56 lg:h-56 animate-bounce drop-shadow-xl mobile-landscape-character" 
                         alt="Character" 
                       />
@@ -1095,7 +1096,7 @@ export default function App() {
                         <div className="grid grid-cols-2 gap-[3vw] md:gap-[5vw] w-full max-w-4xl min-h-0 mobile-landscape-tutorial-grid">
                             <div className="kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
                                 <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-4">
-                                    <img src="/asserts/kenney/Vector/Characters/character_pink_walk_a.svg" className="w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce-horizontal-large mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
+                                    <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_walk_a.svg')} className="w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce-horizontal-large mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
                                 </div>
                                 <div className="shrink-0 flex flex-col items-center gap-1">
                                     <h3 className="text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark uppercase tracking-tighter italic mobile-landscape-card-text drop-shadow-sm">MOVE</h3>
@@ -1105,7 +1106,7 @@ export default function App() {
 
                             <div className="kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
                                 <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-4">
-                                    <img src="/asserts/kenney/Vector/Characters/character_pink_jump.svg" className="w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
+                                    <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')} className="w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
                                 </div>
                                 <div className="shrink-0 flex flex-col items-center gap-1">
                                     <h3 className="text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark uppercase tracking-tighter italic mobile-landscape-card-text drop-shadow-sm">JUMP</h3>

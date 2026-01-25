@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import React, { useEffect } from 'react';
+import { getR2AssetUrl } from '../src/config/r2Config';
 
 interface CompletionOverlayProps {
   score: number;
@@ -112,7 +113,7 @@ const CompletionOverlay: React.FC<CompletionOverlayProps> = ({ score, total, isV
                  }}
               >
                 <img 
-                  src="/asserts/kenney/Vector/Tiles/star.svg" 
+                  src={getR2AssetUrl('assets/kenney/Vector/Tiles/star.svg')}
                   className={`w-[8vw] h-[8vw] md:w-[12vw] md:h-[12vw] drop-shadow-lg ${i < score ? '' : 'grayscale opacity-30 blur-[1px]'}`}
                   alt="Star"
                 />

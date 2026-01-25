@@ -1,7 +1,24 @@
-export const R2_BASE_URL = 'https://cdn.maskmysheet.com/raz_aa';
+export const R2_BASE_URL = 'https://cdn.maskmysheet.com';
 
 export const getR2ImageUrl = (imagePath: string): string => {
-  return `${R2_BASE_URL}/${imagePath}`;
+  // Theme images are likely in the root or a specific folder, assuming current behavior matches requirements
+  // If theme images are also moved, this might need adjustment. 
+  // Based on user input, only 'assets' and 'mediapipe' were mentioned.
+  // Assuming 'raz_aa' prefix is removed from the bucket structure based on S3 paths provided.
+  return `${R2_BASE_URL}/raz_aa/${imagePath}`;
+};
+
+export const getR2AssetUrl = (path: string): string => {
+  // Remove leading slash if present
+  let cleanPath = path.startsWith('/') ? path.substring(1) : path;
+  
+  // Replace local 'asserts' directory name with CDN 'assets' directory name
+  // Also handle cases where user might have already updated code to 'assets/'
+  if (cleanPath.startsWith('asserts/')) {
+    cleanPath = cleanPath.replace('asserts/', 'assets/');
+  }
+  
+  return `${R2_BASE_URL}/${cleanPath}`;
 };
 
 export const getR2ThemesListUrl = (): string => {

@@ -1,14 +1,15 @@
 
 import { useEffect, useMemo, useState } from 'react';
+import { getR2AssetUrl } from '../src/config/r2Config';
 
 const BACKGROUNDS = [
-  '/asserts/kenney/Vector/Backgrounds/background_color_hills.svg',
-  '/asserts/kenney/Vector/Backgrounds/background_color_trees.svg',
-  '/asserts/kenney/Vector/Backgrounds/background_color_desert.svg',
-  '/asserts/kenney/Vector/Backgrounds/background_clouds.svg',
-  '/asserts/kenney/Vector/Backgrounds/background_fade_hills.svg',
-  '/asserts/kenney/Vector/Backgrounds/background_fade_trees.svg',
-  '/asserts/kenney/Vector/Backgrounds/background_fade_desert.svg'
+  'assets/kenney/Vector/Backgrounds/background_color_hills.svg',
+  'assets/kenney/Vector/Backgrounds/background_color_trees.svg',
+  'assets/kenney/Vector/Backgrounds/background_color_desert.svg',
+  'assets/kenney/Vector/Backgrounds/background_clouds.svg',
+  'assets/kenney/Vector/Backgrounds/background_fade_hills.svg',
+  'assets/kenney/Vector/Backgrounds/background_fade_trees.svg',
+  'assets/kenney/Vector/Backgrounds/background_fade_desert.svg'
 ];
 
 interface GameBackgroundProps {
@@ -16,7 +17,7 @@ interface GameBackgroundProps {
 }
 
 export default function GameBackground({ currentIndex }: GameBackgroundProps) {
-  const bgSrc = useMemo(() => BACKGROUNDS[currentIndex % BACKGROUNDS.length], [currentIndex]);
+  const bgSrc = useMemo(() => getR2AssetUrl(BACKGROUNDS[currentIndex % BACKGROUNDS.length]), [currentIndex]);
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {

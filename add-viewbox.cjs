@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const svgDir = path.join(__dirname, 'public/asserts/kenney/Vector');
+const svgDir = path.join(__dirname, 'public/assets/kenney/Vector');
 
 const directories = {
   Backgrounds: { width: '256', height: '256' },

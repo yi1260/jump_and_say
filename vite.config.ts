@@ -44,8 +44,8 @@ export default defineConfig(({ mode }) => {
               '**/node_modules/**/*',
               'sw.js',
               'workbox-*.js',
-              '**/asserts/kenney/Sprites/**/*',
-              '**/asserts/kenney/Vector/backup/**/*'
+              '**/assets/kenney/Sprites/**/*',
+              '**/assets/kenney/Vector/backup/**/*'
             ],
             runtimeCaching: [
               {
@@ -73,8 +73,8 @@ export default defineConfig(({ mode }) => {
       resolve: {
         alias: {
         '@': path.resolve(__dirname, '.'),
-        '/asserts': path.resolve(__dirname, './public/asserts'),
-        '/kenney': path.resolve(__dirname, './public/asserts/kenney'),
+        '/assets': path.resolve(__dirname, './public/assets'),
+        '/kenney': path.resolve(__dirname, './public/assets/kenney'),
       }
       }
     };
