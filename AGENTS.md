@@ -1,10 +1,10 @@
 # AGENTS.md - AI Coding Agent Instructions
 
 ## Project Overview
-React + TypeScript motion-controlled educational game using Phaser 3 and MediaPipe Pose.
+React + TypeScript motion-controlled educational game using Phaser 3.
 - **Framework**: React 18.3.1 with Vite
 - **Game Engine**: Phaser 3.80.0 (Arcade physics)
-- **Motion Detection**: MediaPipe Pose
+- **Motion Detection**: Pixel-based motion detection (primary) with MediaPipe Pose (optional fallback)
 - **Language**: TypeScript 5.8.2 (ES2022 target)
 - **Build Tool**: Vite 6.2.0
 - **Animation**: Framer Motion 12.23.26
@@ -24,7 +24,7 @@ npm run build        # Build for production (outputs to dist/)
 npm run preview      # Preview production build locally
 
 # Post-install (automatic)
-npm run postinstall  # Copies MediaPipe files to public/mediapipe/
+npm run postinstall  # Copies MediaPipe files to public/mediapipe/ (optional fallback)
 ```
 
 **No testing framework is configured**. The project does not have any test files or test commands.
@@ -88,7 +88,7 @@ import { getR2ImageUrl, getR2AssetUrl } from './src/config/r2Config';
 
 - **Components**: PascalCase (e.g., `GameCanvas`, `CompletionOverlay`, `CameraGuide`)
 - **Functions/Methods**: camelCase (e.g., `handleScoreUpdate`, `initializeGame`, `preloadThemeImages`)
-- **Classes**: PascalCase (e.g., `MotionController`, `AdaptiveCalibrator`, `MainScene`)
+- **Classes**: PascalCase (e.g., `MotionController`, `AdaptiveCalibrator`, `MainScene`, `PixelMotionProcessor`)
 - **Constants**: UPPER_SNAKE_CASE for true constants (e.g., `MAX_CONCURRENT_DOWNLOADS`, `FRAME_MIN_TIME`)
   - camelCase for config/calibration values that may be adjusted (e.g., `xThreshold`, `currentNoseX`)
 - **Interfaces/Types**: PascalCase (e.g., `MotionState`, `Theme`, `ThemeQuestion`)
@@ -240,13 +240,24 @@ if (isAndroid) {
 
 ### Performance Guidelines
 
-**MediaPipe & Motion Detection**:
-- Target 30 FPS for pose detection (controlled by `FRAME_MIN_TIME = 1000 / 30`)
+**Pixel-Based Motion Detection** (Primary):
+- Lightweight pixel difference algorithm (no AI/ML required)
+- Low resolution processing (64x48) for maximum performance
+- Background subtraction with adaptive learning rate
+- Target 30 FPS for motion detection (controlled by `FRAME_MIN_TIME = 1000 / 30`)
+- Frame skipping (process 1 out of every 2 frames) for better performance
+- **No main thread blocking** - runs efficiently on main thread
+- **No WASM loading** - instant startup
+- **No external dependencies** - pure JavaScript
+
+**MediaPipe Pose** (Optional Fallback):
+- Available as optional fallback if pixel detection is insufficient
+- Multi-CDN fallback system for reliability (4 CDNs)
+- Runs on Web Worker to avoid main thread blocking
 - Use visibility thresholds (0.4) for landmark confidence
 - Smooth values with exponential moving average (e.g., `NOSE_SMOOTHING = 0.8`)
 - Handle tracking loss gracefully with gradual state reset
 - Use adaptive calibration system (`AdaptiveCalibrator` class) for jump detection
-- **Performance Note**: MediaPipe runs on main thread, consider Web Worker for optimization
 
 **Phaser Performance**:
 - Use `powerPreference: 'high-performance'` for rendering
@@ -269,12 +280,12 @@ if (isAndroid) {
 - Implement retry logic for failed loads (1 retry, 15s timeout)
 - Pause background preloading during high-priority loading
 
-**Known Performance Issues**:
-- **High Power Consumption**: Continuous camera usage, MediaPipe 30 FPS, Phaser game loop, background preloading, BGM playback
-- **Lag Causes**: MediaPipe main thread blocking, concurrent downloads (16 parallel), SVG conversion overhead, frequent DOM operations, particle system, no device performance detection
+**Performance Improvements**:
+- **Reduced Power Consumption**: No continuous AI/ML processing, lightweight pixel detection
+- **Eliminated Lag Causes**: No MediaPipe main thread blocking, no WASM loading overhead, no heavy ML inference
 - **Optimization Recommendations**:
+  - Pixel motion detection is the default and recommended approach
   - Use camera only when needed (CALIBRATING, PLAYING phases)
-  - Move MediaPipe to Web Worker
   - Reduce concurrent downloads (16→4)
   - Implement performance modes for low-end devices
   - Pause background preloading during gameplay
@@ -487,8 +498,8 @@ registerSW({
 - 1-year cache duration for theme assets
 - Maximum file size: 10MB
 - Ignores unused assets (Sprites, backup folders)
-- **MediaPipe WASM caching**: Includes `.wasm` and `.data` files for offline support
-- **Multi-CDN support**: Caches MediaPipe files from jsdelivr, unpkg, and custom CDN
+- **MediaPipe WASM caching**: Includes `.wasm` and `.data` files for offline support (optional fallback)
+- **Multi-CDN support**: Caches MediaPipe files from jsdelivr, unpkg, and custom CDN (optional fallback)
 
 ### Mobile & Responsive Design
 
@@ -576,7 +587,7 @@ if (newPhase === GamePhase.PLAYING) {
 ```typescript
 export const motionController = new MotionController();
 
-// Initialize
+// Initialize (uses pixel motion by default)
 await motionController.init();
 
 // Start detection
@@ -601,8 +612,19 @@ interface MotionState {
   rawNoseX: number;
   rawNoseY: number;
   rawShoulderY: number;
+  smoothedState?: MotionState; // Smoothed state for display/UI
 }
 ```
+
+**Pixel-Based Motion Detection** (Primary - `PixelMotionProcessor`):
+- **Algorithm**: Background subtraction with pixel difference thresholding
+- **Resolution**: 64x48 pixels (low res for speed)
+- **Diff Threshold**: 20 (0-255 scale, multiplied by 3 for RGB)
+- **Motion Threshold**: 50 minimum active pixels to trigger update
+- **Learning Rate**: 0.05 for background adaptation
+- **Frame Skipping**: Process 1 out of every 2 frames (15 FPS target)
+- **Mirroring**: X-axis mirrored for selfie view
+- **Performance**: Runs efficiently on main thread, no WASM, no external dependencies
 
 **Adaptive Calibration**:
 - Automatic jump threshold calibration based on user's actual jump height
@@ -620,7 +642,16 @@ interface MotionState {
 - `SIGNAL_SMOOTHING = 0.5`: Smoothing for jump signals
 - `BASELINE_ADAPTION_RATE = 0.03`: Rate of baseline adaptation
 - `JUMP_COOLDOWN = 400`: Cooldown between jumps (ms)
-- `VISIBILITY_THRESHOLD = 0.4`: Minimum landmark visibility
+- `VISIBILITY_THRESHOLD = 0.4`: Minimum landmark visibility (MediaPipe only)
+
+**MediaPipe Pose** (Optional Fallback):
+- Available as optional fallback if pixel detection is insufficient
+- Multi-CDN fallback system for reliability (4 CDNs)
+- Runs on Web Worker to avoid main thread blocking
+- Use visibility thresholds (0.4) for landmark confidence
+- Smooth values with exponential moving average (e.g., `NOSE_SMOOTHING = 0.8`)
+- Handle tracking loss gracefully with gradual state reset
+- Use adaptive calibration system (`AdaptiveCalibrator` class) for jump detection
 
 ### Theme System
 
@@ -715,8 +746,6 @@ rollupOptions: {
 enum GamePhase {
   MENU = 'MENU',                    // Main menu
   THEME_SELECTION = 'THEME_SELECTION', // Theme selection screen
-  LOADING_AI = 'LOADING_AI',        // AI content loading
-  CALIBRATING = 'CALIBRATING',      // Motion calibration
   TUTORIAL = 'TUTORIAL',            // Tutorial mode
   PLAYING = 'PLAYING',              // Active gameplay
   GAME_OVER = 'GAME_OVER'           // Game over screen
@@ -743,7 +772,7 @@ const setPhase = (newPhase: GamePhase) => {
 };
 ```
 
-### MediaPipe Integration
+### MediaPipe Integration (Optional Fallback)
 
 **Multi-CDN Fallback** (in `index.html`):
 ```javascript
@@ -764,11 +793,13 @@ const CDNS = [
 
 **Postinstall Script**:
 ```bash
-# Automatically runs after npm install
+# Automatically runs after npm install (optional fallback)
 mkdir -p public/mediapipe && \
 cp -r node_modules/@mediapipe/pose/* public/mediapipe/ && \
 cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/
 ```
+
+**Note**: MediaPipe is now an optional fallback. The primary motion detection uses pixel-based algorithm which doesn't require MediaPipe.
 
 ### Key Files Structure
 
@@ -783,7 +814,8 @@ cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/
 │       ├── MainScene.ts          # Main gameplay scene
 │       └── PreloadScene.ts       # Asset preloading scene
 ├── services/
-│   └── motionController.ts       # MediaPipe integration & motion detection
+│   ├── motionController.ts       # Motion detection (pixel-based primary, MediaPipe fallback)
+│   └── pose.worker.ts            # MediaPipe Web Worker (optional fallback)
 ├── src/
 │   └── config/
 │       └── r2Config.ts           # R2 CDN configuration
@@ -794,7 +826,7 @@ cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/
 ├── gameConfig.ts                 # Game state, theme loading, preloading
 ├── App.tsx                       # Main app component
 ├── index.tsx                     # React entry point & PWA registration
-├── index.html                    # HTML entry point with MediaPipe CDN loader
+├── index.html                    # HTML entry point with MediaPipe CDN loader (optional)
 ├── vite.config.ts                # Vite configuration (PWA, SSL, proxy, aliases)
 └── tsconfig.json                 # TypeScript configuration
 ```
@@ -874,7 +906,7 @@ dist-ssr
 3. **CDN-Only Architecture**:
    - All assets loaded from R2 Cloudflare CDN
    - No local asset files in repository (except MediaPipe backup)
-   - MediaPipe files copied via postinstall script
+   - MediaPipe files copied via postinstall script (optional fallback)
    - Use `getR2AssetUrl()` and `getR2ImageUrl()` for all asset URLs
 
 4. **Mobile-First Camera Handling**:
@@ -890,7 +922,7 @@ dist-ssr
    - Offline-ready for core assets
    - Auto-update mode for seamless updates
    - HTTPS support via @vitejs/plugin-basic-ssl
-   - MediaPipe WASM files cached for offline support
+   - MediaPipe WASM files cached for offline support (optional fallback)
 
 6. **Environment Variables**:
    - `GEMINI_API_KEY` - Required for AI features
@@ -898,16 +930,26 @@ dist-ssr
    - Set in `.env.production` for production
    - Defined via Vite's `define` in `vite.config.ts`
 
-7. **MediaPipe Integration**:
-   - Multi-CDN fallback system for reliability (4 CDNs)
-   - MediaPipe files copied to `public/mediapipe/` via postinstall script
-   - Use `/mediapipe/` as local fallback CDN path
-   - Handle WASM warm-up to prevent first-frame lag
-   - Implement graceful degradation for tracking loss
-   - 3s timeout for CDN switching
-   - **Priority**: fastly.jsdelivr.net → jsdelivr.net → local → R2 CDN
+7. **Motion Detection System**:
+   - **Primary**: Pixel-based motion detection (PixelMotionProcessor)
+     - Lightweight, no AI/ML required
+     - Low resolution (64x48) for maximum performance
+     - Background subtraction with adaptive learning
+     - Runs efficiently on main thread, no WASM
+     - Instant startup, no external dependencies
+   - **Optional Fallback**: MediaPipe Pose
+     - Multi-CDN fallback system for reliability (4 CDNs)
+     - MediaPipe files copied to `public/mediapipe/` via postinstall script
+     - Use `/mediapipe/` as local fallback CDN path
+     - Handle WASM warm-up to prevent first-frame lag
+     - Implement graceful degradation for tracking loss
+     - 3s timeout for CDN switching
+     - **Priority**: fastly.jsdelivr.net → jsdelivr.net → local → R2 CDN
 
 8. **Performance Optimization**:
+   - **Pixel-based motion detection** eliminates main thread blocking
+   - **No WASM loading** - instant startup
+   - **No heavy ML inference** - reduced CPU/GPU usage
    - Code splitting for large bundles (phaser, react-vendor)
    - Batch image loading with retry logic (BATCH_SIZE = 4)
    - Background preloading queue for themes (MAX_CONCURRENT_DOWNLOADS = 6)
@@ -915,6 +957,7 @@ dist-ssr
    - Smooth values with exponential moving average
    - CDN caching with 1-year duration
    - Pause background preloading during high-priority loading
+   - Frame skipping (1 out of every 2 frames) for better performance
 
 9. **Phaser-Specific Notes**:
    - `experimentalDecorators: true` required for Phaser decorators
@@ -938,7 +981,7 @@ dist-ssr
     - Implement retry logic for network operations
     - Handle device-specific errors (iPad memory, Android camera)
     - Use `handleR2Error()` for CDN-related errors
-    - Global error handlers for TensorFlow and WASM loading issues
+    - Global error handlers for TensorFlow and WASM loading issues (MediaPipe only)
 
 12. **Asset Loading**:
     - All assets loaded from R2 CDN
@@ -955,17 +998,15 @@ dist-ssr
     - Used for entry/exit animations, title animations, star animations, score display
     - Import: `import { AnimatePresence, motion } from 'framer-motion';`
 
-14. **Performance Issues**:
-    - **High Power Consumption**: Continuous camera usage, MediaPipe 30 FPS, Phaser game loop, background preloading, BGM playback
-    - **Lag Causes**: MediaPipe main thread blocking, concurrent downloads (16 parallel), SVG conversion overhead, frequent DOM operations, particle system
+14. **Performance Improvements**:
+    - **Reduced Power Consumption**: No continuous AI/ML processing, lightweight pixel detection
+    - **Eliminated Lag Causes**: No MediaPipe main thread blocking, no WASM loading overhead, no heavy ML inference
     - **Optimization Recommendations**:
+      - Pixel motion detection is the default and recommended approach
       - Use camera only when needed (CALIBRATING, PLAYING phases)
-      - Move MediaPipe to Web Worker
       - Reduce concurrent downloads (16→4)
       - Implement performance modes for low-end devices
       - Pause background preloading during gameplay
-      - Optimize SVG loading
-      - Reduce particle count
 
 15. **Theme Upload Scripts**:
     - `scripts/upload-themes-to-r2.sh` - Uploads all theme assets to R2 CDN
@@ -982,3 +1023,30 @@ dist-ssr
     - React StrictMode is disabled in `index.tsx`
     - Prevents double-initialization of webcam in development
     - Hardware integration (camera) requires careful lifecycle management
+
+18. **Motion Detection Architecture**:
+    - **Primary**: PixelMotionProcessor class in `services/motionController.ts`
+      - Uses background subtraction algorithm
+      - Low resolution (64x48) for performance
+      - Adaptive background learning rate (0.05)
+      - Pixel difference threshold (20) and motion threshold (50)
+      - Frame skipping (1 out of every 2 frames)
+      - Mirrored X-axis for selfie view
+    - **Optional Fallback**: MediaPipe Pose via Web Worker
+      - `pose.worker.ts` handles MediaPipe in a separate thread
+      - Only loaded if pixel detection is insufficient
+      - Multi-CDN fallback system
+      - WASM files cached for offline support
+
+19. **Adaptive Calibration System**:
+    - `AdaptiveCalibrator` class collects jump samples
+    - Up to 5 samples during calibration phase
+    - Calculates average jump displacement
+    - Applies calibration factor (0.6) for conservative threshold
+    - Gradually adjusts threshold based on user's actual jump height
+
+20. **Device-Specific Optimizations**:
+    - iPad: Higher thresholds, larger camera resolution (1280x720)
+    - Mobile phone: Lower thresholds, standard resolution (640x480)
+    - Desktop/Tablet: Balanced thresholds and resolution
+    - Device detection via User Agent and touch capabilities

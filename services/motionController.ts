@@ -1,19 +1,5 @@
 import { MotionState } from '../types';
 
-declare const Pose: any;
-
-interface ImportMeta {
-  readonly prod?: boolean;
-}
-
-interface WindowWithCDN extends Window {
-  __MEDIAPIPE_CDN__?: string;
-  tf?: any;
-  innerWidth: number;
-}
-
-declare const window: WindowWithCDN;
-
 const LOG_LEVEL = {
   DEBUG: 0,
   INFO: 1,
@@ -31,47 +17,6 @@ function log(level: number, tag: string, message: string, data?: any) {
   else console.error(prefix, message, data);
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
-
-class AdaptiveCalibrator {
-  private jumpDisplacements: number[] = [];
-  private readonly maxSamples = 5;
-  private readonly calibrationFactor = 0.6;
-
-  addJumpSample(displacement: number): void {
-    if (this.jumpDisplacements.length < this.maxSamples) {
-      this.jumpDisplacements.push(displacement);
-      log(1, 'CALIB', `Calibration sample ${this.jumpDisplacements.length}/${this.maxSamples}: ${displacement.toFixed(4)}`);
-    }
-  }
-
-  getCalibratedThreshold(baseThreshold: number): number {
-    if (this.jumpDisplacements.length < 3) {
-      return baseThreshold;
-    }
-    const avg = this.jumpDisplacements.reduce((a, b) => a + b, 0) / this.jumpDisplacements.length;
-    const calibrated = avg * this.calibrationFactor;
-    // log(1, 'CALIB', `Calibrated threshold: ${baseThreshold.toFixed(4)} -> ${calibrated.toFixed(4)} (avg: ${avg.toFixed(4)})`);
-    return Math.min(calibrated, baseThreshold * 1.5);
-  }
-
-  isCalibrating(): boolean {
-    return this.jumpDisplacements.length < this.maxSamples;
-  }
-
-  getProgress(): number {
-    return this.jumpDisplacements.length / this.maxSamples;
-  }
-}
-
-const NOSE_SMOOTHING = 0.8;
-const SIGNAL_SMOOTHING = 0.5;
-const BASELINE_ADAPTION_RATE = 0.03;
-const JUMP_COOLDOWN = 400;
-const VISIBILITY_THRESHOLD = 0.4;
-
 /**
  * A lightweight pixel difference motion detector.
  * Detects center of motion to emulate body position.
@@ -81,121 +26,133 @@ class PixelMotionProcessor {
     private ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null;
     private width = 64; // Low res for speed
     private height = 48;
-    private prevFrameData: Uint8ClampedArray | null = null;
     private backgroundData: Float32Array | null = null;
     
     // Config
     private readonly diffThreshold = 20; // Pixel diff threshold (0-255)
-    private readonly motionThreshold = 50; // Minimum active pixels to trigger update
-    private readonly learningRate = 0.05; // Background adaptation rate (slow)
+    private readonly motionThreshold = 5; // Minimum active pixels to trigger update
+    private readonly learningRate = 0.025; // Slower adaptation to prevent "fading" when standing still
+    
+    // Persistence
+    private lastValidX = 0.5;
+    private lastValidY = 0.5;
+    private lastValidTime = 0;
+    private readonly persistenceDuration = 1500; // Hold position for 1.5s after motion stops
 
     constructor() {
-        if (typeof OffscreenCanvas !== 'undefined') {
-            this.canvas = new OffscreenCanvas(this.width, this.height);
-        } else {
-            this.canvas = document.createElement('canvas');
-            this.canvas.width = this.width;
-            this.canvas.height = this.height;
+        // Safe canvas creation
+        try {
+            if (typeof OffscreenCanvas !== 'undefined') {
+                this.canvas = new OffscreenCanvas(this.width, this.height);
+            } else {
+                this.canvas = document.createElement('canvas');
+                this.canvas.width = this.width;
+                this.canvas.height = this.height;
+            }
+            this.ctx = this.canvas.getContext('2d', { willReadFrequently: true }) as any;
+        } catch (e) {
+            console.error('[PixelMotion] Failed to create canvas context', e);
+            this.canvas = document.createElement('canvas'); // Fallback
+            this.ctx = null;
         }
-        this.ctx = this.canvas.getContext('2d', { willReadFrequently: true }) as any;
     }
 
-    process(video: HTMLVideoElement): { x: number, y: number, isMotion: boolean } | null {
-        if (!this.ctx) return null;
+    process(video: HTMLVideoElement): { x: number, y: number, isMotion: boolean, debug?: any } | null {
+        if (!this.ctx || video.videoWidth === 0) return null;
 
-        // Draw current frame
-        this.ctx.drawImage(video, 0, 0, this.width, this.height);
-        const imageData = this.ctx.getImageData(0, 0, this.width, this.height);
-        const data = imageData.data;
-        const len = data.length;
+        try {
+            // Draw current frame
+            this.ctx.drawImage(video, 0, 0, this.width, this.height);
+            const imageData = this.ctx.getImageData(0, 0, this.width, this.height);
+            const data = imageData.data;
+            const len = data.length;
 
-        // Init background if needed
-        if (!this.backgroundData) {
-            this.backgroundData = new Float32Array(len);
-            for (let i = 0; i < len; i++) {
-                this.backgroundData[i] = data[i];
+            // Init background if needed
+            if (!this.backgroundData) {
+                this.backgroundData = new Float32Array(len);
+                for (let i = 0; i < len; i++) {
+                    this.backgroundData[i] = data[i];
+                }
+                return { x: 0.5, y: 0.5, isMotion: false };
             }
+
+            let sumX = 0;
+            let sumY = 0;
+            let count = 0;
+
+            // Compare with background
+            for (let i = 0; i < len; i += 4) {
+                const r = data[i];
+                const g = data[i+1];
+                const b = data[i+2];
+                
+                const bgR = this.backgroundData[i];
+                const bgG = this.backgroundData[i+1];
+                const bgB = this.backgroundData[i+2];
+
+                // Diff
+                const diff = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
+                
+                // Threshold
+                if (diff > this.diffThreshold * 3) { // *3 because we sum RGB
+                    const idx = i / 4;
+                    const x = idx % this.width;
+                    const y = Math.floor(idx / this.width);
+                    
+                    sumX += x;
+                    sumY += y;
+                    count++;
+                }
+
+                // Update background (Running Average)
+                // Use a slower learning rate to keep the background stable
+                this.backgroundData[i] = bgR * (1 - this.learningRate) + r * this.learningRate;
+                this.backgroundData[i+1] = bgG * (1 - this.learningRate) + g * this.learningRate;
+                this.backgroundData[i+2] = bgB * (1 - this.learningRate) + b * this.learningRate;
+            }
+
+            const now = performance.now();
+
+            if (count < this.motionThreshold) {
+                // If no motion, hold position for a while (persistence)
+                if (now - this.lastValidTime < this.persistenceDuration) {
+                    return { x: this.lastValidX, y: this.lastValidY, isMotion: true };
+                }
+                return { x: 0.5, y: 0.5, isMotion: false };
+            }
+
+            const centerX = (sumX / count) / this.width;
+            const centerY = (sumY / count) / this.height;
+
+            // Mirror X for selfie view
+            // Physical Left -> Camera Right (High X) -> 1-X -> Low X (Left)
+            const finalX = 1 - centerX;
+            const finalY = centerY;
+
+            // Update persistence
+            this.lastValidX = finalX;
+            this.lastValidY = finalY;
+            this.lastValidTime = now;
+
+            return { x: finalX, y: finalY, isMotion: true }; 
+        } catch (e) {
+            console.warn("Pixel process error", e);
             return null;
         }
-
-        let sumX = 0;
-        let sumY = 0;
-        let count = 0;
-
-        // Compare with background
-        for (let i = 0; i < len; i += 4) {
-            // Simple grayscale diff
-            const r = data[i];
-            const g = data[i+1];
-            const b = data[i+2];
-            
-            const bgR = this.backgroundData[i];
-            const bgG = this.backgroundData[i+1];
-            const bgB = this.backgroundData[i+2];
-
-            // Diff
-            const diff = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
-            
-            // Threshold
-            if (diff > this.diffThreshold * 3) { // *3 because we sum RGB
-                const idx = i / 4;
-                const x = idx % this.width;
-                const y = Math.floor(idx / this.width);
-                
-                sumX += x;
-                sumY += y;
-                count++;
-            }
-
-            // Update background (Running Average)
-            this.backgroundData[i] = bgR * (1 - this.learningRate) + r * this.learningRate;
-            this.backgroundData[i+1] = bgG * (1 - this.learningRate) + g * this.learningRate;
-            this.backgroundData[i+2] = bgB * (1 - this.learningRate) + b * this.learningRate;
-        }
-
-        if (count < this.motionThreshold) {
-            return { x: 0.5, y: 0.5, isMotion: false };
-        }
-
-        const centerX = (sumX / count) / this.width;
-        const centerY = (sumY / count) / this.height;
-
-        return { x: 1 - centerX, y: centerY, isMotion: true }; // Mirror X for selfie view
     }
 }
 
 export class MotionController {
-  private pose: any = null; // Back for fallback
-  private worker: Worker | null = null;
   private video: HTMLVideoElement | null = null;
   private isRunning: boolean = false;
   private requestRef: number | null = null;
   private lastFrameTime: number = 0;
   private readonly TARGET_FPS = 30;
   private readonly FRAME_MIN_TIME = 1000 / 30;
-  private useWorker: boolean = true; // Flag to track if we are using worker or main thread
 
-  private xThreshold: number = 0.15;
-  private jumpThresholdY: number = 0.08;
-
-  private jumpStableFrames: number = 0;
-  private requiredStableFrames: number = 2;
-
-  private consecutiveMissedDetections: number = 0;
-  private maxMissedFrames: number = 15;
-  private framesSinceRecovery: number = 0;
-  private recoveryStableFrames: number = 3;
-
-  private shoulderWidthBase: number = 0;
-  private currentShoulderWidth: number = 0;
-
-  private currentNoseX: number = 0.5;
-  private currentNoseY: number = 0.5;
-  private currentBodyX: number = 0.5;
-  private restingShoulderY: number = 0.5;
-  private smoothedShoulderY: number = 0.5;
-  private lastJumpTime: number = 0;
-
+  // Thresholds for Pixel Motion
+  private xThreshold: number = 0.12; 
+  
   public state: MotionState = {
     x: 0,
     bodyX: 0.5,
@@ -213,8 +170,6 @@ export class MotionController {
     }
   };
 
-  // Smoothed state for display/UI (to hide low FPS)
-  // DEPRECATED: Use state.smoothedState instead
   public smoothedState: MotionState = {
     x: 0,
     bodyX: 0.5,
@@ -226,817 +181,165 @@ export class MotionController {
 
   public isReady: boolean = false;
   public isStarted: boolean = false;
-  public isNoseDetected: boolean = false;
-  private hasFatalError: boolean = false;
+  public isNoseDetected: boolean = true; // Always true for pixel motion once started
   public onMotionDetected: ((type: 'jump' | 'move') => void) | null = null;
 
   private initPromise: Promise<void> | null = null;
-  private isIPad: boolean = false;
-  private isAndroid: boolean = false;
-  private isMobilePhone: boolean = false;
-  private actualFPS: number = 30;
-
-  private calibrator = new AdaptiveCalibrator();
-  private lastNoseXForGradual: number = 0.5;
-  private lastNoseYForGradual: number = 0.5;
-  private trackingQuality: number = 1.0;
-  private lastResultsTimeMs: number | null = null;
-
-  private neutralBodyX: number = 0.5;
-  private neutralBodyXSum: number = 0;
-  private neutralBodyXSamples: number = 0;
-  private neutralBodyXTargetSamples: number = 20;
-
-  private lastYSignal: number | null = null;
-  private lastYVelocityStableFrames: number = 0;
-  private jumpVelocityThreshold: number = 0.15; // Relaxed further from 0.25 for 15 FPS
-  private jumpArmed: boolean = true;
-
-  private frameSkipCounter: number = 0;
-  private readonly FRAME_SKIP_INTERVAL = 2; // Process 1 out of every 2 frames (15 FPS target)
-
-  private usePixelMotion: boolean = true; // Use simple pixel-based motion detection
+  
   private pixelProcessor: PixelMotionProcessor | null = null;
+  
+  private currentBodyX: number = 0.5;
+  private smoothedShoulderY: number = 0.5;
+  
+  // Jump Logic
+  private lastJumpTime: number = 0;
+  private readonly JUMP_COOLDOWN = 600;
 
   async init() {
     if (this.initPromise) return this.initPromise;
 
     this.initPromise = (async () => {
-      const startTime = performance.now();
-      log(1, 'INIT', 'Initializing Pixel Motion (No AI Mode)...');
-
-      const ua = navigator.userAgent;
-      this.isIPad = /iPad|Macintosh/i.test(ua) && 'ontouchend' in document;
-      this.isAndroid = /Android/i.test(ua);
-      this.isMobilePhone = /iPhone|Android|Mobile/i.test(ua) && !/iPad|Tablet/i.test(ua);
-
-      // Initialize Pixel Processor
-      this.pixelProcessor = new PixelMotionProcessor();
-      this.isReady = true;
-      this.usePixelMotion = true;
-      this.useWorker = false;
-      
-      log(1, 'INIT', 'Pixel Motion initialized (No AI loaded)');
+      log(1, 'INIT', 'Initializing Pixel Motion Controller...');
+      try {
+        this.pixelProcessor = new PixelMotionProcessor();
+        this.isReady = true;
+        log(1, 'INIT', 'Pixel Motion Ready');
+      } catch (e) {
+        console.error('[MotionController] Init failed', e);
+        // Still set ready to true to prevent blocking, but functionality will be impaired
+        this.isReady = true; 
+      }
     })();
 
     return this.initPromise;
   }
 
-  private async initWorker() {
-      // Initialize Worker
-      this.worker = new Worker(new URL('./pose.worker.ts', import.meta.url), { type: 'classic' });
-
-      // Wait for CDN from index.html (or fallback logic)
-      let cdnUrl = window.__MEDIAPIPE_CDN__;
-      if (!cdnUrl) {
-         log(2, 'INIT', 'MediaPipe CDN not set yet, waiting...');
-         let attempts = 0;
-         while (!window.__MEDIAPIPE_CDN__ && attempts < 20) {
-             await new Promise(r => setTimeout(r, 500));
-             attempts++;
-         }
-         cdnUrl = window.__MEDIAPIPE_CDN__ || '/mediapipe/';
-      }
-
-      // Ensure CDN URL is absolute for Worker
-      if (cdnUrl && !cdnUrl.startsWith('http')) {
-         cdnUrl = new URL(cdnUrl, window.location.origin).href;
-         log(1, 'INIT', `Resolved relative CDN URL to absolute: ${cdnUrl}`);
-      }
-
-      return new Promise<void>((resolve, reject) => {
-          if (!this.worker) return reject('Worker creation failed');
-
-          const timeout = setTimeout(() => {
-              reject(new Error('Worker init timeout (15s)'));
-          }, 15000);
-
-          this.worker.onmessage = (e) => {
-              const { type, results, error } = e.data;
-              if (type === 'ready') {
-                  clearTimeout(timeout);
-                  this.isReady = true;
-                  log(1, 'INIT', 'MediaPipe Worker ready');
-                  resolve();
-              } else if (type === 'result') {
-                  this.onResults(results);
-              } else if (type === 'error') {
-                  clearTimeout(timeout);
-                  console.error('[MotionController] Worker error:', error);
-                  reject(new Error(error));
-              }
-          };
-
-          this.worker.postMessage({
-              type: 'init',
-              cdnUrl,
-              config: {
-                  isIPad: this.isIPad,
-                  isAndroid: this.isAndroid,
-                  isMobilePhone: this.isMobilePhone
-              }
-          });
-      });
-  }
-
-  private async initMainThread() {
-      // Wait for MediaPipe script to load (with timeout)
-      if (typeof Pose === 'undefined') {
-        log(2, 'INIT', 'MediaPipe Pose not ready, waiting...');
-        let attempts = 0;
-        while (typeof Pose === 'undefined' && attempts < 10) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          attempts++;
-          if (typeof Pose !== 'undefined') {
-            log(1, 'INIT', 'MediaPipe Pose loaded after wait');
-            break;
-          }
-        }
-
-        if (typeof Pose === 'undefined') {
-          throw new Error('MediaPipe Pose script not loaded after 10s');
-        }
-      }
-
-      this.isReady = false;
-      this.hasFatalError = false;
-
-      const preferredList = [
-          window.__MEDIAPIPE_CDN__,
-          'https://fastly.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
-          'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
-          '/mediapipe/',
-          'https://cdn.maskmysheet.com/mediapipe/'
-      ].filter((v): v is string => typeof v === 'string' && v.length > 0);
-
-      const seen = new Set<string>();
-      const baseCandidates: string[] = [];
-      for (const raw of preferredList) {
-          const normalized = this.ensureTrailingSlash(raw);
-          if (!seen.has(normalized)) {
-            seen.add(normalized);
-            baseCandidates.push(normalized);
-          }
-      }
-
-      let initialized = false;
-      let lastError: unknown = null;
-
-      for (const baseUrl of baseCandidates) {
-          log(1, 'INIT', `Trying MediaPipe base: ${baseUrl}`);
-          try {
-            await this.initWithBase(baseUrl);
-            initialized = true;
-            break;
-          } catch (e) {
-            lastError = e;
-            log(2, 'INIT', `MediaPipe init failed for base: ${baseUrl}`, e);
-            this.pose?.close?.();
-            this.pose = null;
-          }
-      }
-
-      if (!initialized) {
-          throw lastError instanceof Error ? lastError : new Error('MediaPipe 初始化失败');
-      }
-      
-      this.isReady = true;
-  }
-
-  private async initWithBase(baseUrl: string): Promise<void> {
-    const resolvedBaseUrl = this.ensureTrailingSlash(baseUrl);
-
-    this.pose = new Pose({
-      locateFile: (file: string) => {
-        const effectiveFile = this.getEffectiveMediapipeFile(file);
-        const url = `${resolvedBaseUrl}${effectiveFile}`;
-        log(1, 'CDN', `Locating file: ${file} -> ${url}`);
-        return url;
-      }
-    });
-
-    const minDetectionConf = (this.isIPad || this.isAndroid || this.isMobilePhone) ? 0.3 : 0.5;
-    const minTrackingConf = (this.isIPad || this.isAndroid || this.isMobilePhone) ? 0.3 : 0.5;
-
-    this.pose.setOptions({
-      modelComplexity: 0, // Force Lite model for performance
-      smoothLandmarks: true,
-      minDetectionConfidence: minDetectionConf,
-      minTrackingConfidence: minTrackingConf,
-      selfieMode: false
-    });
-
-    log(1, 'INIT', `Confidence: Detection=${minDetectionConf}, Tracking=${minTrackingConf}`);
-
-    this.pose.onResults(this.onResults.bind(this));
-
-    await this.prefetchMediapipeDependencies(resolvedBaseUrl);
-    await this.warmupPose(5000);
-
-    this.isReady = true;
-    log(1, 'INIT', `MediaPipe ready with base: ${resolvedBaseUrl}`);
-  }
-
-  private getEffectiveMediapipeFile(file: string): string {
-    if (this.isIPad && file.startsWith('pose_solution_simd_wasm_bin')) {
-      return file.replace('pose_solution_simd_wasm_bin', 'pose_solution_wasm_bin');
-    }
-    return file;
-  }
-
-  private async prefetchMediapipeDependencies(baseUrl: string): Promise<void> {
-    const files = [
-      'pose_solution_packed_assets_loader.js',
-      'pose_solution_packed_assets.data',
-      'pose_solution_simd_wasm_bin.js',
-      'pose_solution_simd_wasm_bin.wasm',
-      'pose_solution_wasm_bin.js',
-      'pose_solution_wasm_bin.wasm'
-    ];
-
-    for (const file of files) {
-      const url = `${baseUrl}${file}`;
-      await this.prefetchBinary(url, 15000, 2);
-    }
-  }
-
-  private async prefetchBinary(url: string, timeoutMs: number, retries: number): Promise<void> {
-    let lastError: unknown = null;
-
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        log(1, 'CDN', `Prefetching: ${url} (attempt ${attempt + 1}/${retries + 1})`);
-        const controller = new AbortController();
-        const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
-        const resp = await fetch(url, { mode: 'cors', cache: 'reload', signal: controller.signal });
-        window.clearTimeout(timeoutId);
-
-        if (!resp.ok) {
-          throw new Error(`Prefetch failed: ${resp.status} ${resp.statusText}`);
-        }
-
-        await resp.arrayBuffer();
-        
-        // Log cache status
-        let cacheStatus = 'UNKNOWN';
-        if (performance) {
-           const entries = performance.getEntriesByName(url);
-           if (entries.length > 0) {
-              const entry = entries[entries.length - 1] as PerformanceResourceTiming;
-              // transferSize === 0 often indicates Service Worker cache or Disk cache
-              if (entry.transferSize === 0) cacheStatus = 'HIT (SW/Disk)';
-              else if (entry.transferSize > 0 && entry.transferSize < entry.encodedBodySize) cacheStatus = 'HIT (Revalidated)';
-              else cacheStatus = 'MISS (Network)';
-           }
-        }
-        
-        log(1, 'CDN', `Prefetch ok: ${url} [Cache: ${cacheStatus}]`);
-        return;
-      } catch (e) {
-        lastError = e;
-        log(2, 'CDN', `Prefetch error: ${url}`, e);
-        if (attempt < retries) {
-          await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
-        }
-      }
-    }
-
-    throw lastError instanceof Error ? lastError : new Error(`Prefetch failed: ${url}`);
-  }
-
-  private async warmupPose(timeoutMs: number): Promise<void> {
-    if (!this.pose) throw new Error('Pose not initialized');
-
-    const dummyCanvas = document.createElement('canvas');
-    dummyCanvas.width = 64;
-    dummyCanvas.height = 64;
-    const ctx = dummyCanvas.getContext('2d');
-    if (!ctx) throw new Error('Failed to create canvas context for warmup');
-
-    ctx.fillStyle = 'black';
-    ctx.fillRect(0, 0, 64, 64);
-
-    log(1, 'INIT', 'Warm-up send begin');
-
-    const warmupPromise: Promise<void> = this.pose.send({ image: dummyCanvas });
-    const timeoutPromise = new Promise<void>((_, reject) => {
-      window.setTimeout(() => reject(new Error('Warm-up timeout')), timeoutMs);
-    });
-
-    await Promise.race([warmupPromise, timeoutPromise]);
-    log(1, 'INIT', 'Warm-up send ok');
-  }
-
-  private ensureTrailingSlash(url: string): string {
-    return url.endsWith('/') ? url : `${url}/`;
-  }
-  
   async start(videoElement: HTMLVideoElement) {
     if (this.isRunning) {
-      log(1, 'START', 'Already running, updating video element');
       this.video = videoElement;
       return;
     }
-    log(1, 'START', 'Starting...');
-    if (!this.worker && !this.pose) {
-      await this.init();
+    log(1, 'START', 'Starting Motion Controller...');
+    
+    if (!this.pixelProcessor) {
+        await this.init();
     }
+    
     this.video = videoElement;
     this.isRunning = true;
     this.isStarted = true;
+    this.isNoseDetected = true; 
 
-    this.currentNoseX = 0.5;
-    this.lastNoseXForGradual = 0.5;
-    this.currentNoseY = 0.5;
-    this.lastNoseYForGradual = 0.5;
+    // Reset state
     this.currentBodyX = 0.5;
-    this.restingShoulderY = 0.5;
     this.smoothedShoulderY = 0.5;
-    this.consecutiveMissedDetections = 0;
-    this.trackingQuality = 1.0;
-    this.lastResultsTimeMs = null;
+    this.state.isJumping = false;
+    this.state.bodyX = 0.5;
+    this.state.rawNoseX = 0.5;
+    this.state.rawNoseY = 0.5;
 
-    this.neutralBodyX = 0.5;
-    this.neutralBodyXSum = 0;
-    this.neutralBodyXSamples = 0;
-
-    this.lastYSignal = null;
-    this.lastYVelocityStableFrames = 0;
-    this.jumpArmed = true;
-
-    log(1, 'START', 'Beginning frame processing loop');
+    log(1, 'START', 'Loop starting');
     this.processFrame();
   }
 
   stop() {
-    log(1, 'STOP', 'Stopping...');
     this.isRunning = false;
     this.isStarted = false;
     if (this.requestRef) cancelAnimationFrame(this.requestRef);
   }
 
-  calibrate() {
-    if (this.state.rawShoulderY) {
-      this.restingShoulderY = this.smoothedShoulderY;
-      this.shoulderWidthBase = this.currentShoulderWidth;
-    }
-    this.neutralBodyX = this.state.bodyX;
-    this.neutralBodyXSum = 0;
-    this.neutralBodyXSamples = 0;
-  }
+  // No-op for compatibility
+  calibrate() {}
+  getCalibrationProgress() { return 1; }
+  isCalibrating() { return false; }
 
   private async processFrame() {
-    if (!this.isRunning) return;
-
-    // If not ready or video not ready, skip processing but KEEP LOOP ALIVE
-    if ((!this.worker && !this.pose) || !this.isReady || this.hasFatalError || !this.video || this.video.readyState < 2) {
-      if (this.isRunning) {
-        // Log occasionally to help debugging why it's waiting
-        if (Math.random() < 0.01) {
-           log(1, 'LOOP', `Waiting... isReady=${this.isReady}, hasWorker=${!!this.worker}, hasPose=${!!this.pose}, video=${this.video?.readyState}, fatal=${this.hasFatalError}`);
-        }
-        this.requestRef = requestAnimationFrame(() => this.processFrame());
-      }
-      return;
-    }
+    if (!this.isRunning || !this.video || !this.pixelProcessor) return;
 
     const now = performance.now();
     const elapsed = now - this.lastFrameTime;
 
     if (elapsed >= this.FRAME_MIN_TIME) {
-        // Frame Throttling Logic
-        this.frameSkipCounter++;
+        // --- 1. Process Motion ---
+        const result = this.pixelProcessor.process(this.video);
         
-        // INTERPOLATION LOGIC:
-        // Even if we skip AI processing, we must smooth the output values 
-        // to make the game feel responsive (60 FPS visual, 15 FPS AI)
-        const lerpFactor = 0.2; // Smooth movement
-        
-        // Ensure state.smoothedState is initialized
-        if (!this.state.smoothedState) {
-            this.state.smoothedState = { ...this.state };
-        }
+        if (result && result.isMotion) {
+            const targetX = result.x;
+            const targetY = result.y;
 
-        this.state.smoothedState.bodyX = (this.state.smoothedState.bodyX || 0.5) * (1 - lerpFactor) + this.state.bodyX * lerpFactor;
-        this.state.smoothedState.rawNoseX = (this.state.smoothedState.rawNoseX || 0.5) * (1 - lerpFactor) + this.state.rawNoseX * lerpFactor;
-        this.state.smoothedState.rawNoseY = (this.state.smoothedState.rawNoseY || 0.5) * (1 - lerpFactor) + this.state.rawNoseY * lerpFactor;
-        // Sync discrete states
+            // --- 2. Update X (Horizontal) ---
+            // Smooth interpolation (0.7/0.3 is responsive but smooth)
+            this.currentBodyX = this.currentBodyX * 0.7 + targetX * 0.3;
+            
+            // Map to State
+            this.state.bodyX = this.currentBodyX;
+            this.state.rawNoseX = this.currentBodyX; // Map centroid X to nose X for Red Ball
+            this.state.rawNoseY = targetY;           // Map centroid Y to nose Y for Red Ball
+
+            // Lane Logic
+            let targetLane = 0;
+            if (this.currentBodyX > (0.5 + this.xThreshold)) {
+                targetLane = -1; // Left
+            } else if (this.currentBodyX < (0.5 - this.xThreshold)) {
+                targetLane = 1;  // Right
+            } else {
+                targetLane = 0;  // Center
+            }
+
+            if (this.state.x !== targetLane) {
+                // log(0, 'MOVE', `Lane: ${targetLane} (X: ${this.currentBodyX.toFixed(2)})`);
+                this.onMotionDetected?.('move');
+            }
+            this.state.x = targetLane;
+
+            // --- 3. Update Y (Jump) ---
+            // Calculate velocity (Up is negative Y in pixels, so Old - New is positive up)
+            const dy = this.smoothedShoulderY - targetY;
+            const dtSec = elapsed / 1000;
+            const velocity = dy / (dtSec > 0 ? dtSec : 0.033); 
+            
+            // Update smoothed baseline
+            this.smoothedShoulderY = this.smoothedShoulderY * 0.8 + targetY * 0.2;
+            this.state.rawShoulderY = this.smoothedShoulderY;
+
+            // Jump Trigger
+            // Relaxed Thresholds: Vel > 0.5, dy > 0.03
+            if (velocity > 0.5 && dy > 0.03 && !this.state.isJumping) {
+                if (now - this.lastJumpTime > this.JUMP_COOLDOWN) {
+                    log(1, 'JUMP', `Jump Detected! Vel: ${velocity.toFixed(2)}, Dy: ${dy.toFixed(2)}`);
+                    this.state.isJumping = true;
+                    this.lastJumpTime = now;
+                    this.onMotionDetected?.('jump');
+                    
+                    // Auto-reset jump state
+                    setTimeout(() => { this.state.isJumping = false; }, 400);
+                }
+            }
+        } 
+
+        // --- 4. Sync Smoothed State ---
+        // Ensure sub-object exists
+        if (!this.state.smoothedState) {
+             this.state.smoothedState = { ...this.state };
+        }
+        
+        // Always sync the latest calculation to smoothedState
+        // MainScene uses smoothedState for smooth rendering
+        this.state.smoothedState.bodyX = this.state.bodyX;
+        this.state.smoothedState.rawNoseX = this.state.rawNoseX;
+        this.state.smoothedState.rawNoseY = this.state.rawNoseY;
         this.state.smoothedState.x = this.state.x;
         this.state.smoothedState.isJumping = this.state.isJumping;
-
-        // Sync legacy smoothedState property for compatibility
+        
+        // Link the top-level property for compatibility
         this.smoothedState = this.state.smoothedState;
 
-        if (this.frameSkipCounter % this.FRAME_SKIP_INTERVAL !== 0) {
-            // Skip this frame but keep loop running
-             if (this.isRunning) {
-                 this.requestRef = requestAnimationFrame(() => this.processFrame());
-             }
-             return;
-        }
-
-        try {
-          if (this.usePixelMotion && this.pixelProcessor) {
-             const result = this.pixelProcessor.process(this.video);
-             if (result && result.isMotion) {
-                 this.isNoseDetected = true;
-                 
-                 // Update State from Pixel Motion
-                 // Map pixel result (0..1) to bodyX
-                 // Smooth it a bit
-                 const targetX = result.x;
-                 const targetY = result.y;
-                 
-                 this.currentBodyX = this.currentBodyX * 0.7 + targetX * 0.3;
-                 this.state.bodyX = this.currentBodyX;
-                 
-                 // Emulate nose pos for compatibility
-                 this.state.rawNoseX = this.currentBodyX; 
-                 this.state.rawNoseY = targetY;
-
-                 // Lane Detection
-                 let targetLane = 0;
-                 if (this.currentBodyX > (0.5 + this.xThreshold)) {
-                   targetLane = -1; 
-                 } else if (this.currentBodyX < (0.5 - this.xThreshold)) {
-                   targetLane = 1; 
-                 } else {
-                   targetLane = 0;
-                 }
-                 if (this.state.x !== targetLane) {
-                   this.onMotionDetected?.('move');
-                 }
-                 this.state.x = targetLane;
-
-                 // Jump Detection (Simple Velocity)
-                 const dtSec = this.FRAME_MIN_TIME * this.FRAME_SKIP_INTERVAL / 1000;
-                 const yVel = (this.smoothedShoulderY - targetY) / dtSec; // Up is negative Y in pixels, so (Old - New) is positive up velocity
-                 
-                 // Update smoothed Y for next frame
-                 this.smoothedShoulderY = this.smoothedShoulderY * 0.5 + targetY * 0.5;
-                 
-                 // Thresholds for pixel motion need to be tuned
-                 const jumpVelThreshold = 0.5; // Pixels per sec normalized?
-                 
-                 if (yVel > jumpVelThreshold && !this.state.isJumping) {
-                     this.state.isJumping = true;
-                     this.onMotionDetected?.('jump');
-                     setTimeout(() => { this.state.isJumping = false; }, 400);
-                 }
-             } else {
-                 // No motion detected, decay to center?
-                 // Or just keep last position
-             }
-          } else if (this.useWorker && this.worker) {
-              // Worker mode: create ImageBitmap
-              // Check if createImageBitmap is supported
-              if (typeof createImageBitmap !== 'undefined') {
-                  const imageBitmap = await createImageBitmap(this.video);
-                  this.worker.postMessage({ type: 'frame', image: imageBitmap }, [imageBitmap]);
-              } else {
-                  // Fallback if createImageBitmap is missing but we somehow got into worker mode?
-                  // This shouldn't happen if we check properly, but as a safeguard:
-                  throw new Error('createImageBitmap not supported');
-              }
-          } else if (this.pose) {
-              // Main thread mode
-              await this.pose.send({ image: this.video });
-          }
-
-          this.lastFrameTime = now;
-
-          const actualFrameTime = elapsed;
-          this.actualFPS = this.actualFPS * 0.9 + (1000 / actualFrameTime) * 0.1;
-          // Scale FPS display by skip interval to show "effective" FPS capability
-          const effectiveFPS = this.actualFPS * this.FRAME_SKIP_INTERVAL;
-          if (Math.random() < 0.01) {
-            log(0, 'FPS', `Actual FPS: ${this.actualFPS.toFixed(1)} (Effective: ${effectiveFPS.toFixed(1)})`);
-          }
-        } catch (e) {
-          const errorStr = String(e);
-
-          if (this.isIPad) {
-            if (errorStr.includes('memory') || errorStr.includes('WebGL')) {
-              log(2, 'IPAD', 'Memory/WebGL error, continuing...');
-              return;
-            }
-          }
-
-          if (errorStr.includes('graph') || errorStr.includes('tflite')) {
-            log(3, 'FATAL', 'MediaPipe graph error, stopping loop');
-            this.hasFatalError = true;
-            
-            // If we were using worker and it crashed, try to restart or just stop?
-            // For now, stop to avoid infinite loop of crashes.
-            return;
-          }
-          
-          log(2, 'FRAME', 'Frame processing error', e);
-        }
+        this.lastFrameTime = now;
     }
 
     if (this.isRunning) {
       this.requestRef = requestAnimationFrame(() => this.processFrame());
     }
-  }
-
-  private handleLostTracking(reason: string) {
-    this.isNoseDetected = false;
-    this.state.isJumping = false;
-    
-    this.jumpStableFrames = 0;
-    this.lastResultsTimeMs = null;
-    this.lastYSignal = null;
-    this.lastYVelocityStableFrames = 0;
-    this.jumpArmed = true;
-    
-    if (this.consecutiveMissedDetections > 5) {
-        this.smoothedShoulderY = 0.5; 
-    }
-
-    this.consecutiveMissedDetections++;
-    this.framesSinceRecovery = 0;
-
-    this.trackingQuality = Math.max(0.1, 1 - (this.consecutiveMissedDetections / this.maxMissedFrames));
-
-    // Reset neutralBodyX to 0.5 (center) on tracking loss to clear bad calibration
-    if (this.consecutiveMissedDetections >= this.maxMissedFrames) {
-      // log(2, 'TRACK', `Tracking lost for ${this.maxMissedFrames} frames (${reason}), gradual reset`);
-
-      const gradualReturnRate = 0.02;
-      this.lastNoseXForGradual = this.lastNoseXForGradual * (1 - gradualReturnRate) + 0.5 * gradualReturnRate;
-      this.lastNoseYForGradual = this.lastNoseYForGradual * (1 - gradualReturnRate) + 0.5 * gradualReturnRate;
-      this.state.rawNoseX = this.lastNoseXForGradual;
-      this.state.rawNoseY = this.lastNoseYForGradual;
-      
-      // Slowly drift neutralBodyX back to 0.5 if tracking is lost
-      this.neutralBodyX = this.neutralBodyX * 0.98 + 0.5 * 0.02;
-
-      if (this.consecutiveMissedDetections >= 90) {
-        this.restingShoulderY = 0.5;
-        this.smoothedShoulderY = 0.5;
-        this.neutralBodyX = 0.5; // Force reset
-        this.consecutiveMissedDetections = 0;
-        log(2, 'TRACK', 'Full reset after extended tracking loss');
-      }
-    } else if (this.consecutiveMissedDetections % 15 === 0) {
-      log(2, 'TRACK', `Tracking flickering (${reason}), frames: ${this.consecutiveMissedDetections}`);
-    }
-  }
-
-  private onResults(results: any) {
-    if (!this.isRunning) return;
-
-    const nowMs = performance.now();
-    const dtSec = this.lastResultsTimeMs === null ? (1 / this.TARGET_FPS) : clamp((nowMs - this.lastResultsTimeMs) / 1000, 1 / 120, 0.2);
-    this.lastResultsTimeMs = nowMs;
-
-    if (!results || !results.poseLandmarks) {
-      this.handleLostTracking('No results');
-      return;
-    }
-
-    const landmarks = results.poseLandmarks;
-    const nose = landmarks[0];
-    const leftShoulder = landmarks[11];
-    const rightShoulder = landmarks[12];
-    const leftHip = landmarks[23];
-    const rightHip = landmarks[24];
-
-    const noseVis = nose?.visibility ?? 0;
-    const leftShoulderVis = leftShoulder?.visibility ?? 0;
-    const rightShoulderVis = rightShoulder?.visibility ?? 0;
-    const leftHipVis = leftHip?.visibility ?? 0;
-    const rightHipVis = rightHip?.visibility ?? 0;
-
-    const noseOk = noseVis > VISIBILITY_THRESHOLD;
-    const shouldersOk = leftShoulderVis > VISIBILITY_THRESHOLD && rightShoulderVis > VISIBILITY_THRESHOLD;
-    const hipsOk = leftHipVis > VISIBILITY_THRESHOLD && rightHipVis > VISIBILITY_THRESHOLD;
-
-    if (!noseOk && !shouldersOk && !hipsOk) {
-      this.handleLostTracking('Landmarks not visible');
-      return;
-    }
-
-    this.isNoseDetected = noseOk;
-
-    const conf = shouldersOk && hipsOk
-      ? Math.min(leftShoulderVis, rightShoulderVis, leftHipVis, rightHipVis)
-      : shouldersOk
-        ? Math.min(leftShoulderVis, rightShoulderVis)
-        : noseOk
-          ? noseVis
-          : 0;
-    this.trackingQuality = clamp(this.trackingQuality * 0.9 + conf * 0.1, 0.1, 1.0);
-
-    this.consecutiveMissedDetections = 0;
-    this.framesSinceRecovery++;
-    if (this.framesSinceRecovery < this.recoveryStableFrames) {
-      this.jumpStableFrames = 0;
-      this.state.isJumping = false;
-      this.lastYVelocityStableFrames = 0;
-      this.jumpArmed = false;
-    }
-
-    if (noseOk) {
-      this.currentNoseX = (nose.x * NOSE_SMOOTHING) + (this.currentNoseX * (1 - NOSE_SMOOTHING));
-      this.currentNoseY = (nose.y * NOSE_SMOOTHING) + (this.currentNoseY * (1 - NOSE_SMOOTHING));
-      this.state.rawNoseX = this.currentNoseX;
-      this.state.rawNoseY = this.currentNoseY;
-      this.lastNoseXForGradual = this.currentNoseX;
-      this.lastNoseYForGradual = this.currentNoseY;
-    }
-
-    if (shouldersOk) {
-      this.currentShoulderWidth = Math.sqrt(
-        Math.pow(leftShoulder.x - rightShoulder.x, 2) +
-        Math.pow(leftShoulder.y - rightShoulder.y, 2)
-      );
-      if (this.shoulderWidthBase === 0) {
-        this.shoulderWidthBase = this.currentShoulderWidth;
-      }
-    }
-
-    this.updateThresholds();
-
-    const shoulderCenterX = shouldersOk ? (leftShoulder.x + rightShoulder.x) / 2 : null;
-    const hipCenterX = hipsOk ? (leftHip.x + rightHip.x) / 2 : null;
-
-    let bodyXCandidate: number | null = null;
-    if (shouldersOk && hipsOk && shoulderCenterX !== null && hipCenterX !== null) {
-      bodyXCandidate = hipCenterX * 0.65 + shoulderCenterX * 0.35;
-    } else if (shouldersOk && shoulderCenterX !== null) {
-      bodyXCandidate = shoulderCenterX;
-    } else if (noseOk) {
-      bodyXCandidate = nose.x;
-    }
-
-    if (bodyXCandidate !== null) {
-      const updateOk = (shouldersOk || hipsOk) ? conf > 0.35 : conf > 0.65;
-      if (updateOk) {
-        const alpha = clamp(0.35 + this.trackingQuality * 0.3, 0.35, 0.65);
-        const desired = bodyXCandidate * alpha + this.currentBodyX * (1 - alpha);
-        const modeFactor = shouldersOk ? 1 : 0.6;
-        // Increased maxDelta to make X movement more responsive (0.12 -> 0.15)
-        const maxDelta = clamp(dtSec * (1.2 + 0.8 * this.trackingQuality) * modeFactor, 0.015, shouldersOk ? 0.15 : 0.08);
-        this.currentBodyX = this.currentBodyX + clamp(desired - this.currentBodyX, -maxDelta, maxDelta);
-      }
-    }
-
-    const rawControlX = 1 - this.currentBodyX;
-    
-    // Disable startup calibration for X-axis center
-    // It's too risky if the user starts off-center. Assume 0.5 is center.
-    /* 
-    if (this.neutralBodyXSamples < this.neutralBodyXTargetSamples && shouldersOk && this.trackingQuality > 0.6) {
-      this.neutralBodyXSum += rawControlX;
-      this.neutralBodyXSamples++;
-      if (this.neutralBodyXSamples >= this.neutralBodyXTargetSamples) {
-        this.neutralBodyX = this.neutralBodyXSum / this.neutralBodyXSamples;
-      }
-    }
-    */
-
-    // Always drift neutralBodyX very slowly towards 0.5 to correct for any long-term drift
-    // but trust 0.5 as the absolute truth for "center"
-    this.neutralBodyX = this.neutralBodyX * 0.995 + 0.5 * 0.005;
-
-    const adjustedControlX = clamp(rawControlX - this.neutralBodyX + 0.5, 0, 1);
-    this.state.bodyX = adjustedControlX;
-
-    // Note: Lane directions were inverted. 
-    // rawControlX = 1 (Left of screen) should map to Left Lane (-1)
-    // rawControlX = 0 (Right of screen) should map to Right Lane (1)
-    // adjustedControlX > 0.5 + threshold means rawControlX is large (Left) -> Target Lane -1
-    // adjustedControlX < 0.5 - threshold means rawControlX is small (Right) -> Target Lane 1
-    
-    let targetLane = 0;
-    if (adjustedControlX > (0.5 + this.xThreshold)) {
-      targetLane = -1; // Was 1 (Right), now -1 (Left)
-    } else if (adjustedControlX < (0.5 - this.xThreshold)) {
-      targetLane = 1;  // Was -1 (Left), now 1 (Right)
-    } else {
-      targetLane = 0;
-    }
-    if (this.state.x !== targetLane) {
-      this.onMotionDetected?.('move');
-    }
-    this.state.x = targetLane;
-
-    if (!shouldersOk) {
-      this.state.isJumping = false;
-      return;
-    }
-
-    const shoulderCenterY = (leftShoulder.y + rightShoulder.y) / 2;
-    const hipCenterY = hipsOk ? (leftHip.y + rightHip.y) / 2 : null;
-    const ySignal = hipCenterY === null ? shoulderCenterY : (hipCenterY * 0.6 + shoulderCenterY * 0.4);
-
-    if ((this.smoothedShoulderY === 0.5 && Math.abs(ySignal - 0.5) > 0.1) || this.framesSinceRecovery < 5) {
-      this.smoothedShoulderY = ySignal;
-      this.restingShoulderY = ySignal;
-      this.lastYSignal = ySignal;
-      this.lastYVelocityStableFrames = 0;
-    }
-
-    this.smoothedShoulderY = (ySignal * SIGNAL_SMOOTHING) + (this.smoothedShoulderY * (1 - SIGNAL_SMOOTHING));
-    this.state.rawShoulderY = this.smoothedShoulderY;
-
-    if (!this.state.isJumping) {
-      this.restingShoulderY = (this.smoothedShoulderY * BASELINE_ADAPTION_RATE) + (this.restingShoulderY * (1 - BASELINE_ADAPTION_RATE));
-    }
-
-    const displacement = this.restingShoulderY - this.smoothedShoulderY;
-    const yVel = this.lastYSignal === null ? 0 : ((this.lastYSignal - this.smoothedShoulderY) / dtSec);
-    this.lastYSignal = this.smoothedShoulderY;
-
-    const now = Date.now();
-    const effectiveThreshold = this.calibrator.isCalibrating()
-      ? this.jumpThresholdY
-      : this.calibrator.getCalibratedThreshold(this.jumpThresholdY);
-
-    const velocityOk = yVel > this.jumpVelocityThreshold;
-    const displacementOk = displacement > effectiveThreshold;
-
-    if (this.framesSinceRecovery >= 5 && displacement < effectiveThreshold * 0.3) {
-      this.jumpArmed = true;
-    }
-
-    if (this.jumpArmed && velocityOk && displacementOk && (now - this.lastJumpTime > JUMP_COOLDOWN)) {
-      this.lastYVelocityStableFrames++;
-      if (this.lastYVelocityStableFrames >= this.requiredStableFrames) {
-        if (this.calibrator.isCalibrating()) {
-          this.calibrator.addJumpSample(displacement);
-        }
-        this.state.isJumping = true;
-        this.lastJumpTime = now;
-        this.jumpStableFrames = 0;
-        this.lastYVelocityStableFrames = 0;
-        this.jumpArmed = false;
-        this.onMotionDetected?.('jump');
-        setTimeout(() => { this.state.isJumping = false; }, 400);
-      }
-    } else {
-      this.lastYVelocityStableFrames = 0;
-    }
-  }
-
-  private updateThresholds() {
-    if (!this.video || this.video.videoWidth === 0) return;
-
-    const width = this.video.videoWidth;
-    const height = this.video.videoHeight;
-    const aspectRatio = width / height;
-
-    const distanceScale = this.shoulderWidthBase > 0 ? (this.currentShoulderWidth / this.shoulderWidthBase) : 1;
-    const clampedDistanceScale = Math.max(0.5, Math.min(1.3, distanceScale)); // Cap at 1.3 to prevent excessive strictness when close
-
-    const isTablet = window.innerWidth >= 768;
-
-    // Dynamic threshold scaling based on distance (closer = larger threshold needed)
-    // Significantly reduced thresholds to make movement easier/less strict
-    if (this.isIPad) {
-      if (aspectRatio > 1) {
-        this.xThreshold = 0.12 * clampedDistanceScale; // Reduced from 0.20
-        this.jumpThresholdY = 0.05 * clampedDistanceScale; // Aggressively reduced for 15 FPS
-      } else {
-        this.xThreshold = 0.15 * clampedDistanceScale; // Reduced from 0.25
-        this.jumpThresholdY = 0.04 * clampedDistanceScale;
-      }
-    } else if (this.isMobilePhone || this.isAndroid) {
-      if (aspectRatio > 1) {
-        this.xThreshold = 0.15 * clampedDistanceScale; // Reduced from 0.22
-        this.jumpThresholdY = 0.025 * clampedDistanceScale;
-      } else {
-        this.xThreshold = 0.18 * clampedDistanceScale; // Reduced from 0.30
-        this.jumpThresholdY = 0.02 * clampedDistanceScale;
-      }
-    } else {
-      if (aspectRatio > 1) {
-        if (isTablet) {
-          this.xThreshold = 0.15 * clampedDistanceScale; // Reduced from 0.22
-          this.jumpThresholdY = 0.05 * clampedDistanceScale;
-        } else {
-          this.xThreshold = 0.12 * clampedDistanceScale; // Reduced from 0.20
-          this.jumpThresholdY = 0.03 * clampedDistanceScale;
-        }
-      } else {
-        this.xThreshold = 0.18 * clampedDistanceScale; // Reduced from 0.28
-        this.jumpThresholdY = 0.03 * clampedDistanceScale;
-      }
-    }
-
-    if ((this.isIPad || this.isMobilePhone || this.isAndroid) && Math.random() < 0.005) {
-      log(0, 'THRESH', `xThreshold: ${this.xThreshold.toFixed(3)}, jumpThreshold: ${this.jumpThresholdY.toFixed(3)}`);
-    }
-  }
-
-  public getCalibrationProgress(): number {
-    return this.calibrator.getProgress();
-  }
-
-  public isCalibrating(): boolean {
-    return this.calibrator.isCalibrating();
   }
 }
 
