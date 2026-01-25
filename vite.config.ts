@@ -56,6 +56,48 @@ export default defineConfig(({ mode }) => {
             skipWaiting: true,
             clientsClaim: true,
             runtimeCaching: [
+              {
+                urlPattern: ({ url }) => url.origin === self.location.origin && url.pathname.startsWith('/themes/'),
+                handler: 'CacheFirst',
+                options: {
+                  cacheName: 'local-themes-cache',
+                  expiration: {
+                    maxEntries: 50,
+                    maxAgeSeconds: 60 * 60 * 24 * 7
+                  },
+                  cacheableResponse: {
+                    statuses: [0, 200]
+                  }
+                }
+              },
+              {
+                urlPattern: ({ url }) => url.origin === self.location.origin && url.pathname.startsWith('/assets/'),
+                handler: 'CacheFirst',
+                options: {
+                  cacheName: 'local-assets-cache',
+                  expiration: {
+                    maxEntries: 500,
+                    maxAgeSeconds: 60 * 60 * 24 * 365
+                  },
+                  cacheableResponse: {
+                    statuses: [0, 200]
+                  }
+                }
+              },
+              {
+                urlPattern: ({ url }) => url.origin === self.location.origin && url.pathname.startsWith('/mediapipe/face_detection/'),
+                handler: 'CacheFirst',
+                options: {
+                  cacheName: 'local-mediapipe-face-cache',
+                  expiration: {
+                    maxEntries: 30,
+                    maxAgeSeconds: 60 * 60 * 24 * 365
+                  },
+                  cacheableResponse: {
+                    statuses: [0, 200]
+                  }
+                }
+              },
               // 1. MediaPipe CDN Caching (CDN First, Long-term Cache)
               // Matches jsdelivr, unpkg, and your own CDN for mediapipe files
               {

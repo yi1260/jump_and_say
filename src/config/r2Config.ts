@@ -53,6 +53,10 @@ export const getR2ThemesListUrl = (): string => {
   return '/themes/themes-list.json';
 };
 
+export const getR2ThemesListCdnUrl = (): string => {
+  return `${R2_BASE_URL}/raz_aa/themes-list.json`;
+};
+
 export const handleR2Error = (error: unknown, context: string): never => {
   console.error(`[R2 Error] ${context}:`, error);
   

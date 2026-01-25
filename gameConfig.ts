@@ -1,7 +1,11 @@
-import { getLocalAssetUrl, getR2ImageUrl, getR2ThemesListUrl, handleR2Error } from '@/src/config/r2Config';
+import { getLocalAssetUrl, getR2ImageUrl, getR2ThemesListCdnUrl, getR2ThemesListUrl, handleR2Error } from '@/src/config/r2Config';
 import { Theme, ThemeList } from './types';
 
 let cachedThemes: Theme[] | null = null;
+
+export function getCachedThemes(): Theme[] | null {
+  return cachedThemes;
+}
 
 export async function loadThemes(): Promise<Theme[]> {
   if (cachedThemes) {
@@ -9,12 +13,21 @@ export async function loadThemes(): Promise<Theme[]> {
   }
 
   try {
-    const response = await fetch(getR2ThemesListUrl());
-    if (!response.ok) {
-      handleR2Error(new Error(`HTTP ${response.status}`), 'Failed to load themes list');
-    }
+    const fetchThemesList = async (url: string): Promise<ThemeList> => {
+      const response = await fetch(url, { cache: 'default' });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      return (await response.json()) as ThemeList;
+    };
 
-    const themeList: ThemeList = await response.json();
+    let themeList: ThemeList | null = null;
+    try {
+      themeList = await fetchThemesList(getR2ThemesListUrl());
+    } catch (localError) {
+      console.warn('[loadThemes] Local themes-list failed, falling back to R2 CDN', localError);
+      themeList = await fetchThemesList(getR2ThemesListCdnUrl());
+    }
 
     // Mark all themes as available by default (trust themes-list.json)
     // This avoids the expensive image availability checks

@@ -1,4 +1,5 @@
-import { getR2AssetUrl, getR2ImageUrl, getR2ThemesListUrl } from '@/src/config/r2Config';
+import { getCachedThemes } from '@/gameConfig';
+import { getR2AssetUrl, getR2ImageUrl, getR2ThemesListCdnUrl, getR2ThemesListUrl } from '@/src/config/r2Config';
 import Phaser from 'phaser';
 import { Theme, ThemeId } from '../../types';
 
@@ -61,6 +62,18 @@ export class PreloadScene extends Phaser.Scene {
     // Add retry logic for failed assets
     this.load.on('loaderror', (file: Phaser.Loader.File) => {
         console.warn(`[Loader] Error loading ${file.key} from ${file.url}`);
+
+        if (file.key === 'themes_list' && file.type === 'json') {
+          const themesListFallbackTried = (file as any).themesListFallbackTried === true;
+          if (!themesListFallbackTried) {
+            (file as any).themesListFallbackTried = true;
+            const fallbackUrl = getR2ThemesListCdnUrl();
+            console.warn(`[Loader] themes_list load failed, attempting CDN fallback: ${fallbackUrl}`);
+            this.load.json('themes_list', fallbackUrl);
+            this.load.start();
+            return;
+          }
+        }
         
         // R2 CDN -> Local Fallback Logic
         // 如果是 CDN 资源加载失败，尝试降级到本地资源
@@ -149,12 +162,31 @@ export class PreloadScene extends Phaser.Scene {
     // Load Game Assets (Audio & SVGs)
     this.loadGameAssets();
 
+    // Strategy 1: Check Registry (injected from React)
+    const allThemes = this.registry.get('allThemes');
+    if (allThemes && Array.isArray(allThemes) && allThemes.length > 0) {
+        console.log('[PreloadScene] Using injected themes data from registry');
+        this.loadThemeAssets({ themes: allThemes });
+        return;
+    }
+
+    // Strategy 2: Check Global Cache (from gameConfig)
+    const cachedThemes = getCachedThemes();
+    if (cachedThemes && cachedThemes.length > 0) {
+        console.log('[PreloadScene] Using cached themes from gameConfig');
+        this.loadThemeAssets({ themes: cachedThemes });
+        return;
+    }
+
+    // Strategy 3: Check Phaser Cache
     const themesList = this.cache.json.get('themes_list');
     if (themesList) {
       this.loadThemeAssets(themesList);
       return;
     }
 
+    // Strategy 4: Fetch from Network (Fallback)
+    console.log('[PreloadScene] Falling back to network fetch for themes-list');
     this.load.json('themes_list', getR2ThemesListUrl());
     this.load.once('filecomplete-json-themes_list', () => {
       const loaded = this.cache.json.get('themes_list');

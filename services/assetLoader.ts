@@ -1,7 +1,7 @@
-import { getR2AssetUrl } from '@/src/config/r2Config';
-import { motionController } from './motionController';
 import { preloadThemeImages } from '@/gameConfig';
+import { getR2AssetUrl, getR2ThemesListCdnUrl, getR2ThemesListUrl } from '@/src/config/r2Config';
 import { ThemeId } from '@/types';
+import { motionController } from './motionController';
 
 const GAME_ASSETS = [
   // Sounds
@@ -77,8 +77,17 @@ export async function preloadAllGameAssets(
     // But it's good practice to have it cached anyway.
     const themesListPromise = (async () => {
          try {
-             const response = await fetch('/themes/themes-list.json');
-             if (response.ok) await response.json();
+             const fetchJson = async (url: string): Promise<void> => {
+               const response = await fetch(url);
+               if (!response.ok) throw new Error(`HTTP ${response.status}`);
+               await response.json();
+             };
+             try {
+               await fetchJson(getR2ThemesListUrl());
+             } catch (localError) {
+               console.warn('Failed to preload local themes-list.json, falling back to R2', localError);
+               await fetchJson(getR2ThemesListCdnUrl());
+             }
          } catch (e) {
              console.warn('Failed to preload themes-list.json', e);
          }
