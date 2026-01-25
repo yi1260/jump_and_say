@@ -558,7 +558,27 @@ export default function App() {
       console.log("Reusing existing camera stream");
       // Enter fullscreen immediately when entering tutorial
       enterFullscreenAndLockOrientation();
-      motionController.calibrate();
+      try {
+        if (!videoRef.current.srcObject) {
+          videoRef.current.srcObject = streamRef.current;
+        }
+        videoRef.current.muted = true;
+        videoRef.current.playsInline = true;
+        const playPromise = videoRef.current.play();
+        if (playPromise !== undefined) {
+          await playPromise;
+        }
+        if (!motionController.isStarted) {
+          setInitStatus('Setting up vision controller...');
+          await motionController.start(videoRef.current);
+        }
+        motionController.calibrate();
+      } catch (error) {
+        console.error('Failed to reuse camera stream:', error);
+        alert("Camera initialization failed. Please refresh and try again.");
+        setPhase(GamePhase.MENU);
+        return;
+      }
       await preloadPromise; // Still wait for images before finishing this function
       return;
     }

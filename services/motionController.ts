@@ -182,71 +182,43 @@ export class MotionController {
         }
       }
 
-      const loadCDN = window.__MEDIAPIPE_CDN__ || '/mediapipe/';
-      log(1, 'INIT', 'Using CDN: ' + loadCDN);
-
       try {
-        this.pose = new Pose({
-          locateFile: (file: string) => {
-            const url = loadCDN + file;
-            log(1, 'CDN', `Locating file: ${file} -> ${url}`);
-            return url;
-          }
-        });
+        this.isReady = false;
+        this.hasFatalError = false;
 
-        const minDetectionConf = (this.isIPad || this.isAndroid || this.isMobilePhone) ? 0.3 : 0.5;
-        const minTrackingConf = (this.isIPad || this.isAndroid || this.isMobilePhone) ? 0.3 : 0.5;
+        const baseCandidates = Array.from(
+          new Set<string>([
+            this.ensureTrailingSlash(window.__MEDIAPIPE_CDN__ || '/mediapipe/'),
+            this.ensureTrailingSlash('/mediapipe/')
+          ])
+        );
 
-        this.pose.setOptions({
-          modelComplexity: 0,
-          smoothLandmarks: true,
-          minDetectionConfidence: minDetectionConf,
-          minTrackingConfidence: minTrackingConf,
-          selfieMode: false
-        });
+        let initialized = false;
+        let lastError: unknown = null;
 
-        log(1, 'INIT', `Confidence: Detection=${minDetectionConf}, Tracking=${minTrackingConf}`);
+        for (const baseUrl of baseCandidates) {
+          log(1, 'INIT', `Trying MediaPipe base: ${baseUrl}`);
 
-        this.pose.onResults(this.onResults.bind(this));
-
-        // Increase warm-up delay to allow large .data file (3MB) to download
-        // 1.5s is often too short for slower connections, causing WASM crash if accessed before data is ready
-        const warmupDelay = 4000; 
-        log(1, 'INIT', `Warming up WASM in ${warmupDelay}ms...`);
-
-        setTimeout(async () => {
           try {
-            if (!this.pose || this.hasFatalError) return;
-            const dummyCanvas = document.createElement('canvas');
-            dummyCanvas.width = 64;
-            dummyCanvas.height = 64;
-            const ctx = dummyCanvas.getContext('2d');
-            if (ctx) {
-              ctx.fillStyle = 'black';
-              ctx.fillRect(0, 0, 64, 64);
-              
-              // Add timeout for warm-up to prevent hanging
-              const warmupPromise = this.pose.send({ image: dummyCanvas });
-              const timeoutPromise = new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Warm-up timeout')), 5000)
-              );
-
-              await Promise.race([warmupPromise, timeoutPromise]);
-              
-              log(1, 'INIT', `WASM warm-up completed (${this.isIPad ? 'iPad mode' : 'standard mode'})`);
-              this.isReady = true;
-            }
-          } catch (warmupError) {
-            log(2, 'INIT', 'Warm-up failed or timed out (continuing anyway)', warmupError);
-            const errorStr = String(warmupError);
-            if (errorStr.includes('graph') || errorStr.includes('tflite') || errorStr.includes('memory')) {
-              log(3, 'INIT', 'Fatal error detected during warmup: ' + errorStr.substring(0, 100));
-              this.hasFatalError = true;
-            }
-            // Always set ready to true to allow retries in main loop
-            this.isReady = true;
+            await this.initWithBase(baseUrl);
+            initialized = true;
+            break;
+          } catch (e) {
+            lastError = e;
+            log(2, 'INIT', `MediaPipe init failed for base: ${baseUrl}`, e);
+            this.pose?.close?.();
+            this.pose = null;
+            this.isReady = false;
+            this.hasFatalError = false;
           }
-        }, warmupDelay);
+        }
+
+        if (!initialized) {
+          this.initPromise = null;
+          const errorMsg = 'MediaPipe 初始化失败（依赖文件加载或 WASM 运行失败）';
+          log(3, 'INIT', errorMsg, lastError);
+          throw lastError instanceof Error ? lastError : new Error(errorMsg);
+        }
 
         const duration = (performance.now() - startTime).toFixed(0);
         log(1, 'INIT', `Pose initialization completed in ${duration}ms`);
@@ -258,6 +230,118 @@ export class MotionController {
     })();
 
     return this.initPromise;
+  }
+
+  private ensureTrailingSlash(url: string): string {
+    return url.endsWith('/') ? url : `${url}/`;
+  }
+
+  private async initWithBase(baseUrl: string): Promise<void> {
+    const resolvedBaseUrl = this.ensureTrailingSlash(baseUrl);
+
+    this.pose = new Pose({
+      locateFile: (file: string) => {
+        const effectiveFile = this.getEffectiveMediapipeFile(file);
+        const url = `${resolvedBaseUrl}${effectiveFile}`;
+        log(1, 'CDN', `Locating file: ${file} -> ${url}`);
+        return url;
+      }
+    });
+
+    const minDetectionConf = (this.isIPad || this.isAndroid || this.isMobilePhone) ? 0.3 : 0.5;
+    const minTrackingConf = (this.isIPad || this.isAndroid || this.isMobilePhone) ? 0.3 : 0.5;
+
+    this.pose.setOptions({
+      modelComplexity: 0,
+      smoothLandmarks: true,
+      minDetectionConfidence: minDetectionConf,
+      minTrackingConfidence: minTrackingConf,
+      selfieMode: false
+    });
+
+    log(1, 'INIT', `Confidence: Detection=${minDetectionConf}, Tracking=${minTrackingConf}`);
+
+    this.pose.onResults(this.onResults.bind(this));
+
+    await this.prefetchMediapipeDependencies(resolvedBaseUrl);
+    await this.warmupPose(5000);
+
+    this.isReady = true;
+    log(1, 'INIT', `MediaPipe ready with base: ${resolvedBaseUrl}`);
+  }
+
+  private getEffectiveMediapipeFile(file: string): string {
+    if (this.isIPad && file.startsWith('pose_solution_simd_wasm_bin')) {
+      return file.replace('pose_solution_simd_wasm_bin', 'pose_solution_wasm_bin');
+    }
+    return file;
+  }
+
+  private async prefetchMediapipeDependencies(baseUrl: string): Promise<void> {
+    const files = [
+      'pose_solution_packed_assets_loader.js',
+      'pose_solution_packed_assets.data',
+      'pose_solution_wasm_bin.js',
+      'pose_solution_wasm_bin.wasm'
+    ];
+
+    for (const file of files) {
+      const url = `${baseUrl}${file}`;
+      await this.prefetchBinary(url, 15000, 2);
+    }
+  }
+
+  private async prefetchBinary(url: string, timeoutMs: number, retries: number): Promise<void> {
+    let lastError: unknown = null;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        log(1, 'CDN', `Prefetching: ${url} (attempt ${attempt + 1}/${retries + 1})`);
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+        const resp = await fetch(url, { mode: 'cors', cache: 'reload', signal: controller.signal });
+        window.clearTimeout(timeoutId);
+
+        if (!resp.ok) {
+          throw new Error(`Prefetch failed: ${resp.status} ${resp.statusText}`);
+        }
+
+        await resp.arrayBuffer();
+        log(1, 'CDN', `Prefetch ok: ${url}`);
+        return;
+      } catch (e) {
+        lastError = e;
+        log(2, 'CDN', `Prefetch error: ${url}`, e);
+        if (attempt < retries) {
+          await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+        }
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(`Prefetch failed: ${url}`);
+  }
+
+  private async warmupPose(timeoutMs: number): Promise<void> {
+    if (!this.pose) throw new Error('Pose not initialized');
+
+    const dummyCanvas = document.createElement('canvas');
+    dummyCanvas.width = 64;
+    dummyCanvas.height = 64;
+    const ctx = dummyCanvas.getContext('2d');
+    if (!ctx) throw new Error('Failed to create canvas context for warmup');
+
+    ctx.fillStyle = 'black';
+    ctx.fillRect(0, 0, 64, 64);
+
+    log(1, 'INIT', 'Warm-up send begin');
+
+    const warmupPromise: Promise<void> = this.pose.send({ image: dummyCanvas });
+    const timeoutPromise = new Promise<void>((_, reject) => {
+      window.setTimeout(() => reject(new Error('Warm-up timeout')), timeoutMs);
+    });
+
+    await Promise.race([warmupPromise, timeoutPromise]);
+    log(1, 'INIT', 'Warm-up send ok');
   }
 
   async start(videoElement: HTMLVideoElement) {
