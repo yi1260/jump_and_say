@@ -38,12 +38,14 @@ export default defineConfig(({ mode }) => {
             enabled: true
           },
           workbox: {
-            globPatterns: ['**/*.{js,css,html,ico,png,svg,mp3,ogg,ttf,wasm,data}'], // Added wasm, data for MediaPipe local fallback
+            globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest,json,wasm,data,tflite}'],
             maximumFileSizeToCacheInBytes: 10 * 1024 * 1024, // 10MB
             globIgnores: [
               '**/node_modules/**/*',
               'sw.js',
               'workbox-*.js',
+              '**/assets/**/*',
+              '**/themes.backup*/**/*',
               '**/assets/kenney/Sprites/**/*',
               '**/assets/kenney/Vector/backup/**/*'
             ],

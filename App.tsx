@@ -538,6 +538,118 @@ export default function App() {
     });
   };
 
+  const initializeCamera = async (): Promise<boolean> => {
+    // If we already have a stream and it's active, skip
+    if (streamRef.current && streamRef.current.active && videoRef.current) {
+        try {
+            if (!videoRef.current.srcObject) {
+                videoRef.current.srcObject = streamRef.current;
+            }
+            videoRef.current.muted = true;
+            videoRef.current.playsInline = true;
+            await videoRef.current.play();
+            
+            if (!motionController.isStarted) {
+                await motionController.start(videoRef.current);
+            }
+            motionController.calibrate();
+            
+            // 启动 nose position update loop
+            startNoseTrackingLoop();
+            
+            return true;
+        } catch (e) {
+            console.error('Failed to reuse camera:', e);
+        }
+    }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        alert("Camera API required.");
+        return false;
+    }
+
+    try {
+        const isIPad = /iPad|Macintosh/i.test(navigator.userAgent) && 'ontouchend' in document;
+        const videoConstraints: any = {
+            facingMode: 'user',
+            width: isIPad ? { ideal: 1280, max: 1920 } : { ideal: 640, max: 1280 },
+            height: isIPad ? { ideal: 720, max: 1080 } : { ideal: 480, max: 720 },
+            frameRate: { ideal: 30, max: 30 }
+        };
+        if (isIPad) videoConstraints.frameRate = { ideal: 30, max: 60 };
+
+        const stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints });
+        streamRef.current = stream;
+
+        if (videoRef.current) {
+             videoRef.current.srcObject = stream;
+             videoRef.current.muted = true;
+             videoRef.current.playsInline = true;
+             
+             await new Promise<void>((resolve) => {
+                 if (videoRef.current!.readyState >= 1) {
+                     resolve();
+                 } else {
+                     videoRef.current!.onloadedmetadata = () => resolve();
+                 }
+             });
+
+             await videoRef.current.play();
+             await motionController.start(videoRef.current);
+             
+             // 启动 nose position update loop
+             startNoseTrackingLoop();
+             
+             return true;
+        }
+        return false;
+    } catch (err) {
+        console.error("Camera init failed:", err);
+        alert("Camera initialization failed: " + err);
+        return false;
+    }
+  };
+
+  const startNoseTrackingLoop = () => {
+        let lastUpdateTime = 0;
+        let consecutiveMissedFrames = 0;
+        const updateNosePosition = (timestamp: number) => {
+            if (phaseRef.current !== GamePhase.TUTORIAL && phaseRef.current !== GamePhase.PLAYING && phaseRef.current !== GamePhase.LOADING) {
+                // Keep running during LOADING to detect nose early
+                // But maybe stop if we exit to MENU
+                if (phaseRef.current === GamePhase.MENU || phaseRef.current === GamePhase.THEME_SELECTION) {
+                    return; 
+                }
+            }
+            
+            if (timestamp - lastUpdateTime >= 30) {
+                if (motionController.state) {
+                    if (motionController.isNoseDetected) {
+                        const overlayState = motionController.smoothedState || motionController.state;
+                        setNosePosition({
+                            x: overlayState.rawNoseX,
+                            y: overlayState.rawNoseY
+                        });
+                        consecutiveMissedFrames = 0;
+                    } else {
+                        consecutiveMissedFrames++;
+                        if (consecutiveMissedFrames >= 10) {
+                            const gradualRate = 0.05;
+                            setNosePosition(prev => ({
+                                x: prev.x * (1 - gradualRate) + 0.5 * gradualRate,
+                                y: prev.y * (1 - gradualRate) + 0.5 * gradualRate
+                            }));
+                        }
+                    }
+                    setIsNoseDetected(motionController.isNoseDetected);
+                }
+                lastUpdateTime = timestamp;
+            }
+            requestAnimationFrame(updateNosePosition);
+        };
+        requestAnimationFrame(updateNosePosition);
+  };
+
   const handleStartGame = async () => {
     if (selectedThemes.length === 0) return;
 
@@ -547,260 +659,60 @@ export default function App() {
     // 0. Enter Loading Phase
     setPhase(GamePhase.LOADING);
     setLoadingProgress(0);
-    setLoadingStatus('Preparing assets...');
+    setLoadingStatus('Initializing Camera & Assets...');
 
     // Enter fullscreen immediately
     await enterFullscreenAndLockOrientation();
 
-    // 1. Preload ALL assets (blocking)
-    await preloadAllGameAssets(selectedThemes, (progress, status) => {
-        setLoadingProgress(progress);
-        setLoadingStatus(status);
-    });
-    
-    // Start background preloading for the REST of the themes
-    const firstThemeId = selectedThemes[0];
-    const themesToPreload = themes.filter(t => selectedThemes.includes(t.id) && t.id !== firstThemeId);
-    if (themesToPreload.length > 0) {
-        startBackgroundPreloading(themesToPreload);
-    }
-
-    setThemeImagesLoaded(true);
-    setPhase(GamePhase.TUTORIAL);
-    setInitStatus('Setting up camera...');
-    
-    // 2. Camera Initialization
-    // If we already have a stream and it's active, skip camera initialization
-    if (streamRef.current && streamRef.current.active && videoRef.current) {
-      console.log("Reusing existing camera stream");
-      // Enter fullscreen immediately when entering tutorial
-      enterFullscreenAndLockOrientation();
-      try {
-        if (!videoRef.current.srcObject) {
-          videoRef.current.srcObject = streamRef.current;
-        }
-        videoRef.current.muted = true;
-        videoRef.current.playsInline = true;
-        const playPromise = videoRef.current.play();
-        if (playPromise !== undefined) {
-          await playPromise;
-        }
-        if (!motionController.isStarted) {
-          setInitStatus('Setting up vision controller...');
-          await motionController.start(videoRef.current);
-        }
-        motionController.calibrate();
-      } catch (error) {
-        console.error('Failed to reuse camera stream:', error);
-        alert("Camera initialization failed. Please refresh and try again.");
-        setPhase(GamePhase.MENU);
-        return;
-      }
-      return;
-    }
-
-    // 2. Otherwise, start full camera initialization process
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      alert("Camera API required.");
-      setPhase(GamePhase.THEME_SELECTION);
-      return;
-    }
-    
-    // Enter fullscreen immediately when entering tutorial
-    await enterFullscreenAndLockOrientation();
-    
-    setInitStatus('Requesting Camera...');
+    // 1. Parallel Loading: Assets + Camera
     try {
-      console.log("Requesting camera...");
-      
-      const isIPad = /iPad|Macintosh/i.test(navigator.userAgent) && 'ontouchend' in document;
-      
-      const videoConstraints: any = {
-        facingMode: 'user'
-      };
-      
-      if (isIPad) {
-        console.log("iPad detected, using iPad-specific camera constraints");
-        videoConstraints.width = { ideal: 1280, max: 1920 };
-        videoConstraints.height = { ideal: 720, max: 1080 };
-        videoConstraints.frameRate = { ideal: 30, max: 60 };
-      } else {
-        videoConstraints.width = { ideal: 640, max: 1280 };
-        videoConstraints.height = { ideal: 480, max: 720 };
-        videoConstraints.frameRate = { ideal: 30, max: 30 };
-      }
-      
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: videoConstraints
-      });
-      setInitStatus('Camera active. Loading AI...');
-      console.log("Camera stream obtained");
-      streamRef.current = stream;
-      
-      if (videoRef.current) {
-        const initTimeout = setTimeout(() => {
-          if (phaseRef.current === GamePhase.TUTORIAL && !motionController.isStarted) {
-            console.warn("Initialization timed out");
-            alert("Initialization timed out. Please check your connection and try again.");
-            setPhase(GamePhase.MENU);
-          }
-        }, 30000); // 30 seconds timeout - increased for slower connections
-
-        let isInitialized = false;
-        let retryCount = 0;
-        const maxRetries = 3;
+        // We wrap camera init in a promise that reports progress/status if we wanted
+        // For now, we just run it parallel.
         
-        const setupVideo = async () => {
-          if (isInitialized || !videoRef.current) return;
-          
-          const isIPad = /iPad|Macintosh/i.test(navigator.userAgent) && 'ontouchend' in document;
-          if (isIPad) {
-            console.log("iPad detected in setupVideo, using optimized initialization");
-          }
-          
-          setInitStatus('Setting up vision controller...');
-          console.log("Setting up video/motion controller...");
-          try {
-            // Explicitly set muted to true to allow autoplay on iOS without user gesture
-            videoRef.current.muted = true;
-            videoRef.current.playsInline = true;
-            
-            // Try to play
-            const playPromise = videoRef.current.play();
-            if (playPromise !== undefined) {
-              await playPromise;
-            }
-            
-            isInitialized = true; // Mark as done only after successful play
-            clearTimeout(initTimeout);
-            console.log(`Video playing (${videoRef.current.videoWidth}x${videoRef.current.videoHeight})`);
-            
-            setInitStatus('Starting AI Pose Detection...');
-            console.log("Starting motion controller...");
-            try {
-              await motionController.start(videoRef.current!);
-              console.log(`Motion controller started ${isIPad ? '(iPad mode)' : '(standard mode)'}`);
-              
-              setTimeout(() => {
-                if (!motionController.isNoseDetected) {
-                  console.warn("MotionController: Nose not detected yet, checking camera feed...");
-                  if (isIPad) {
-                    console.warn("MotionController: iPad - ensure you're in a well-lit area and fully visible in camera");
-                  }
-                }
-              }, 3000);
-              
-              setInitStatus('System Ready!');
-              
-                let lastUpdateTime = 0;
-                let consecutiveMissedFrames = 0;
-                const updateNosePosition = (timestamp: number) => {
-                    if (timestamp - lastUpdateTime >= 30) {
-                        if (motionController.state) {
-                            if (motionController.isNoseDetected) {
-                                const overlayState = motionController.smoothedState || motionController.state;
-                                setNosePosition({
-                                    x: overlayState.rawNoseX,
-                                    y: overlayState.rawNoseY
-                                });
-                                consecutiveMissedFrames = 0;
-                            } else {
-                                consecutiveMissedFrames++;
-                                if (consecutiveMissedFrames >= 10) {
-                                    const gradualRate = 0.05;
-                                    setNosePosition(prev => ({
-                                        x: prev.x * (1 - gradualRate) + 0.5 * gradualRate,
-                                        y: prev.y * (1 - gradualRate) + 0.5 * gradualRate
-                                    }));
-                                }
-                            }
-                            setIsNoseDetected(motionController.isNoseDetected);
-                        }
-                        lastUpdateTime = timestamp;
-                    }
-                    requestAnimationFrame(updateNosePosition);
-                };
-              requestAnimationFrame(updateNosePosition);
-            } catch (motionError) {
-              const errorStr = String(motionError);
-              console.error("Motion controller start failed:", motionError);
-              
-              const isIPad = /iPad|Macintosh/i.test(navigator.userAgent) && 'ontouchend' in document;
-              if (isIPad && (errorStr.includes('memory') || errorStr.includes('WebGL'))) {
-                console.error("iPad memory/WebGL error detected");
-              }
-              
-              retryCount++;
-              if (retryCount < maxRetries) {
-                console.log(`Retrying motion controller (${retryCount}/${maxRetries})...`);
-                setTimeout(setupVideo, 2000 * retryCount);
-              } else {
-                const errorMsg = isIPad 
-                  ? "Failed to start motion detection on iPad. Try:\n\n1. Close other apps to free memory\n2. Ensure good lighting\n3. Make sure you're fully visible in camera\n4. Refresh the page"
-                  : "Failed to start motion detection. This might be a network issue. Please refresh the page and try again.";
-                alert(errorMsg);
-                setPhase(GamePhase.MENU);
-              }
-            }
-          } catch (videoError) {
-            const errorStr = String(videoError);
-            console.error("Video play failed:", videoError);
-            
-            const isIPad = /iPad|Macintosh/i.test(navigator.userAgent) && 'ontouchend' in document;
-            if (isIPad) {
-              if (errorStr.includes('NotAllowedError')) {
-                console.error("iPad camera permission denied");
-              } else if (errorStr.includes('NotFoundError')) {
-                console.error("iPad camera not found");
-              } else if (errorStr.includes('NotReadableError')) {
-                console.error("iPad camera busy or locked");
-              }
-            }
-            
-            retryCount++;
-            if (retryCount < maxRetries) {
-              console.log(`Retrying video setup (${retryCount}/${maxRetries})...`);
-              setTimeout(setupVideo, 2000 * retryCount);
-            } else {
-              const errorMsg = isIPad
-                ? "Failed to initialize camera on iPad. Please:\n\n1. Check camera permissions in Settings\n2. Close other camera apps\n3. Restart Safari if needed\n4. Refresh the page"
-                : "Failed to initialize camera. Please check your camera permissions and refresh the page.";
-              alert(errorMsg);
-              setPhase(GamePhase.MENU);
-            }
-          }
+        // However, we need to request camera permission ASAP to avoid user gesture timeout issues if strict?
+        // Actually, we are inside the click handler (handleStartGame), so getUserMedia should be fine.
+        // But the 'await' for setPhase might break the stack? 
+        // React state updates are async but usually microtasks.
+        // Let's try to start getUserMedia FIRST if we don't have it.
+        
+        let cameraPromise: Promise<boolean>;
+        
+        // Define a wrapper to update status
+        const initCameraWithStatus = async () => {
+             // Delay slightly to allow UI to render "Initializing Camera..."
+             await new Promise(r => setTimeout(r, 100)); 
+             const success = await initializeCamera();
+             if (!success) throw new Error("Camera failed");
+             return success;
         };
 
-        // Set listener BEFORE srcObject
-        videoRef.current.onloadedmetadata = () => {
-          console.log("Video metadata loaded via event");
-          setupVideo();
-        };
+        cameraPromise = initCameraWithStatus();
 
-        videoRef.current.srcObject = stream;
+        // Assets Promise
+        const assetsPromise = preloadAllGameAssets(selectedThemes, (progress, status) => {
+            // We can mix the progress if we want, or just let asset loader drive the bar
+            // and camera status drive the text.
+            // For simplicity, let asset loader drive the bar 0-100.
+            setLoadingProgress(progress);
+            setLoadingStatus(status); 
+        });
 
-        // Check if metadata is already loaded (can happen if srcObject was set or cached)
-        if (videoRef.current.readyState >= 1) {
-          console.log("Video metadata already available");
-          setupVideo();
-        } else {
-          // Fallback: poll readyState in case event listener fails
-          const checkReadyInterval = setInterval(() => {
-            if (videoRef.current && videoRef.current.readyState >= 1) {
-              console.log("Video metadata detected via polling");
-              clearInterval(checkReadyInterval);
-              setupVideo();
-            }
-          }, 500);
-          
-          // Clear interval after 10 seconds to prevent infinite polling
-          setTimeout(() => clearInterval(checkReadyInterval), 10000);
+        await Promise.all([cameraPromise, assetsPromise]);
+
+        // Start background preloading for the REST of the themes
+        const firstThemeId = selectedThemes[0];
+        const themesToPreload = themes.filter(t => selectedThemes.includes(t.id) && t.id !== firstThemeId);
+        if (themesToPreload.length > 0) {
+            startBackgroundPreloading(themesToPreload);
         }
-      }
-    } catch (err) {
-      console.error("Camera failed", err);
-      alert("Camera failed: " + err);
-      setPhase(GamePhase.MENU);
+
+        setThemeImagesLoaded(true);
+        setPhase(GamePhase.TUTORIAL);
+        setInitStatus('System Ready!');
+        
+    } catch (e) {
+        console.error("Loading failed:", e);
+        setPhase(GamePhase.MENU);
     }
   };
 

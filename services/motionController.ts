@@ -86,50 +86,81 @@ export class MotionController {
   async init() {
     if (this.initPromise) return this.initPromise;
 
-    this.initPromise = (async () => {
-      log(1, 'INIT', 'Initializing Face Detection...');
-      
-      // Wait for global FaceDetection to be loaded
+    const withTimeout = async <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+      let timeoutId: number | null = null;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = window.setTimeout(() => reject(new Error(label)), ms);
+      });
+      try {
+        return await Promise.race([promise, timeoutPromise]);
+      } finally {
+        if (timeoutId !== null) {
+          clearTimeout(timeoutId);
+        }
+      }
+    };
+
+    const waitForFaceDetection = async (): Promise<void> => {
       let attempts = 0;
       while (!window.FaceDetection && attempts < 50) {
-          await new Promise(r => setTimeout(r, 100));
-          attempts++;
+        await new Promise((r) => setTimeout(r, 100));
+        attempts++;
       }
-
       if (!window.FaceDetection) {
-          console.error('[MotionController] FaceDetection library not found');
-          return;
+        throw new Error('FaceDetection library not found');
       }
+    };
+
+    const createDetector = async (baseOverride?: string): Promise<any> => {
+      const base = baseOverride || window.__MEDIAPIPE_FACE_DETECTION_CDN__ || '/mediapipe/face_detection/';
+      const faceDetection = new window.FaceDetection({
+        locateFile: (file: string) => {
+          const fileName = file.split('/').pop();
+          return `${base}${fileName}`;
+        }
+      });
+
+      faceDetection.setOptions({
+        model: 'short',
+        minDetectionConfidence: 0.5,
+        selfieMode: false
+      });
+
+      faceDetection.onResults(this.onResults.bind(this));
+
+      await withTimeout(faceDetection.initialize(), 8000, 'FaceDetection initialize timeout');
+
+      return faceDetection;
+    };
+
+    this.initPromise = (async () => {
+      log(1, 'INIT', 'Initializing Face Detection...');
 
       try {
-        const faceDetection = new window.FaceDetection({
-            locateFile: (file: string) => {
-                // If using local path, we don't need to strip path, it's flat
-                // If using CDN, we force flat filename
-                const cdnBase = window.__MEDIAPIPE_FACE_DETECTION_CDN__ || '/mediapipe/face_detection/';
-                const fileName = file.split('/').pop();
-                return `${cdnBase}${fileName}`;
-            }
-        });
-
-        faceDetection.setOptions({
-            model: 'short',
-            minDetectionConfidence: 0.5,
-            selfieMode: false
-        });
-
-        faceDetection.onResults(this.onResults.bind(this));
-        
-        // Initialize the graph
-        await faceDetection.initialize();
-        
-        this.faceDetector = faceDetection;
+        await waitForFaceDetection();
+        this.faceDetector = await createDetector();
         this.isReady = true;
         log(1, 'INIT', 'Face Detection Ready');
       } catch (e) {
-        console.error('[MotionController] Init failed', e);
+        log(2, 'INIT', 'Primary Face Detection init failed, retrying with local files...', e);
+        try {
+          await waitForFaceDetection();
+          this.faceDetector = await createDetector('/mediapipe/face_detection/');
+          this.isReady = true;
+          log(1, 'INIT', 'Face Detection Ready (local fallback)');
+        } catch (fallbackError) {
+          this.faceDetector = null;
+          this.isReady = false;
+          console.error('[MotionController] Init failed', fallbackError);
+          throw fallbackError;
+        }
       }
     })();
+
+    this.initPromise = this.initPromise.catch((error) => {
+      this.initPromise = null;
+      throw error;
+    });
 
     return this.initPromise;
   }
@@ -143,6 +174,9 @@ export class MotionController {
     
     if (!this.faceDetector) {
         await this.init();
+        if (!this.faceDetector) {
+          throw new Error('Face detector not initialized');
+        }
     }
     
     this.video = videoElement;

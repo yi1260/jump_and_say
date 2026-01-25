@@ -150,12 +150,12 @@
       (function() {
         'use strict';
         const CDNS = [
+          '/mediapipe/face_detection/',
           'https://fastly.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/',
           'https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/',
-          '/mediapipe/face_detection/',
           'https://cdn.maskmysheet.com/mediapipe/face_detection/'
         ];
-        const LOAD_TIMEOUT = 3000;
+        const LOAD_TIMEOUT = 2500;
         
         function log(msg, type = 'info') {
           const style = type === 'error' ? 'color: red; font-weight: bold;' : 

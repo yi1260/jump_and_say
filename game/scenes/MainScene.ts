@@ -758,7 +758,7 @@ export class MainScene extends Phaser.Scene {
           if (this.beeWordText) {
               this.beeWordText.setFontSize(`${fontSize}px`);
               this.beeWordText.y = textOffsetY;
-              this.beeWordText.setStroke('#000000', Math.max(2, 4 * this.gameScale));
+              // this.beeWordText.setStroke('#000000', Math.max(2, 4 * this.gameScale));
           }
       }
   }
