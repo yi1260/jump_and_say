@@ -149,12 +149,13 @@
     <script>
       (function() {
         'use strict';
-        // 优先级：国内CDN -> 自有CDN (R2) -> 本地 (Vercel)
+        // 优先级：自有CDN (R2) -> 本地 (Vercel) -> 国内镜像 (JsDelivr)
+        // 注意: npm.elemecdn.com 该版本返回 404，已移除
         const CDNS = [
-          'https://npm.elemecdn.com/@mediapipe/pose@0.5.1675469404/',      // 国内镜像 1 (最快)
-          'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',  // 国内镜像 2
-          'https://cdn.maskmysheet.com/mediapipe/',                         // 自有 R2 CDN
-          '/mediapipe/'                                                     // 本地回退 (Vercel public)
+          'https://cdn.maskmysheet.com/mediapipe/',                         // 自有 R2 CDN (推荐，已验证)
+          '/mediapipe/',                                                    // 本地回退 (Vercel public)
+          'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',  // 国内镜像 (备用，可能不稳定)
+          'https://unpkg.com/@mediapipe/pose@0.5.1675469404/'             // Global CDN (备用)
         ];
         // 尝试加载的超时时间
         const LOAD_TIMEOUT = 3000; // 3秒超时，加快切换速度

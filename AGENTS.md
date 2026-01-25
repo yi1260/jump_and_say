@@ -74,14 +74,14 @@ import { ThemeId, GamePhase } from './types';
 ```
 
 **Path Aliases**:
-- `@/` = Root directory (`./src/`)
+- `@/` = Root directory (`./`)
 - `/assets` = `./public/assets`
 - `/kenney` = `./public/assets/kenney`
 
 ```typescript
-import { motionController } from '@/services/motionController';
-import { loadThemes } from '@/gameConfig';
-import { getR2ImageUrl, getR2AssetUrl } from '@/src/config/r2Config';
+import { motionController } from './services/motionController';
+import { loadThemes } from './gameConfig';
+import { getR2ImageUrl, getR2AssetUrl } from './src/config/r2Config';
 ```
 
 ### Naming Conventions
@@ -121,15 +121,20 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
 **Framer Motion for Animations**:
 ```typescript
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 
-<motion.div
-  initial={{ opacity: 0, y: 20 }}
-  animate={{ opacity: 1, y: 0 }}
-  transition={{ duration: 0.5 }}
->
-  Content
-</motion.div>
+<AnimatePresence>
+  {isVisible && (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.5 }}
+    >
+      Content
+    </motion.div>
+  )}
+</AnimatePresence>
 ```
 
 ### Phaser Scene Patterns
@@ -241,6 +246,7 @@ if (isAndroid) {
 - Smooth values with exponential moving average (e.g., `NOSE_SMOOTHING = 0.8`)
 - Handle tracking loss gracefully with gradual state reset
 - Use adaptive calibration system (`AdaptiveCalibrator` class) for jump detection
+- **Performance Note**: MediaPipe runs on main thread, consider Web Worker for optimization
 
 **Phaser Performance**:
 - Use `powerPreference: 'high-performance'` for rendering
@@ -248,6 +254,7 @@ if (isAndroid) {
 - Cap devicePixelRatio at 2 for performance
 - Use object pooling for frequently created/destroyed game objects
 - Use code splitting for large bundles (phaser, react-vendor)
+- Limit concurrent downloads to reduce blocking
 
 **React Performance**:
 - Use `useCallback` for event handlers passed to children
@@ -257,20 +264,31 @@ if (isAndroid) {
 
 **Asset Preloading**:
 - Background preloading queue for remaining themes (MAX_CONCURRENT_DOWNLOADS = 6)
-- Batch loading with `preloadThemeImages()` for immediate needs
+- Batch loading with `preloadThemeImages()` for immediate needs (BATCH_SIZE = 4)
 - Use `prioritizeThemeInQueue()` to push theme images to front of queue
 - Implement retry logic for failed loads (1 retry, 15s timeout)
+- Pause background preloading during high-priority loading
+
+**Known Performance Issues**:
+- **High Power Consumption**: Continuous camera usage, MediaPipe 30 FPS, Phaser game loop, background preloading, BGM playback
+- **Lag Causes**: MediaPipe main thread blocking, concurrent downloads (16 parallel), SVG conversion overhead, frequent DOM operations, particle system, no device performance detection
+- **Optimization Recommendations**:
+  - Use camera only when needed (CALIBRATING, PLAYING phases)
+  - Move MediaPipe to Web Worker
+  - Reduce concurrent downloads (16→4)
+  - Implement performance modes for low-end devices
+  - Pause background preloading during gameplay
 
 ### Asset Management
 
 **CDN-Only Architecture**:
 - All assets served from R2 Cloudflare CDN
-- No local asset files in repository (except MediaPipe backup)
+- No local asset files in repository (except MediaPipe backup in public/mediapipe/)
 - Base URL: `https://cdn.maskmysheet.com`
 
 **R2 CDN Functions** (in `src/config/r2Config.ts`):
 ```typescript
-import { getR2ImageUrl, getR2AssetUrl, getR2ThemesListUrl, handleR2Error } from '@/src/config/r2Config';
+import { getR2ImageUrl, getR2AssetUrl, getR2ThemesListUrl, handleR2Error } from './src/config/r2Config';
 
 // Theme images (with raz_aa prefix)
 const imageUrl = getR2ImageUrl('theme_id/image.webp');
@@ -298,7 +316,8 @@ CDN URL Structure:
 ├── raz_aa/                    # Theme images
 │   ├── {theme_id}/
 │   │   ├── image1.webp
-│   │   └── image2.webp
+│   │   ├── image2.webp
+│   │   └── icon.webp
 └── assets/                    # Game assets
     ├── Fredoka/
     │   └── static/
@@ -312,25 +331,15 @@ CDN URL Structure:
         │   └── funny-kids-video-322163.mp3 (BGM)
         ├── Vector/
         │   ├── Characters/
-        │   │   ├── character_pink_idle.svg
-        │   │   ├── character_pink_jump.svg
-        │   │   └── character_pink_walk_a.svg
         │   ├── Enemies/
-        │   │   ├── bee_a.svg
-        │   │   └── bee_b.svg
         │   ├── Tiles/
-        │   │   ├── block_empty.svg
-        │   │   ├── star.svg
-        │   │   └── gem_blue.svg
         │   └── Backgrounds/
-        │       ├── background_color_hills.svg
-        │       └── background_clouds.svg
 ```
 
 **Path Auto-Correction**:
 The `getR2AssetUrl()` function automatically corrects legacy paths:
 ```typescript
-getR2AssetUrl('assets/kenney/...')  // Auto-corrected to 'assets/kenney/...'
+getR2AssetUrl('assets/kenney/...')  // Works correctly
 getR2AssetUrl('/assets/kenney/...') // Leading slash removed
 ```
 
@@ -597,11 +606,19 @@ interface MotionState {
 - Automatic jump threshold calibration based on user's actual jump height
 - Collects up to 5 jump samples during calibration phase
 - Gradually adjusts threshold based on average jump displacement
+- Uses calibration factor of 0.6 for conservative threshold
 
 **Device-Specific Thresholds**:
 - iPad: Higher thresholds due to camera distance
 - Mobile phone: Lower thresholds for easier control
 - Desktop/Tablet: Balanced thresholds
+
+**Smoothing Parameters**:
+- `NOSE_SMOOTHING = 0.8`: Exponential moving average for nose position
+- `SIGNAL_SMOOTHING = 0.5`: Smoothing for jump signals
+- `BASELINE_ADAPTION_RATE = 0.03`: Rate of baseline adaptation
+- `JUMP_COOLDOWN = 400`: Cooldown between jumps (ms)
+- `VISIBILITY_THRESHOLD = 0.4`: Minimum landmark visibility
 
 ### Theme System
 
@@ -646,13 +663,20 @@ startBackgroundPreloading(themes);
 prioritizeThemeInQueue(themeId);
 ```
 
+**Preloading Strategy**:
+- Batch size: 4 images per batch
+- Max concurrent downloads: 6
+- Retry on failure: 1 retry with 15s timeout
+- High-priority loading pauses background preloading
+- Cache detection: Loads < 50ms indicate cache hit
+
 ### Vite Configuration
 
 **Path Aliases**:
 ```typescript
 resolve: {
   alias: {
-    '@': path.resolve(__dirname, './src'),
+    '@': path.resolve(__dirname, '.'),
     '/assets': path.resolve(__dirname, './public/assets'),
     '/kenney': path.resolve(__dirname, './public/assets/kenney'),
   }
@@ -689,8 +713,6 @@ rollupOptions: {
 enum GamePhase {
   MENU = 'MENU',                    // Main menu
   THEME_SELECTION = 'THEME_SELECTION', // Theme selection screen
-  LOADING_AI = 'LOADING_AI',        // Loading AI resources
-  CALIBRATING = 'CALIBRATING',      // Motion calibration
   TUTORIAL = 'TUTORIAL',            // Tutorial mode
   PLAYING = 'PLAYING',              // Active gameplay
   GAME_OVER = 'GAME_OVER'           // Game over screen
@@ -722,15 +744,19 @@ const setPhase = (newPhase: GamePhase) => {
 **Multi-CDN Fallback** (in `index.html`):
 ```javascript
 const CDNS = [
-  'https://npm.elemecdn.com/@mediapipe/pose@0.5.1675469404/',      // 国内镜像 1
-  'https://unpkg.zhimg.com/@mediapipe/pose@0.5.1675469404/',      // 国内镜像 2
-  '/mediapipe/',                                                   // 本地回退
-  'https://fastly.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/', // jsDelivr
-  'https://unpkg.com/@mediapipe/pose@0.5.1675469404/',            // unpkg
-  'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',  // jsDelivr
-  'https://cdnjs.cloudflare.com/ajax/libs/mediapipe/0.5.1675469404/' // cdnjs
+  'https://npm.elemecdn.com/@mediapipe/pose@0.5.1675469404/',      // 国内镜像 1 (最快)
+  'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',  // 国内镜像 2
+  'https://cdn.maskmysheet.com/mediapipe/',                         // 自有 R2 CDN
+  '/mediapipe/'                                                     // 本地回退
 ];
 ```
+
+**Loading Process**:
+1. Try CDNs in order with 3s timeout
+2. Successfully loaded CDN is saved to `window.__MEDIAPIPE_CDN__`
+3. MediaPipe uses this CDN for loading WASM files
+4. On failure, automatically try next CDN
+5. Load camera_utils from same CDN or fallback
 
 **Postinstall Script**:
 ```bash
@@ -740,18 +766,12 @@ cp -r node_modules/@mediapipe/pose/* public/mediapipe/ && \
 cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/
 ```
 
-**Loading Process**:
-1. Try CDNs in order with 5s timeout
-2. Successfully loaded CDN is saved to `window.__MEDIAPIPE_CDN__`
-3. MediaPipe uses this CDN for loading WASM files
-4. On failure, automatically try next CDN
-
 ### Key Files Structure
 
 ```
 ├── components/                    # React UI components
 │   ├── CameraGuide.tsx           # Camera position guide
-│   ├── CompletionOverlay.tsx     # Game completion overlay
+│   ├── CompletionOverlay.tsx     # Game completion overlay with framer-motion
 │   ├── GameBackground.tsx        # Dynamic background component
 │   └── GameCanvas.tsx            # Phaser game container
 ├── game/
@@ -776,13 +796,15 @@ cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/
 
 **Ignored Directories**:
 ```
-# Local asset backups (not committed)
-public/assets/
-public/mediapipe/
+# Local asset backups (optional - currently commented out)
+# public/assets/
+# public/mediapipe/
 
 # Theme cache
-public/themes/
+# public/themes/
 ```
+
+**Note**: `public/assets/` and `public/mediapipe/` are currently commented out, meaning they may be committed or have different handling strategies.
 
 ### Critical Implementation Notes
 
@@ -797,10 +819,9 @@ public/themes/
 
 3. **CDN-Only Architecture**:
    - All assets loaded from R2 Cloudflare CDN
-   - No local asset files in repository
+   - No local asset files in repository (except MediaPipe backup)
    - MediaPipe files copied via postinstall script
    - Use `getR2AssetUrl()` and `getR2ImageUrl()` for all asset URLs
-   - Path auto-correction: `assets/` → `assets/`
 
 4. **Mobile-First Camera Handling**:
    - Test on real devices, not just emulators
@@ -822,19 +843,21 @@ public/themes/
    - Defined via Vite's `define` in `vite.config.ts`
 
 7. **MediaPipe Integration**:
-   - Multi-CDN fallback system for reliability
+   - Multi-CDN fallback system for reliability (4 CDNs)
    - MediaPipe files copied to `public/mediapipe/` via postinstall script
    - Use `/mediapipe/` as local fallback CDN path
    - Handle WASM warm-up to prevent first-frame lag
    - Implement graceful degradation for tracking loss
+   - 3s timeout for CDN switching
 
 8. **Performance Optimization**:
    - Code splitting for large bundles (phaser, react-vendor)
-   - Batch image loading with retry logic
-   - Background preloading queue for themes
+   - Batch image loading with retry logic (BATCH_SIZE = 4)
+   - Background preloading queue for themes (MAX_CONCURRENT_DOWNLOADS = 6)
    - Adaptive thresholds based on device type
    - Smooth values with exponential moving average
    - CDN caching with 1-year duration
+   - Pause background preloading during high-priority loading
 
 9. **Phaser-Specific Notes**:
    - `experimentalDecorators: true` required for Phaser decorators
@@ -864,3 +887,21 @@ public/themes/
     - MP3/OGG dual format for audio compatibility
     - TTF fonts for Fredoka font family
     - Implement retry logic with 15s timeout
+    - Cache detection: < 50ms indicates cache hit
+
+13. **Framer Motion Usage**:
+    - Only used in `CompletionOverlay.tsx`
+    - Used for entry/exit animations, title animations, star animations, score display
+    - Import: `import { AnimatePresence, motion } from 'framer-motion';`
+
+14. **Performance Issues**:
+    - **High Power Consumption**: Continuous camera usage, MediaPipe 30 FPS, Phaser game loop, background preloading, BGM playback
+    - **Lag Causes**: MediaPipe main thread blocking, concurrent downloads (16 parallel), SVG conversion overhead, frequent DOM operations, particle system
+    - **Optimization Recommendations**:
+      - Use camera only when needed (CALIBRATING, PLAYING phases)
+      - Move MediaPipe to Web Worker
+      - Reduce concurrent downloads (16→4)
+      - Implement performance modes for low-end devices
+      - Pause background preloading during gameplay
+      - Optimize SVG loading
+      - Reduce particle count
