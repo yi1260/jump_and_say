@@ -111,20 +111,23 @@ async function init(cdnUrl: string, config: { isIPad: boolean; isAndroid: boolea
   await prefetchMediapipeDependencies(baseUrl);
 
   // Warmup
-  const dummyCanvas = new OffscreenCanvas(64, 64);
-  const ctx = dummyCanvas.getContext('2d');
-  if (ctx) {
-      ctx.fillStyle = 'black';
-      ctx.fillRect(0, 0, 64, 64);
-      try {
-        await pose.send({ image: dummyCanvas });
-        self.postMessage({ type: 'ready' });
-      } catch (e) {
-          console.error('[Worker] Warmup failed', e);
+  if (typeof OffscreenCanvas !== 'undefined') {
+    try {
+      const dummyCanvas = new OffscreenCanvas(64, 64);
+      const ctx = dummyCanvas.getContext('2d');
+      if (ctx) {
+          ctx.fillStyle = 'black';
+          ctx.fillRect(0, 0, 64, 64);
+          await pose.send({ image: dummyCanvas });
       }
+    } catch (e) {
+        console.warn('[Worker] Warmup failed', e);
+    }
   } else {
-      self.postMessage({ type: 'ready' });
+    console.warn('[Worker] OffscreenCanvas not supported, skipping warmup');
   }
+
+  self.postMessage({ type: 'ready' });
 }
 
 async function prefetchMediapipeDependencies(baseUrl: string): Promise<void> {
