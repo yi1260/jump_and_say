@@ -24,6 +24,62 @@ export class PreloadScene extends Phaser.Scene {
       this.scene.start('MainScene', { theme: this.currentTheme, dpr: this.registry.get('dpr') || 1 });
     });
 
+    // Log file load completion with cache status
+    this.load.on('filecomplete', (key: string, type: string, data: any) => {
+        // We can't easily get the URL from the key alone in filecomplete, 
+        // but for debugging purposes, we can try to find it in the loader queue or cache
+        // However, we can use the Performance API to check recent entries.
+        
+        // This is a heuristic.
+        if (type === 'image' || type === 'audio' || type === 'svg' || type === 'json') {
+             // Try to find the entry in performance
+             const entries = performance.getEntriesByType('resource');
+             // Get the most recent one that matches the type or name?
+             // Since we don't have the exact URL here easily without looking up the loader state,
+             // let's just log that it loaded.
+             // Actually, file object is not passed to filecomplete.
+             // We can use 'load' event on individual files if we want, but 'filecomplete' is simpler.
+             
+             // Let's try to look up the URL from the TextureManager or Cache if possible, 
+             // but simpler is to just log "Loaded: key"
+             // To be more useful, let's use the 'fileload' event which provides the file object
+        }
+    });
+    
+    // Use 'filecomplete' is not enough for URL. Use 'onload' internal event?
+    // Phaser 3 emits 'load' event on the LoaderPlugin for each file.
+    // Signature: (file: Phaser.Loader.File)
+    this.load.on('load', (file: Phaser.Loader.File) => {
+        let cacheStatus = 'UNKNOWN';
+        let duration = '';
+        
+        if (performance && file.url) {
+            // Check performance entries for this URL
+            // file.url might be relative or absolute. Performance entries are usually absolute.
+            const entries = performance.getEntriesByName(file.url.toString()); // file.url is string
+            if (entries.length === 0 && typeof file.url === 'string' && !file.url.startsWith('http')) {
+                 // Try resolving relative URL
+                 const absoluteUrl = new URL(file.url, window.location.href).href;
+                 const absEntries = performance.getEntriesByName(absoluteUrl);
+                 if (absEntries.length > 0) {
+                     const entry = absEntries[absEntries.length - 1] as PerformanceResourceTiming;
+                     if (entry.transferSize === 0) cacheStatus = 'HIT (SW/Disk)';
+                     else if (entry.transferSize > 0 && entry.transferSize < entry.encodedBodySize) cacheStatus = 'HIT (Revalidated)';
+                     else cacheStatus = 'MISS (Network)';
+                     duration = `${entry.duration.toFixed(0)}ms`;
+                 }
+            } else if (entries.length > 0) {
+                 const entry = entries[entries.length - 1] as PerformanceResourceTiming;
+                 if (entry.transferSize === 0) cacheStatus = 'HIT (SW/Disk)';
+                 else if (entry.transferSize > 0 && entry.transferSize < entry.encodedBodySize) cacheStatus = 'HIT (Revalidated)';
+                 else cacheStatus = 'MISS (Network)';
+                 duration = `${entry.duration.toFixed(0)}ms`;
+            }
+        }
+        
+        console.log(`[Loader] Loaded: ${file.key} (${file.type}) - ${duration} [Cache: ${cacheStatus}] from ${file.url}`);
+    });
+
     // Add retry logic for failed assets
     this.load.on('loaderror', (file: Phaser.Loader.File) => {
         console.warn(`[Loader] Error loading ${file.key} from ${file.url}`);

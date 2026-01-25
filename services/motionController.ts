@@ -320,7 +320,21 @@ export class MotionController {
         }
 
         await resp.arrayBuffer();
-        log(1, 'CDN', `Prefetch ok: ${url}`);
+        
+        // Log cache status
+        let cacheStatus = 'UNKNOWN';
+        if (performance) {
+           const entries = performance.getEntriesByName(url);
+           if (entries.length > 0) {
+              const entry = entries[entries.length - 1] as PerformanceResourceTiming;
+              // transferSize === 0 often indicates Service Worker cache or Disk cache
+              if (entry.transferSize === 0) cacheStatus = 'HIT (SW/Disk)';
+              else if (entry.transferSize > 0 && entry.transferSize < entry.encodedBodySize) cacheStatus = 'HIT (Revalidated)';
+              else cacheStatus = 'MISS (Network)';
+           }
+        }
+        
+        log(1, 'CDN', `Prefetch ok: ${url} [Cache: ${cacheStatus}]`);
         return;
       } catch (e) {
         lastError = e;
