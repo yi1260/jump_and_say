@@ -215,8 +215,11 @@
             console.log('[CDN] Camera utils loaded from: ' + cdnUrl);
           };
           script.onerror = function() {
-            console.warn('[CDN] Failed to load camera_utils, trying fallback...');
-            const fallbackCdn = CDNS[1];
+            console.warn('[CDN] Failed to load camera_utils from ' + cdnUrl + ', trying fallback...');
+            // 如果自有 CDN 加载失败，尝试使用饿了么 CDN
+            const fallbackCdn = 'https://npm.elemecdn.com/@mediapipe/pose@0.5.1675469404/';
+            if (cdnUrl === fallbackCdn) return; // 避免死循环
+
             const fallbackScript = document.createElement('script');
             fallbackScript.src = fallbackCdn + 'camera_utils.js';
             fallbackScript.crossOrigin = 'anonymous';
