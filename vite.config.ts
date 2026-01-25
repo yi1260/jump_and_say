@@ -47,6 +47,7 @@ export default defineConfig(({ mode }) => {
               'workbox-*.js',
               '**/assets/**/*',
               '**/mediapipe/pose/**/*',
+              '**/mediapipe/pose*',
               '**/themes.backup*/**/*',
               '**/assets/kenney/Sprites/**/*',
               '**/assets/kenney/Vector/backup/**/*'

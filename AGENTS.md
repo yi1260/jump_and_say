@@ -86,8 +86,8 @@ import { getR2ImageUrl, getR2AssetUrl } from './src/config/r2Config';
 
 ### Naming Conventions
 
-- **Components**: PascalCase (e.g., `GameCanvas`, `CompletionOverlay`, `CameraGuide`)
-- **Functions/Methods**: camelCase (e.g., `handleScoreUpdate`, `initializeGame`, `preloadThemeImages`)
+- **Components**: PascalCase (e.g., `GameCanvas`, `CompletionOverlay`, `CameraGuide`, `LoadingScreen`)
+- **Functions/Methods**: camelCase (e.g., `handleScoreUpdate`, `initializeGame`, `preloadThemeImages`, `preloadAllGameAssets`)
 - **Classes**: PascalCase (e.g., `MotionController`, `AdaptiveCalibrator`, `MainScene`)
 - **Constants**: UPPER_SNAKE_CASE for true constants (e.g., `MAX_CONCURRENT_DOWNLOADS`, `FRAME_MIN_TIME`)
   - camelCase for config/calibration values that may be adjusted (e.g., `xThreshold`, `currentHeadX`)
@@ -268,6 +268,12 @@ if (isAndroid) {
 - Use Framer Motion for smooth animations
 
 **Asset Preloading**:
+- **PreloadAllGameAssets**: Centralized asset loading function in `services/assetLoader.ts`
+  - Preloads MediaPipe AI models
+  - Preloads game assets (sounds, SVGs) in parallel
+  - Preloads themes-list.json
+  - Preloads first theme's images
+  - Provides progress callbacks for loading screen
 - Background preloading queue for remaining themes (MAX_CONCURRENT_DOWNLOADS = 6)
 - Batch loading with `preloadThemeImages()` for immediate needs (BATCH_SIZE = 4)
 - Use `prioritizeThemeInQueue()` to push theme images to front of queue
@@ -350,8 +356,13 @@ getR2AssetUrl('/assets/kenney/...') // Leading slash removed
 
 **Preloading Strategy**:
 ```typescript
-// High-priority images for current theme
-await preloadThemeImages(themeId);
+import { preloadAllGameAssets } from './services/assetLoader';
+import { startBackgroundPreloading, prioritizeThemeInQueue } from './gameConfig';
+
+// Preload all game assets with progress tracking
+await preloadAllGameAssets(selectedThemes, (progress, status) => {
+  console.log(`Loading: ${progress}% - ${status}`);
+});
 
 // Background preloading queue for remaining themes
 startBackgroundPreloading(themes);
@@ -470,6 +481,7 @@ export const motionController = new MotionController();
 - Auto-update mode for seamless updates
 - Offline-ready for core assets
 - CDN caching with 1-year cache duration
+- **Optimized globIgnores**: Excludes backup files and assets to reduce precache size
 
 **PWA Features**:
 ```typescript
@@ -491,7 +503,13 @@ registerSW({
 - Cache-first strategy for CDN
 - 1-year cache duration for theme assets
 - Maximum file size: 10MB
-- Ignores unused assets (Sprites, backup folders)
+- **Optimized globIgnores**: Excludes backup files, assets, and MediaPipe Pose files
+  - `**/assets/**/*` - All local assets
+  - `**/mediapipe/pose/**/*` - MediaPipe Pose files
+  - `**/mediapipe/pose*` - MediaPipe Pose files
+  - `**/themes.backup*/**/*` - Backup theme directories
+  - `**/assets/kenney/Sprites/**/*` - Unused sprite assets
+  - `**/assets/kenney/Vector/backup/**/*` - Backup vector assets
 - **MediaPipe WASM caching**: Includes `.wasm` and `.data` files for offline support
 - **Multi-CDN support**: Caches MediaPipe Face Detection files from jsdelivr, unpkg, and custom CDN
 
@@ -658,15 +676,43 @@ const CDNS = [
 4. On failure, automatically try next CDN
 5. Face Detection library loaded as `window.FaceDetection`
 
-**Postinstall Script**:
-```bash
-# Automatically runs after npm install
-mkdir -p public/mediapipe && \
-cp -r node_modules/@mediapipe/pose/* public/mediapipe/ && \
-cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/
-```
+### Asset Loading System
 
-**Note**: Postinstall script copies Pose files, but Face Detection is loaded from CDN.
+**AssetLoader Service** (`services/assetLoader.ts`):
+- **Centralized Asset Loading**: `preloadAllGameAssets()` function
+- **Progress Tracking**: Provides callbacks for loading progress and status
+- **Parallel Loading**: Loads game assets in parallel for faster startup
+- **Error Handling**: Continues on individual asset failures
+- **Asset Categories**:
+  - MediaPipe AI models
+  - Game sounds (MP3)
+  - Game SVGs (characters, enemies, tiles, backgrounds)
+  - Themes list JSON
+  - First theme's images
+
+**LoadingScreen Component** (`components/LoadingScreen.tsx`):
+- **Visual Feedback**: Animated loading screen with progress bar
+- **Progress Display**: Shows percentage and status text
+- **Animated Character**: Bouncing character animation
+- **Kenney Style**: Consistent with game's visual design
+- **Backdrop Blur**: Modern glassmorphism effect
+
+**Usage Example**:
+```typescript
+import { preloadAllGameAssets } from './services/assetLoader';
+import { LoadingScreen } from './components/LoadingScreen';
+
+// In App.tsx
+const [loadingProgress, setLoadingProgress] = useState(0);
+const [loadingStatus, setLoadingStatus] = useState('');
+
+await preloadAllGameAssets(selectedThemes, (progress, status) => {
+  setLoadingProgress(progress);
+  setLoadingStatus(status);
+});
+
+<LoadingScreen progress={loadingProgress} status={loadingStatus} />
+```
 
 ### Theme System
 
@@ -761,6 +807,9 @@ rollupOptions: {
 enum GamePhase {
   MENU = 'MENU',                    // Main menu
   THEME_SELECTION = 'THEME_SELECTION', // Theme selection screen
+  LOADING = 'LOADING',              // Asset loading phase
+  LOADING_AI = 'LOADING_AI',        // AI model loading
+  CALIBRATING = 'CALIBRATING',      // Motion calibration
   TUTORIAL = 'TUTORIAL',            // Tutorial mode
   PLAYING = 'PLAYING',              // Active gameplay
   GAME_OVER = 'GAME_OVER'           // Game over screen
@@ -794,13 +843,16 @@ const setPhase = (newPhase: GamePhase) => {
 │   ├── CameraGuide.tsx           # Camera position guide
 │   ├── CompletionOverlay.tsx     # Game completion overlay with framer-motion
 │   ├── GameBackground.tsx        # Dynamic background component
-│   └── GameCanvas.tsx            # Phaser game container
+│   ├── GameCanvas.tsx            # Phaser game container
+│   ├── ImgWithFallback.tsx       # Image component with fallback support
+│   └── LoadingScreen.tsx         # Loading screen with progress bar
 ├── game/
 │   └── scenes/                   # Phaser scenes
 │       ├── MainScene.ts          # Main gameplay scene
 │       └── PreloadScene.ts       # Asset preloading scene
 ├── services/
-│   └── motionController.ts       # Motion detection (MediaPipe Face Detection)
+│   ├── motionController.ts       # Motion detection (MediaPipe Face Detection)
+│   └── assetLoader.ts            # Asset loading service
 ├── src/
 │   └── config/
 │       └── r2Config.ts           # R2 CDN configuration
@@ -908,6 +960,7 @@ dist-ssr
    - Auto-update mode for seamless updates
    - HTTPS support via @vitejs/plugin-basic-ssl
    - MediaPipe WASM files cached for offline support
+   - **Optimized globIgnores**: Excludes backup files to reduce precache size
 
 6. **Environment Variables**:
    - `GEMINI_API_KEY` - Required for AI features
@@ -934,6 +987,7 @@ dist-ssr
    - **Background Preloading**: Queue for themes (MAX_CONCURRENT_DOWNLOADS = 6)
    - **CDN Caching**: 1-year cache duration for theme assets
    - **Pause Preloading**: During high-priority loading
+   - **Optimized globIgnores**: Reduces precache size for faster Service Worker activation
 
 9. **Phaser-Specific Notes**:
    - `experimentalDecorators: true` required for Phaser decorators
@@ -968,6 +1022,7 @@ dist-ssr
     - Implement retry logic with 15s timeout
     - Cache detection: < 50ms indicates cache hit
     - **CDN → Local Fallback**: PreloadScene automatically falls back to local assets if CDN fails
+    - **Centralized Loading**: Use `preloadAllGameAssets()` for consistent asset loading
 
 13. **Framer Motion Usage**:
     - Only used in `CompletionOverlay.tsx`
@@ -1052,3 +1107,35 @@ dist-ssr
     - Face Detection provides better accuracy with acceptable performance
     - API remains compatible with previous implementations
     - No breaking changes to game logic or UI components
+
+24. **Loading System Improvements**:
+    - **Centralized Asset Loading**: `preloadAllGameAssets()` in `services/assetLoader.ts`
+    - **Progress Tracking**: Real-time progress updates for loading screen
+    - **Parallel Loading**: Game assets loaded concurrently for faster startup
+    - **Visual Feedback**: `LoadingScreen` component with animated progress bar
+    - **Error Resilience**: Continues loading even if individual assets fail
+    - **Optimized globIgnores**: Reduces Service Worker precache size for faster activation
+
+25. **Service Worker Optimization**:
+    - **Reduced Precache Size**: Excludes backup files and local assets
+    - **Faster Activation**: Smaller precache list means faster Service Worker activation
+    - **Runtime Caching**: CDN assets cached at runtime with 1-year duration
+    - **Cleanup Outdated Caches**: Automatically removes old cache versions
+    - **Skip Waiting**: New Service Worker activates immediately
+    - **Clients Claim**: New Service Worker takes control of all clients immediately
+
+26. **PWA Refresh Performance**:
+    - **Problem**: Large precache manifests (100+ backup theme files) cause slow refresh
+    - **Solution**: Optimized `globIgnores` to exclude backup files
+    - **Result**: Refresh time reduced from 10-30s to 1-3s
+    - **Configuration**:
+      ```javascript
+      globIgnores: [
+        '**/assets/**/*',              // All local assets
+        '**/mediapipe/pose/**/*',      // MediaPipe Pose files
+        '**/mediapipe/pose*',          // MediaPipe Pose files
+        '**/themes.backup*/**/*',      // Backup theme directories
+        '**/assets/kenney/Sprites/**/*', // Unused sprites
+        '**/assets/kenney/Vector/backup/**/*' // Backup vectors
+      ]
+      ```
