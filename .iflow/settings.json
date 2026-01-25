@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "desktop-commander": {
+      "description": "强大的桌面文件系统和进程管理工具，提供文件操作、搜索、进程管理等全面功能",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@iflow-mcp/desktop-commander"
+      ]
+    }
+  }
+}

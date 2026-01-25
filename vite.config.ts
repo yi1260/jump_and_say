@@ -38,8 +38,8 @@ export default defineConfig(({ mode }) => {
             enabled: true
           },
           workbox: {
-            maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
-            globPatterns: ['**/*.{js,css,html,ico,png,svg,mp3,ogg,ttf}'],
+            globPatterns: ['**/*.{js,css,html,ico,png,svg,mp3,ogg,ttf,wasm,data}'], // Added wasm, data for MediaPipe local fallback
+            maximumFileSizeToCacheInBytes: 10 * 1024 * 1024, // 10MB
             globIgnores: [
               '**/node_modules/**/*',
               'sw.js',
@@ -47,7 +47,27 @@ export default defineConfig(({ mode }) => {
               '**/assets/kenney/Sprites/**/*',
               '**/assets/kenney/Vector/backup/**/*'
             ],
+            ignoreURLParametersMatching: [/^utm_/, /^fbclid$/],
+            skipWaiting: true,
+            clientsClaim: true,
             runtimeCaching: [
+              // 1. MediaPipe CDN Caching (CDN First, Long-term Cache)
+              // Matches jsdelivr, unpkg, and your own CDN for mediapipe files
+              {
+                urlPattern: /^https:\/\/(cdn\.jsdelivr\.net|fastly\.jsdelivr\.net|unpkg\.com|cdn\.maskmysheet\.com)\/.*(?:mediapipe|pose).*\.(?:js|wasm|data|tflite)$/i,
+                handler: 'CacheFirst',
+                options: {
+                  cacheName: 'mediapipe-cdn-cache',
+                  expiration: {
+                    maxEntries: 20,
+                    maxAgeSeconds: 60 * 60 * 24 * 365 // 1 year
+                  },
+                  cacheableResponse: {
+                    statuses: [0, 200]
+                  }
+                }
+              },
+              // 2. Theme Images (raz_aa) - Existing rule
               {
                 urlPattern: /^https:\/\/cdn\.maskmysheet\.com\/raz_aa\/.*/i,
                 handler: 'CacheFirst',
@@ -55,6 +75,52 @@ export default defineConfig(({ mode }) => {
                   cacheName: 'raz-aa-cdn-cache',
                   expiration: {
                     maxEntries: 1000,
+                    maxAgeSeconds: 60 * 60 * 24 * 365 // 1 year
+                  },
+                  cacheableResponse: {
+                    statuses: [0, 200]
+                  }
+                }
+              },
+              // 3. General Game Assets (assets/) - R2 CDN
+              // Matches https://cdn.maskmysheet.com/assets/...
+              {
+                urlPattern: /^https:\/\/cdn\.maskmysheet\.com\/assets\/.*/i,
+                handler: 'CacheFirst',
+                options: {
+                  cacheName: 'game-assets-cdn-cache',
+                  expiration: {
+                    maxEntries: 500,
+                    maxAgeSeconds: 60 * 60 * 24 * 365 // 1 year
+                  },
+                  cacheableResponse: {
+                    statuses: [0, 200]
+                  }
+                }
+              },
+              // 4. Google Fonts (Cache First)
+              {
+                urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
+                handler: 'CacheFirst',
+                options: {
+                  cacheName: 'google-fonts-cache',
+                  expiration: {
+                    maxEntries: 10,
+                    maxAgeSeconds: 60 * 60 * 24 * 365 // 1 year
+                  },
+                  cacheableResponse: {
+                    statuses: [0, 200]
+                  }
+                }
+              },
+              // 5. Google Fonts Webfiles (Stale While Revalidate)
+              {
+                urlPattern: /^https:\/\/fonts\.gstatic\.com\/.*/i,
+                handler: 'CacheFirst',
+                options: {
+                  cacheName: 'gstatic-fonts-cache',
+                  expiration: {
+                    maxEntries: 10,
                     maxAgeSeconds: 60 * 60 * 24 * 365 // 1 year
                   },
                   cacheableResponse: {
