@@ -72,6 +72,98 @@ const BASELINE_ADAPTION_RATE = 0.03;
 const JUMP_COOLDOWN = 400;
 const VISIBILITY_THRESHOLD = 0.4;
 
+/**
+ * A lightweight pixel difference motion detector.
+ * Detects center of motion to emulate body position.
+ */
+class PixelMotionProcessor {
+    private canvas: OffscreenCanvas | HTMLCanvasElement;
+    private ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null;
+    private width = 64; // Low res for speed
+    private height = 48;
+    private prevFrameData: Uint8ClampedArray | null = null;
+    private backgroundData: Float32Array | null = null;
+    
+    // Config
+    private readonly diffThreshold = 20; // Pixel diff threshold (0-255)
+    private readonly motionThreshold = 50; // Minimum active pixels to trigger update
+    private readonly learningRate = 0.05; // Background adaptation rate (slow)
+
+    constructor() {
+        if (typeof OffscreenCanvas !== 'undefined') {
+            this.canvas = new OffscreenCanvas(this.width, this.height);
+        } else {
+            this.canvas = document.createElement('canvas');
+            this.canvas.width = this.width;
+            this.canvas.height = this.height;
+        }
+        this.ctx = this.canvas.getContext('2d', { willReadFrequently: true }) as any;
+    }
+
+    process(video: HTMLVideoElement): { x: number, y: number, isMotion: boolean } | null {
+        if (!this.ctx) return null;
+
+        // Draw current frame
+        this.ctx.drawImage(video, 0, 0, this.width, this.height);
+        const imageData = this.ctx.getImageData(0, 0, this.width, this.height);
+        const data = imageData.data;
+        const len = data.length;
+
+        // Init background if needed
+        if (!this.backgroundData) {
+            this.backgroundData = new Float32Array(len);
+            for (let i = 0; i < len; i++) {
+                this.backgroundData[i] = data[i];
+            }
+            return null;
+        }
+
+        let sumX = 0;
+        let sumY = 0;
+        let count = 0;
+
+        // Compare with background
+        for (let i = 0; i < len; i += 4) {
+            // Simple grayscale diff
+            const r = data[i];
+            const g = data[i+1];
+            const b = data[i+2];
+            
+            const bgR = this.backgroundData[i];
+            const bgG = this.backgroundData[i+1];
+            const bgB = this.backgroundData[i+2];
+
+            // Diff
+            const diff = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
+            
+            // Threshold
+            if (diff > this.diffThreshold * 3) { // *3 because we sum RGB
+                const idx = i / 4;
+                const x = idx % this.width;
+                const y = Math.floor(idx / this.width);
+                
+                sumX += x;
+                sumY += y;
+                count++;
+            }
+
+            // Update background (Running Average)
+            this.backgroundData[i] = bgR * (1 - this.learningRate) + r * this.learningRate;
+            this.backgroundData[i+1] = bgG * (1 - this.learningRate) + g * this.learningRate;
+            this.backgroundData[i+2] = bgB * (1 - this.learningRate) + b * this.learningRate;
+        }
+
+        if (count < this.motionThreshold) {
+            return { x: 0.5, y: 0.5, isMotion: false };
+        }
+
+        const centerX = (sumX / count) / this.width;
+        const centerY = (sumY / count) / this.height;
+
+        return { x: 1 - centerX, y: centerY, isMotion: true }; // Mirror X for selfie view
+    }
+}
+
 export class MotionController {
   private pose: any = null; // Back for fallback
   private worker: Worker | null = null;
@@ -154,34 +246,28 @@ export class MotionController {
   private frameSkipCounter: number = 0;
   private readonly FRAME_SKIP_INTERVAL = 2; // Process 1 out of every 2 frames (15 FPS target)
 
+  private usePixelMotion: boolean = true; // Use simple pixel-based motion detection
+  private pixelProcessor: PixelMotionProcessor | null = null;
+
   async init() {
     if (this.initPromise) return this.initPromise;
 
     this.initPromise = (async () => {
       const startTime = performance.now();
-      log(1, 'INIT', 'Initializing Pose (Main Thread Optimized)...');
+      log(1, 'INIT', 'Initializing Pixel Motion (No AI Mode)...');
 
       const ua = navigator.userAgent;
       this.isIPad = /iPad|Macintosh/i.test(ua) && 'ontouchend' in document;
       this.isAndroid = /Android/i.test(ua);
       this.isMobilePhone = /iPhone|Android|Mobile/i.test(ua) && !/iPad|Tablet/i.test(ua);
 
-      if (this.isMobilePhone || this.isAndroid) {
-        this.requiredStableFrames = 2;
-      } else if (this.isIPad) {
-        this.requiredStableFrames = 3;
-      } else {
-        this.requiredStableFrames = 3;
-      }
-
-      log(1, 'INIT', `Device: isIPad=${this.isIPad}, isAndroid=${this.isAndroid}, isMobilePhone=${this.isMobilePhone}`);
-
-      // FORCE MAIN THREAD INITIALIZATION
-      // Worker is causing Script Error on some devices due to CORS/CDN issues.
-      // We will optimize main thread performance by throttling frame rate instead.
-      await this.initMainThread();
+      // Initialize Pixel Processor
+      this.pixelProcessor = new PixelMotionProcessor();
+      this.isReady = true;
+      this.usePixelMotion = true;
       this.useWorker = false;
       
+      log(1, 'INIT', 'Pixel Motion initialized (No AI loaded)');
     })();
 
     return this.initPromise;
@@ -532,7 +618,58 @@ export class MotionController {
         }
 
         try {
-          if (this.useWorker && this.worker) {
+          if (this.usePixelMotion && this.pixelProcessor) {
+             const result = this.pixelProcessor.process(this.video);
+             if (result && result.isMotion) {
+                 this.isNoseDetected = true;
+                 
+                 // Update State from Pixel Motion
+                 // Map pixel result (0..1) to bodyX
+                 // Smooth it a bit
+                 const targetX = result.x;
+                 const targetY = result.y;
+                 
+                 this.currentBodyX = this.currentBodyX * 0.7 + targetX * 0.3;
+                 this.state.bodyX = this.currentBodyX;
+                 
+                 // Emulate nose pos for compatibility
+                 this.state.rawNoseX = this.currentBodyX; 
+                 this.state.rawNoseY = targetY;
+
+                 // Lane Detection
+                 let targetLane = 0;
+                 if (this.currentBodyX > (0.5 + this.xThreshold)) {
+                   targetLane = -1; 
+                 } else if (this.currentBodyX < (0.5 - this.xThreshold)) {
+                   targetLane = 1; 
+                 } else {
+                   targetLane = 0;
+                 }
+                 if (this.state.x !== targetLane) {
+                   this.onMotionDetected?.('move');
+                 }
+                 this.state.x = targetLane;
+
+                 // Jump Detection (Simple Velocity)
+                 const dtSec = this.FRAME_MIN_TIME * this.FRAME_SKIP_INTERVAL / 1000;
+                 const yVel = (this.smoothedShoulderY - targetY) / dtSec; // Up is negative Y in pixels, so (Old - New) is positive up velocity
+                 
+                 // Update smoothed Y for next frame
+                 this.smoothedShoulderY = this.smoothedShoulderY * 0.5 + targetY * 0.5;
+                 
+                 // Thresholds for pixel motion need to be tuned
+                 const jumpVelThreshold = 0.5; // Pixels per sec normalized?
+                 
+                 if (yVel > jumpVelThreshold && !this.state.isJumping) {
+                     this.state.isJumping = true;
+                     this.onMotionDetected?.('jump');
+                     setTimeout(() => { this.state.isJumping = false; }, 400);
+                 }
+             } else {
+                 // No motion detected, decay to center?
+                 // Or just keep last position
+             }
+          } else if (this.useWorker && this.worker) {
               // Worker mode: create ImageBitmap
               // Check if createImageBitmap is supported
               if (typeof createImageBitmap !== 'undefined') {
