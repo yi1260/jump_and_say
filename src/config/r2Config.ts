@@ -21,6 +21,34 @@ export const getR2AssetUrl = (path: string): string => {
   return `${R2_BASE_URL}/${cleanPath}`;
 };
 
+export const getLocalAssetUrl = (path: string): string => {
+  // Determine local path based on input path
+  let cleanPath = path;
+  
+  // If it's a full URL, strip the domain
+  if (cleanPath.startsWith('http')) {
+      try {
+          const url = new URL(cleanPath);
+          cleanPath = url.pathname;
+      } catch (e) {
+          // If invalid URL, keep as is or try to clean up
+          console.warn('[getLocalAssetUrl] Invalid URL:', cleanPath);
+      }
+  }
+
+  // Ensure it starts with / for local serving
+  if (!cleanPath.startsWith('/')) {
+      cleanPath = '/' + cleanPath;
+  }
+  
+  // If it already has /assets, good. If it has /raz_aa (themes), we might need to map it?
+  // For now, assuming local structure mirrors CDN pathing for /assets.
+  // Theme images might not be available locally if they are only on R2.
+  // But for 'assets/kenney/...', it maps to '/assets/kenney/...' which is correct.
+  
+  return cleanPath;
+};
+
 export const getR2ThemesListUrl = (): string => {
   return '/themes/themes-list.json';
 };

@@ -284,8 +284,38 @@ export class MainScene extends Phaser.Scene {
         console.log('Loaded theme image:', key);
       }
     });
-    this.load.on('loaderror', (file: any) => {
-      if (isDev) console.error('Error loading:', file.src || file.key);
+    this.load.on('loaderror', (file: Phaser.Loader.File) => {
+        console.warn(`[Loader] Error loading ${file.key} from ${file.url}`);
+        
+        // R2 CDN -> Local Fallback Logic
+        if (typeof file.url === 'string' && file.url.includes('cdn.maskmysheet.com') && file.url.includes('/assets/')) {
+             console.log(`[Loader] CDN load failed for ${file.key}, attempting local fallback...`);
+             
+             // CDN: https://cdn.maskmysheet.com/assets/kenney/... -> Local: /assets/kenney/...
+             const pathParts = file.url.split('/assets/');
+             if (pathParts.length > 1) {
+                 const newUrl = '/assets/' + pathParts[1];
+                 console.log(`[Loader] Switching to local URL: ${newUrl}`);
+                 
+                 switch (file.type) {
+                     case 'image':
+                         this.load.image(file.key, newUrl);
+                         break;
+                     case 'svg':
+                         // Use config if available, otherwise just try load
+                         this.load.svg(file.key, newUrl, (file as any).config); 
+                         break;
+                     case 'audio':
+                         this.load.audio(file.key, newUrl);
+                         break;
+                     default:
+                         this.load.image(file.key, newUrl);
+                 }
+                 
+                 this.load.start();
+                 return; 
+             }
+        }
     });
   }
 
