@@ -45,9 +45,11 @@ export default defineConfig(({ mode }) => {
               '**/node_modules/**/*',
               'sw.js',
               'workbox-*.js',
-              '**/assets/**/*',
+              '**/assets/kenney/**/*',
+              '**/assets/Fredoka/**/*',
               '**/mediapipe/pose/**/*',
               '**/mediapipe/pose*',
+              '**/mediapipe/face_detection/**/*',
               '**/themes.backup*/**/*',
               '**/assets/kenney/Sprites/**/*',
               '**/assets/kenney/Vector/backup/**/*'

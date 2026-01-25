@@ -1,6 +1,6 @@
 
 import { useEffect, useMemo, useState } from 'react';
-import { getR2AssetUrl } from '../src/config/r2Config';
+import { getLocalAssetUrl, getR2AssetUrl } from '../src/config/r2Config';
 
 const BACKGROUNDS = [
   'assets/kenney/Vector/Backgrounds/background_color_hills.svg',
@@ -18,21 +18,35 @@ interface GameBackgroundProps {
 
 export default function GameBackground({ currentIndex }: GameBackgroundProps) {
   const bgSrc = useMemo(() => getR2AssetUrl(BACKGROUNDS[currentIndex % BACKGROUNDS.length]), [currentIndex]);
+  const bgLocalSrc = useMemo(() => getLocalAssetUrl(bgSrc), [bgSrc]);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [resolvedSrc, setResolvedSrc] = useState(bgSrc);
 
   useEffect(() => {
     console.log('GameBackground currentIndex:', currentIndex, 'bgSrc:', bgSrc);
     setIsLoaded(false);
+    setResolvedSrc(bgSrc);
     const img = new Image();
-    img.src = bgSrc;
+    img.crossOrigin = 'anonymous';
     img.onload = () => setIsLoaded(true);
-  }, [bgSrc, currentIndex]);
+    img.onerror = () => {
+      if (bgLocalSrc === bgSrc) return;
+      const localImg = new Image();
+      localImg.onload = () => {
+        setResolvedSrc(bgLocalSrc);
+        setIsLoaded(true);
+      };
+      localImg.onerror = () => setIsLoaded(true);
+      localImg.src = bgLocalSrc;
+    };
+    img.src = bgSrc;
+  }, [bgSrc, bgLocalSrc, currentIndex]);
 
   return (
     <div className="absolute inset-0 z-0 overflow-hidden pointer-events-none">
       {isLoaded && (
         <img
-          src={bgSrc}
+          src={resolvedSrc}
           alt="background"
           className="w-full h-full object-cover"
           style={{ 

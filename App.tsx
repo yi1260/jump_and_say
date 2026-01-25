@@ -6,7 +6,7 @@ import { LoadingScreen } from './components/LoadingScreen';
 import { loadThemes, startBackgroundPreloading } from './gameConfig';
 import { preloadAllGameAssets } from './services/assetLoader';
 import { motionController } from './services/motionController';
-import { getR2AssetUrl } from './src/config/r2Config';
+import { getLocalAssetUrl, getR2AssetUrl } from './src/config/r2Config';
 import { Theme, ThemeId } from './types';
 
 declare global {
@@ -100,6 +100,7 @@ export default function App() {
   useEffect(() => {
     let bgmAudio: HTMLAudioElement | null = null;
     let isPlaying = false;
+    let hasTriedFallback = false;
     
     const updateVolume = (vol: number) => {
       if (bgmAudio) {
@@ -112,10 +113,21 @@ export default function App() {
     const initBGM = async () => {
       if (isPlaying) return;
       
-      bgmAudio = new Audio(getR2AssetUrl('assets/kenney/Sounds/funny-kids-video-322163.mp3'));
+      const bgmCdnUrl = getR2AssetUrl('assets/kenney/Sounds/funny-kids-video-322163.mp3');
+      const bgmLocalUrl = getLocalAssetUrl(bgmCdnUrl);
+      bgmAudio = new Audio(bgmCdnUrl);
       bgmAudio.loop = true;
       bgmAudio.volume = 0.3;
       bgmAudio.preload = 'auto';
+      bgmAudio.addEventListener('error', () => {
+        if (!bgmAudio || hasTriedFallback) return;
+        hasTriedFallback = true;
+        bgmAudio.src = bgmLocalUrl;
+        bgmAudio.load();
+        if (isPlaying) {
+          bgmAudio.play().catch(() => {});
+        }
+      });
       
       try {
         await bgmAudio.play();
@@ -225,10 +237,12 @@ export default function App() {
   useEffect(() => {
     // Add custom animation styles directly to the document
     const style = document.createElement('style');
+    const fontCdnUrl = getR2AssetUrl('assets/Fredoka/static/Fredoka-Bold.ttf');
+    const fontLocalUrl = getLocalAssetUrl(fontCdnUrl);
     style.innerHTML = `
       @font-face {
         font-family: 'FredokaLocal';
-        src: url('${getR2AssetUrl('assets/Fredoka/static/Fredoka-Bold.ttf')}') format('truetype');
+        src: url('${fontCdnUrl}') format('truetype'), url('${fontLocalUrl}') format('truetype');
         font-weight: bold;
         font-style: normal;
         font-display: swap;

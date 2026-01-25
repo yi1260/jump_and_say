@@ -1,5 +1,6 @@
 import React from 'react';
 import { getR2AssetUrl } from '@/src/config/r2Config';
+import { ImgWithFallback } from './ImgWithFallback';
 
 interface LoadingScreenProps {
   progress: number;
@@ -13,7 +14,7 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ progress, status }
         
         {/* Animated Character */}
         <div className="relative">
-           <img 
+           <ImgWithFallback 
              src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')}
              className="w-24 h-24 md:w-40 md:h-40 animate-bounce drop-shadow-xl" 
              alt="Loading..." 

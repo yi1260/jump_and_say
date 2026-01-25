@@ -1,4 +1,4 @@
-import { getLocalAssetUrl, getR2ImageUrl, getR2ThemesListCdnUrl, getR2ThemesListUrl, handleR2Error } from '@/src/config/r2Config';
+import { getR2ImageUrl, getR2ThemesListCdnUrl, getR2ThemesListUrl, handleR2Error } from '@/src/config/r2Config';
 import { Theme, ThemeList } from './types';
 
 let cachedThemes: Theme[] | null = null;
@@ -227,13 +227,10 @@ export async function preloadThemeImages(themeId: string): Promise<void> {
       const imageName = q.image.replace(/\.(png|jpg|jpeg)$/i, '.webp');
       const imgUrl = getR2ImageUrl(imageName);
 
-      const loadWithRetry = (retriesLeft: number, useFallback = false): Promise<void> => {
+      const loadWithRetry = (retriesLeft: number): Promise<void> => {
         return new Promise<void>((resolve) => {
             const img = new Image();
             img.crossOrigin = 'anonymous';
-            
-            // Determine URL to use
-            const currentUrl = useFallback ? getLocalAssetUrl(imgUrl) : imgUrl;
             
             // Increase timeout to 15 seconds
             const timeout = setTimeout(() => {
@@ -242,12 +239,8 @@ export async function preloadThemeImages(themeId: string): Promise<void> {
               
               if (retriesLeft > 0) {
                   console.log(`[preloadThemeImages] 🔄 Retrying: ${q.image}`);
-                  resolve(loadWithRetry(retriesLeft - 1, useFallback));
-              } else if (!useFallback) {
-                  console.log(`[preloadThemeImages] 🔄 Switching to local fallback: ${q.image}`);
-                  resolve(loadWithRetry(1, true)); // Try fallback with 1 retry
+                  resolve(loadWithRetry(retriesLeft - 1));
               } else {
-                  console.warn(`[preloadThemeImages] Timeout details: URL=${currentUrl}`);
                   resolve();
               }
             }, 15000); 
@@ -261,7 +254,6 @@ export async function preloadThemeImages(themeId: string): Promise<void> {
               // Precise network vs cache detection for Images is limited without Performance API entries which might be restricted by CORS
               const isFastLoad = parseFloat(duration) < 50;
               let sourceLabel = isFastLoad ? '📦 CACHE (Likely)' : '🌐 CDN';
-              if (useFallback) sourceLabel = '🏠 LOCAL';
               
               console.log(`[preloadThemeImages] ✅ Loaded: ${q.image} (${globalIndex + 1}/${theme.questions.length}) - ${duration}ms [${sourceLabel}]`);
               resolve();
@@ -270,25 +262,22 @@ export async function preloadThemeImages(themeId: string): Promise<void> {
             img.onerror = (e) => {
               clearTimeout(timeout);
               const duration = (performance.now() - imgStartTime).toFixed(2);
-              console.warn(`[preloadThemeImages] ❌ Failed to preload: ${q.image} - ${duration}ms (URL: ${currentUrl})`);
+              console.warn(`[preloadThemeImages] ❌ Failed to preload: ${q.image} - ${duration}ms (URL: ${imgUrl})`);
               
               if (retriesLeft > 0) {
                   console.log(`[preloadThemeImages] 🔄 Retrying after error: ${q.image}`);
                   setTimeout(() => {
-                      resolve(loadWithRetry(retriesLeft - 1, useFallback));
+                      resolve(loadWithRetry(retriesLeft - 1));
                   }, 500); // Wait a bit before retry
-              } else if (!useFallback) {
-                  console.log(`[preloadThemeImages] 🔄 Switching to local fallback after error: ${q.image}`);
-                  resolve(loadWithRetry(1, true)); // Try fallback with 1 retry
               } else {
-                  console.warn(`[preloadThemeImages] Failure details: URL=${currentUrl}`, e);
+                  console.warn(`[preloadThemeImages] Failure details: URL=${imgUrl}`, e);
                   resolve();
               }
             };
             
             try {
-              console.log(`[preloadThemeImages] ⏳ Requesting: ${q.image} (${globalIndex + 1}/${theme.questions.length}) [${useFallback ? 'LOCAL' : 'CDN'}]`);
-              img.src = currentUrl;
+              console.log(`[preloadThemeImages] ⏳ Requesting: ${q.image} (${globalIndex + 1}/${theme.questions.length}) [CDN]`);
+              img.src = imgUrl;
             } catch (err) {
               console.warn(`[preloadThemeImages] Error setting image src:`, err);
               resolve();
