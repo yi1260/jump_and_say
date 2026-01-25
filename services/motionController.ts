@@ -113,6 +113,16 @@ export class MotionController {
     rawShoulderY: 0.5
   };
 
+  // Smoothed state for display/UI (to hide low FPS)
+  public smoothedState: MotionState = {
+    x: 0,
+    bodyX: 0.5,
+    isJumping: false,
+    rawNoseX: 0.5,
+    rawNoseY: 0.5,
+    rawShoulderY: 0.5
+  };
+
   public isReady: boolean = false;
   public isStarted: boolean = false;
   public isNoseDetected: boolean = false;
@@ -138,7 +148,7 @@ export class MotionController {
 
   private lastYSignal: number | null = null;
   private lastYVelocityStableFrames: number = 0;
-  private jumpVelocityThreshold: number = 0.25; // Relaxed from 0.40 for easier jumping
+  private jumpVelocityThreshold: number = 0.15; // Relaxed further from 0.25 for 15 FPS
   private jumpArmed: boolean = true;
 
   private frameSkipCounter: number = 0;
@@ -314,7 +324,7 @@ export class MotionController {
     const minTrackingConf = (this.isIPad || this.isAndroid || this.isMobilePhone) ? 0.3 : 0.5;
 
     this.pose.setOptions({
-      modelComplexity: 0,
+      modelComplexity: 0, // Force Lite model for performance
       smoothLandmarks: true,
       minDetectionConfidence: minDetectionConf,
       minTrackingConfidence: minTrackingConf,
@@ -501,6 +511,18 @@ export class MotionController {
     if (elapsed >= this.FRAME_MIN_TIME) {
         // Frame Throttling Logic
         this.frameSkipCounter++;
+        
+        // INTERPOLATION LOGIC:
+        // Even if we skip AI processing, we must smooth the output values 
+        // to make the game feel responsive (60 FPS visual, 15 FPS AI)
+        const lerpFactor = 0.2; // Smooth movement
+        this.smoothedState.bodyX = this.smoothedState.bodyX * (1 - lerpFactor) + this.state.bodyX * lerpFactor;
+        this.smoothedState.rawNoseX = this.smoothedState.rawNoseX * (1 - lerpFactor) + this.state.rawNoseX * lerpFactor;
+        this.smoothedState.rawNoseY = this.smoothedState.rawNoseY * (1 - lerpFactor) + this.state.rawNoseY * lerpFactor;
+        // Sync discrete states
+        this.smoothedState.x = this.state.x;
+        this.smoothedState.isJumping = this.state.isJumping;
+
         if (this.frameSkipCounter % this.FRAME_SKIP_INTERVAL !== 0) {
             // Skip this frame but keep loop running
              if (this.isRunning) {
@@ -821,24 +843,24 @@ export class MotionController {
     if (this.isIPad) {
       if (aspectRatio > 1) {
         this.xThreshold = 0.12 * clampedDistanceScale; // Reduced from 0.20
-        this.jumpThresholdY = 0.10 * clampedDistanceScale;
+        this.jumpThresholdY = 0.05 * clampedDistanceScale; // Aggressively reduced for 15 FPS
       } else {
         this.xThreshold = 0.15 * clampedDistanceScale; // Reduced from 0.25
-        this.jumpThresholdY = 0.07 * clampedDistanceScale;
+        this.jumpThresholdY = 0.04 * clampedDistanceScale;
       }
     } else if (this.isMobilePhone || this.isAndroid) {
       if (aspectRatio > 1) {
         this.xThreshold = 0.15 * clampedDistanceScale; // Reduced from 0.22
-        this.jumpThresholdY = 0.03 * clampedDistanceScale;
+        this.jumpThresholdY = 0.025 * clampedDistanceScale;
       } else {
         this.xThreshold = 0.18 * clampedDistanceScale; // Reduced from 0.30
-        this.jumpThresholdY = 0.025 * clampedDistanceScale;
+        this.jumpThresholdY = 0.02 * clampedDistanceScale;
       }
     } else {
       if (aspectRatio > 1) {
         if (isTablet) {
           this.xThreshold = 0.15 * clampedDistanceScale; // Reduced from 0.22
-          this.jumpThresholdY = 0.07 * clampedDistanceScale;
+          this.jumpThresholdY = 0.05 * clampedDistanceScale;
         } else {
           this.xThreshold = 0.12 * clampedDistanceScale; // Reduced from 0.20
           this.jumpThresholdY = 0.03 * clampedDistanceScale;

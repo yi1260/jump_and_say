@@ -797,8 +797,12 @@ export class MainScene extends Phaser.Scene {
     }
     
     if (isOnGround) {
+        // Use smoothed state for movement logic to prevent jitter/lag
+        // Fallback to raw state if smoothedState is not available yet
+        const effectiveState = motionController.smoothedState || motionState;
+        
         const bodyX = Phaser.Math.Clamp(
-          typeof motionState.bodyX === 'number' ? motionState.bodyX : (1 - motionState.rawNoseX),
+          typeof effectiveState.bodyX === 'number' ? effectiveState.bodyX : (1 - effectiveState.rawNoseX),
           0,
           1
         );
@@ -821,7 +825,9 @@ export class MainScene extends Phaser.Scene {
             this.player.play('p1_walk', true);
         }
  
-        if (motionState.isJumping && this.isInteractionActive && isNoseDetected) {
+        // Use smoothed jump state too? No, jump is an event, use immediate state but with latching in controller
+        // Actually, we should check if jump was triggered in the last few frames if we missed it
+        if (effectiveState.isJumping && this.isInteractionActive && isNoseDetected) {
             this.player.setVelocityY(-this.jumpVelocity); 
             this.player.setTexture('p1_jump');
             this.player.anims.stop();

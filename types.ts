@@ -5,6 +5,7 @@ export interface MotionState {
   rawNoseX: number;
   rawNoseY: number;
   rawShoulderY: number;
+  smoothedState?: MotionState; // Optional recursive reference for smoothed state
 }
 
 export interface QuestionData {
