@@ -141,12 +141,15 @@ export class MotionController {
   private jumpVelocityThreshold: number = 0.25; // Relaxed from 0.40 for easier jumping
   private jumpArmed: boolean = true;
 
+  private frameSkipCounter: number = 0;
+  private readonly FRAME_SKIP_INTERVAL = 2; // Process 1 out of every 2 frames (15 FPS target)
+
   async init() {
     if (this.initPromise) return this.initPromise;
 
     this.initPromise = (async () => {
       const startTime = performance.now();
-      log(1, 'INIT', 'Initializing Pose...');
+      log(1, 'INIT', 'Initializing Pose (Main Thread Optimized)...');
 
       const ua = navigator.userAgent;
       this.isIPad = /iPad|Macintosh/i.test(ua) && 'ontouchend' in document;
@@ -163,21 +166,12 @@ export class MotionController {
 
       log(1, 'INIT', `Device: isIPad=${this.isIPad}, isAndroid=${this.isAndroid}, isMobilePhone=${this.isMobilePhone}`);
 
-      // Try initializing Worker first
-      try {
-        await this.initWorker();
-        this.useWorker = true;
-        log(1, 'INIT', 'Worker initialized successfully');
-      } catch (workerError) {
-        console.error('[MotionController] Worker init failed, falling back to main thread:', workerError);
-        this.useWorker = false;
-        this.worker?.terminate();
-        this.worker = null;
-        
-        // Fallback to main thread
-        await this.initMainThread();
-        log(1, 'INIT', 'Main thread fallback initialized successfully');
-      }
+      // FORCE MAIN THREAD INITIALIZATION
+      // Worker is causing Script Error on some devices due to CORS/CDN issues.
+      // We will optimize main thread performance by throttling frame rate instead.
+      await this.initMainThread();
+      this.useWorker = false;
+      
     })();
 
     return this.initPromise;
@@ -505,6 +499,16 @@ export class MotionController {
     const elapsed = now - this.lastFrameTime;
 
     if (elapsed >= this.FRAME_MIN_TIME) {
+        // Frame Throttling Logic
+        this.frameSkipCounter++;
+        if (this.frameSkipCounter % this.FRAME_SKIP_INTERVAL !== 0) {
+            // Skip this frame but keep loop running
+             if (this.isRunning) {
+                 this.requestRef = requestAnimationFrame(() => this.processFrame());
+             }
+             return;
+        }
+
         try {
           if (this.useWorker && this.worker) {
               // Worker mode: create ImageBitmap
@@ -526,8 +530,10 @@ export class MotionController {
 
           const actualFrameTime = elapsed;
           this.actualFPS = this.actualFPS * 0.9 + (1000 / actualFrameTime) * 0.1;
+          // Scale FPS display by skip interval to show "effective" FPS capability
+          const effectiveFPS = this.actualFPS * this.FRAME_SKIP_INTERVAL;
           if (Math.random() < 0.01) {
-            log(0, 'FPS', `Actual FPS: ${this.actualFPS.toFixed(1)}`);
+            log(0, 'FPS', `Actual FPS: ${this.actualFPS.toFixed(1)} (Effective: ${effectiveFPS.toFixed(1)})`);
           }
         } catch (e) {
           const errorStr = String(e);
