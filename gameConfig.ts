@@ -64,7 +64,7 @@ export function resumeBackgroundPreloading() {
   }
 }
 
-function startBackgroundPreloading(themes: Theme[]) {
+export function startBackgroundPreloading(themes: Theme[]) {
   // Flatten all images from all themes into a queue
   // We skip the first theme as it's likely being loaded by the game scene directly
   // or will be prioritized if requested

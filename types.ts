@@ -16,7 +16,8 @@ export interface QuestionData {
 
 export enum GamePhase {
   MENU = 'MENU',
-  THEME_SELECTION = 'THEME_SELECTION', // New Phase
+  THEME_SELECTION = 'THEME_SELECTION',
+  LOADING = 'LOADING',
   LOADING_AI = 'LOADING_AI',
   CALIBRATING = 'CALIBRATING',
   TUTORIAL = 'TUTORIAL',

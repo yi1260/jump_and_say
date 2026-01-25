@@ -2,7 +2,9 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import CompletionOverlay from './components/CompletionOverlay';
 import GameBackground from './components/GameBackground';
 import { GameCanvas } from './components/GameCanvas';
-import { loadThemes, preloadThemeImages } from './gameConfig';
+import { LoadingScreen } from './components/LoadingScreen';
+import { loadThemes, startBackgroundPreloading } from './gameConfig';
+import { preloadAllGameAssets } from './services/assetLoader';
 import { motionController } from './services/motionController';
 import { getR2AssetUrl } from './src/config/r2Config';
 import { Theme, ThemeId } from './types';
@@ -16,6 +18,7 @@ declare global {
 export enum GamePhase {
   MENU = 'MENU',
   THEME_SELECTION = 'THEME_SELECTION',
+  LOADING = 'LOADING',
   TUTORIAL = 'TUTORIAL',
   PLAYING = 'PLAYING'
 }
@@ -39,6 +42,10 @@ export default function App() {
   const [nosePosition, setNosePosition] = useState({ x: 0.5, y: 0.5 });
   const [isNoseDetected, setIsNoseDetected] = useState(false);
   const bgmRef = useRef<HTMLAudioElement>(null);
+  
+  // Loading State
+  const [loadingProgress, setLoadingProgress] = useState(0);
+  const [loadingStatus, setLoadingStatus] = useState('Initializing...');
   
   const setPhase = (newPhase: GamePhase) => {
     phaseRef.current = newPhase;
@@ -537,23 +544,33 @@ export default function App() {
     setBgIndex(0);
     setThemeImagesLoaded(false); // Reset when selecting a new theme
     
-    // Set phase to TUTORIAL immediately so the user sees progress
-    setPhase(GamePhase.TUTORIAL);
-    setInitStatus('Loading theme images...');
-    
-    // Only preload the FIRST selected theme's images
-    // Subsequent themes will be preloaded in the background during gameplay
-    const firstThemeId = selectedThemes[0];
-    const preloadPromise = preloadThemeImages(firstThemeId).then(() => {
-      setInitStatus('Images loaded!');
-      setThemeImagesLoaded(true);
-    }).catch(error => {
-      console.error('Failed to preload theme images:', error);
-      setInitStatus('Images loaded!'); // Continue anyway
-      setThemeImagesLoaded(true);
+    // 0. Enter Loading Phase
+    setPhase(GamePhase.LOADING);
+    setLoadingProgress(0);
+    setLoadingStatus('Preparing assets...');
+
+    // Enter fullscreen immediately
+    await enterFullscreenAndLockOrientation();
+
+    // 1. Preload ALL assets (blocking)
+    await preloadAllGameAssets(selectedThemes, (progress, status) => {
+        setLoadingProgress(progress);
+        setLoadingStatus(status);
     });
     
-    // 1. If we already have a stream and it's active, skip camera initialization
+    // Start background preloading for the REST of the themes
+    const firstThemeId = selectedThemes[0];
+    const themesToPreload = themes.filter(t => selectedThemes.includes(t.id) && t.id !== firstThemeId);
+    if (themesToPreload.length > 0) {
+        startBackgroundPreloading(themesToPreload);
+    }
+
+    setThemeImagesLoaded(true);
+    setPhase(GamePhase.TUTORIAL);
+    setInitStatus('Setting up camera...');
+    
+    // 2. Camera Initialization
+    // If we already have a stream and it's active, skip camera initialization
     if (streamRef.current && streamRef.current.active && videoRef.current) {
       console.log("Reusing existing camera stream");
       // Enter fullscreen immediately when entering tutorial
@@ -579,7 +596,6 @@ export default function App() {
         setPhase(GamePhase.MENU);
         return;
       }
-      await preloadPromise; // Still wait for images before finishing this function
       return;
     }
 
@@ -985,6 +1001,11 @@ export default function App() {
       {/* 5. Menus & Overlays */}
       {phase !== GamePhase.PLAYING && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-kenney-blue/60 backdrop-blur-sm p-4">
+            
+            {/* LOADING SCREEN */}
+            {phase === GamePhase.LOADING && (
+                <LoadingScreen progress={loadingProgress} status={loadingStatus} />
+            )}
             
             {/* MAIN MENU */}
             {phase === GamePhase.MENU && (
