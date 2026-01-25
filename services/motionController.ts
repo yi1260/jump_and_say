@@ -186,12 +186,23 @@ export class MotionController {
         this.isReady = false;
         this.hasFatalError = false;
 
-        const baseCandidates = Array.from(
-          new Set<string>([
-            this.ensureTrailingSlash(window.__MEDIAPIPE_CDN__ || '/mediapipe/'),
-            this.ensureTrailingSlash('/mediapipe/')
-          ])
-        );
+        const preferredList = [
+          window.__MEDIAPIPE_CDN__,
+          'https://fastly.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
+          'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
+          '/mediapipe/',
+          'https://cdn.maskmysheet.com/mediapipe/'
+        ].filter((v): v is string => typeof v === 'string' && v.length > 0);
+
+        const seen = new Set<string>();
+        const baseCandidates: string[] = [];
+        for (const raw of preferredList) {
+          const normalized = this.ensureTrailingSlash(raw);
+          if (!seen.has(normalized)) {
+            seen.add(normalized);
+            baseCandidates.push(normalized);
+          }
+        }
 
         let initialized = false;
         let lastError: unknown = null;
@@ -281,6 +292,8 @@ export class MotionController {
     const files = [
       'pose_solution_packed_assets_loader.js',
       'pose_solution_packed_assets.data',
+      'pose_solution_simd_wasm_bin.js',
+      'pose_solution_simd_wasm_bin.wasm',
       'pose_solution_wasm_bin.js',
       'pose_solution_wasm_bin.wasm'
     ];

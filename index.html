@@ -149,13 +149,12 @@
     <script>
       (function() {
         'use strict';
-        // 优先级：自有CDN (R2) -> 本地 (Vercel) -> 国内镜像 (JsDelivr)
-        // 注意: npm.elemecdn.com 该版本返回 404，已移除
+        // 优先级：国内 CDN -> Vercel 本地 -> R2
         const CDNS = [
-          'https://cdn.maskmysheet.com/mediapipe/',                         // 自有 R2 CDN (推荐，已验证)
-          '/mediapipe/',                                                    // 本地回退 (Vercel public)
-          'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',  // 国内镜像 (备用，可能不稳定)
-          'https://unpkg.com/@mediapipe/pose@0.5.1675469404/'             // Global CDN (备用)
+          'https://fastly.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
+          'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
+          '/mediapipe/',
+          'https://cdn.maskmysheet.com/mediapipe/'
         ];
         // 尝试加载的超时时间
         const LOAD_TIMEOUT = 3000; // 3秒超时，加快切换速度
@@ -206,35 +205,11 @@
           
           loadScript(CDNS[index], function(successUrl) {
             window.__MEDIAPIPE_CDN__ = successUrl;
-            loadCameraUtils(successUrl);
+            log(`Selected source: ${successUrl}`, 'success');
           }, function() {
             // Immediately try next one on error
             tryNextCDN(index + 1);
           });
-        }
-
-        function loadCameraUtils(cdnUrl) {
-          const script = document.createElement('script');
-          script.src = cdnUrl + 'camera_utils.js';
-          script.crossOrigin = 'anonymous';
-          script.onload = function() {
-            log(`Camera utils loaded from: ${cdnUrl}`, 'success');
-          };
-          script.onerror = function() {
-            log(`Failed to load camera_utils from ${cdnUrl}, trying fallback...`, 'error');
-            // 如果主源失败，尝试使用本地回退
-            const fallbackCdn = '/mediapipe/';
-            if (cdnUrl === fallbackCdn) return;
-
-            const fallbackScript = document.createElement('script');
-            fallbackScript.src = fallbackCdn + 'camera_utils.js';
-            fallbackScript.crossOrigin = 'anonymous';
-            fallbackScript.onload = function() {
-              log(`Camera utils loaded from fallback: ${fallbackCdn}`, 'success');
-            };
-            document.head.appendChild(fallbackScript);
-          };
-          document.head.appendChild(script);
         }
 
         if (document.readyState === 'loading') {
