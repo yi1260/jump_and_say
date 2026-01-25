@@ -187,7 +187,11 @@ export class MotionController {
 
       try {
         this.pose = new Pose({
-          locateFile: (file: string) => loadCDN + file
+          locateFile: (file: string) => {
+            const url = loadCDN + file;
+            log(1, 'CDN', `Locating file: ${file} -> ${url}`);
+            return url;
+          }
         });
 
         const minDetectionConf = (this.isIPad || this.isAndroid || this.isMobilePhone) ? 0.3 : 0.5;
@@ -218,17 +222,26 @@ export class MotionController {
             if (ctx) {
               ctx.fillStyle = 'black';
               ctx.fillRect(0, 0, 64, 64);
-              await this.pose.send({ image: dummyCanvas });
+              
+              // Add timeout for warm-up to prevent hanging
+              const warmupPromise = this.pose.send({ image: dummyCanvas });
+              const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Warm-up timeout')), 5000)
+              );
+
+              await Promise.race([warmupPromise, timeoutPromise]);
+              
               log(1, 'INIT', `WASM warm-up completed (${this.isIPad ? 'iPad mode' : 'standard mode'})`);
               this.isReady = true;
             }
           } catch (warmupError) {
-            log(2, 'INIT', 'Warm-up failed', warmupError);
+            log(2, 'INIT', 'Warm-up failed or timed out (continuing anyway)', warmupError);
             const errorStr = String(warmupError);
             if (errorStr.includes('graph') || errorStr.includes('tflite') || errorStr.includes('memory')) {
-              log(3, 'INIT', 'Fatal error detected: ' + errorStr.substring(0, 100));
+              log(3, 'INIT', 'Fatal error detected during warmup: ' + errorStr.substring(0, 100));
               this.hasFatalError = true;
             }
+            // Always set ready to true to allow retries in main loop
             this.isReady = true;
           }
         }, warmupDelay);
@@ -300,13 +313,24 @@ export class MotionController {
   }
 
   private async processFrame() {
-    if (!this.isRunning || !this.video || !this.pose || !this.isReady || this.hasFatalError) return;
+    if (!this.isRunning) return;
+
+    // If not ready or video not ready, skip processing but KEEP LOOP ALIVE
+    if (!this.pose || !this.isReady || this.hasFatalError || !this.video || this.video.readyState < 2) {
+      if (this.isRunning) {
+        // Log occasionally to help debugging why it's waiting
+        if (Math.random() < 0.01) {
+           log(1, 'LOOP', `Waiting... isReady=${this.isReady}, hasPose=${!!this.pose}, video=${this.video?.readyState}, fatal=${this.hasFatalError}`);
+        }
+        this.requestRef = requestAnimationFrame(() => this.processFrame());
+      }
+      return;
+    }
 
     const now = performance.now();
     const elapsed = now - this.lastFrameTime;
 
     if (elapsed >= this.FRAME_MIN_TIME) {
-      if (this.video.readyState >= 2) {
         try {
           await this.pose.send({ image: this.video });
           this.lastFrameTime = now;
@@ -341,7 +365,6 @@ export class MotionController {
             log(2, 'FRAME', 'Frame processing error', e);
           }
         }
-      }
     }
 
     if (this.isRunning) {
