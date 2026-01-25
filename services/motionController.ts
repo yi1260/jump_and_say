@@ -19,8 +19,8 @@ function log(level: number, tag: string, message: string, data?: any) {
 
 /**
  * A lightweight pixel difference motion detector.
- * Uses Zone-based detection for X-axis stability.
- * Uses Top-Edge tracking for Jump detection.
+ * Uses Selective Background Update to solve "Static User Disappearing".
+ * Uses Head-biased Centroid for better L/R control.
  */
 class PixelMotionProcessor {
     private canvas: OffscreenCanvas | HTMLCanvasElement;
@@ -30,9 +30,12 @@ class PixelMotionProcessor {
     private backgroundData: Float32Array | null = null;
     
     // Config
-    private readonly diffThreshold = 30; // Increased threshold to reduce noise (20 -> 30)
-    private readonly motionThreshold = 10; // Increased pixel count required (5 -> 10)
-    private readonly learningRate = 0.05; // Slightly faster adaptation to handle lighting changes
+    private readonly diffThreshold = 20; // Lowered to catch more motion
+    private readonly motionThreshold = 8; // Pixels required
+    private readonly learningRate = 0.05; // Base learning rate
+    
+    // Persistence
+    private lastResult: { x: number, y: number, minY: number } | null = null;
 
     constructor() {
         try {
@@ -55,10 +58,7 @@ class PixelMotionProcessor {
         x: number, 
         y: number, 
         isMotion: boolean, 
-        minY: number, 
-        leftMass: number, 
-        rightMass: number,
-        centerMass: number 
+        minY: number 
     } | null {
         if (!this.ctx || video.videoWidth === 0) return null;
 
@@ -73,17 +73,14 @@ class PixelMotionProcessor {
                 for (let i = 0; i < len; i++) {
                     this.backgroundData[i] = data[i];
                 }
-                return { x: 0.5, y: 0.5, isMotion: false, minY: 1.0, leftMass: 0, rightMass: 0, centerMass: 0 };
+                return { x: 0.5, y: 0.5, isMotion: false, minY: 1.0 };
             }
 
-            let leftMass = 0;
-            let centerMass = 0;
-            let rightMass = 0;
-            let minY = this.height;
+            let sumX = 0;
             let count = 0;
-
-            const leftBoundary = Math.floor(this.width * 0.33);
-            const rightBoundary = Math.floor(this.width * 0.66);
+            
+            // For Head Tracking (Top 20 pixels)
+            const foregroundPixels: {x: number, y: number}[] = [];
 
             for (let i = 0; i < len; i += 4) {
                 const r = data[i];
@@ -96,62 +93,78 @@ class PixelMotionProcessor {
 
                 const diff = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
                 
+                // Selective Update Logic
                 if (diff > this.diffThreshold * 3) {
+                    // FOREGROUND (User)
+                    // Update background VERY slowly to prevent user from fading into background
+                    // but allow some adaptation for lighting changes
+                    const slowRate = this.learningRate * 0.05; 
+                    this.backgroundData[i] = bgR * (1 - slowRate) + r * slowRate;
+                    this.backgroundData[i+1] = bgG * (1 - slowRate) + g * slowRate;
+                    this.backgroundData[i+2] = bgB * (1 - slowRate) + b * slowRate;
+
                     const idx = i / 4;
                     const x = idx % this.width;
                     const y = Math.floor(idx / this.width);
                     
-                    // Count mass in zones
-                    // Mirror X for logic (Camera Left is Screen Right)
-                    // But here we process raw camera pixels.
-                    // Camera: Left side of image -> User's Right hand (in mirror) -> Screen Right
-                    // Camera: Right side of image -> User's Left hand -> Screen Left
+                    // Store for analysis
+                    foregroundPixels.push({x, y});
                     
-                    // Let's count in Camera coordinates first
-                    if (x < leftBoundary) rightMass++; // Camera Left = Screen Right
-                    else if (x > rightBoundary) leftMass++; // Camera Right = Screen Left
-                    else centerMass++;
-
-                    if (y < minY) minY = y;
-                    
+                    sumX += x;
                     count++;
+                } else {
+                    // BACKGROUND
+                    // Update normally to adapt to lighting/camera noise
+                    this.backgroundData[i] = bgR * (1 - this.learningRate) + r * this.learningRate;
+                    this.backgroundData[i+1] = bgG * (1 - this.learningRate) + g * this.learningRate;
+                    this.backgroundData[i+2] = bgB * (1 - this.learningRate) + b * this.learningRate;
                 }
-
-                // Update background
-                this.backgroundData[i] = bgR * (1 - this.learningRate) + r * this.learningRate;
-                this.backgroundData[i+1] = bgG * (1 - this.learningRate) + g * this.learningRate;
-                this.backgroundData[i+2] = bgB * (1 - this.learningRate) + b * this.learningRate;
             }
 
             if (count < this.motionThreshold) {
-                return { x: 0.5, y: 0.5, isMotion: false, minY: 1.0, leftMass: 0, rightMass: 0, centerMass: 0 };
+                // Persistence: If motion stops, assume user is still there (just still)
+                if (this.lastResult) {
+                    return { ...this.lastResult, isMotion: true };
+                }
+                return { x: 0.5, y: 0.5, isMotion: false, minY: 1.0 };
             }
 
-            // Normalize minY
-            const normMinY = minY / this.height;
+            // --- Advanced Centroid Logic ---
+            // We want to favor the "Head" position for X control, as it leans more than the feet.
+            // 1. Sort pixels by Y (ascending, 0 is top)
+            foregroundPixels.sort((a, b) => a.y - b.y);
             
-            // Determine X based on Mass Balance
-            let finalX = 0.5;
-            const totalMass = leftMass + centerMass + rightMass;
+            // 2. Take top 20% pixels (Head area)
+            const topCount = Math.max(1, Math.floor(count * 0.2));
+            let headSumX = 0;
+            let headMinY = this.height;
             
-            // If significant mass on one side
-            if (leftMass > totalMass * 0.4 && leftMass > rightMass * 1.5) {
-                finalX = 0.2; // Left Lane
-            } else if (rightMass > totalMass * 0.4 && rightMass > leftMass * 1.5) {
-                finalX = 0.8; // Right Lane
-            } else {
-                finalX = 0.5; // Center Lane
+            for(let i=0; i<topCount; i++) {
+                headSumX += foregroundPixels[i].x;
+                if (foregroundPixels[i].y < headMinY) headMinY = foregroundPixels[i].y;
             }
+            
+            const headX = (headSumX / topCount) / this.width;
+            const bodyX = (sumX / count) / this.width; // General center of mass
+            
+            // Weighted X: 70% Head, 30% Body
+            // This makes it responsive to leaning
+            const weightedX = headX * 0.7 + bodyX * 0.3;
+            
+            // Mirror X (Camera Left is Screen Right)
+            const finalX = 1 - weightedX;
+            const normMinY = headMinY / this.height;
 
-            return { 
+            const result = { 
                 x: finalX, 
-                y: 0.5, // Not used for X-logic anymore
+                y: 0.5, 
                 isMotion: true,
-                minY: normMinY,
-                leftMass,
-                rightMass,
-                centerMass
-            }; 
+                minY: normMinY
+            };
+            
+            this.lastResult = result;
+            return result;
+            
         } catch (e) {
             console.warn("Pixel process error", e);
             return null;
@@ -167,7 +180,7 @@ export class MotionController {
   private readonly FRAME_MIN_TIME = 1000 / 30;
 
   // Thresholds
-  private xThreshold: number = 0.15; 
+  private xThreshold: number = 0.12; 
   
   public state: MotionState = {
     x: 0,
@@ -209,7 +222,7 @@ export class MotionController {
   
   // Jump Logic
   private lastJumpTime: number = 0;
-  private readonly JUMP_COOLDOWN = 800; // Increased cooldown
+  private readonly JUMP_COOLDOWN = 600;
 
   async init() {
     if (this.initPromise) return this.initPromise;
@@ -284,7 +297,7 @@ export class MotionController {
 
             // --- 2. Update X (Horizontal) ---
             // Use faster smoothing for responsiveness
-            this.currentBodyX = this.currentBodyX * 0.6 + targetX * 0.4;
+            this.currentBodyX = this.currentBodyX * 0.7 + targetX * 0.3;
             
             // Map to State
             this.state.bodyX = this.currentBodyX;
@@ -298,22 +311,12 @@ export class MotionController {
             let targetLane = 0;
             if (this.currentBodyX > (0.5 + this.xThreshold)) {
                 targetLane = -1; // Left (Screen Left / Lane -1)
-                // Note: Game logic maps Lane -1 to Left
             } else if (this.currentBodyX < (0.5 - this.xThreshold)) {
                 targetLane = 1;  // Right (Screen Right / Lane 1)
             } else {
                 targetLane = 0;  // Center
             }
             
-            // Fix Lane Mapping: 
-            // In Game: 0=Left, 1=Center, 2=Right (Indices)
-            // In Controller: -1=Left, 0=Center, 1=Right
-            // Wait, let's check MainScene.ts usage.
-            // MainScene uses: if (bodyX < POS_TO_LEFT) return 0; (Left)
-            // bodyX is 0..1. 0 is Left.
-            // currentBodyX: 0.2 (Left), 0.5 (Center), 0.8 (Right)
-            // So my targetX assignments above (0.2, 0.8) are correct.
-
             if (this.state.x !== targetLane) {
                 this.onMotionDetected?.('move');
             }
@@ -334,11 +337,10 @@ export class MotionController {
             this.state.rawShoulderY = this.smoothedMinY;
 
             // Jump Trigger
-            // Requirements:
-            // 1. Velocity > 1.5 (Fast upward movement)
-            // 2. Displacement > 0.05 (Significant distance)
-            // 3. Current Head is high enough (targetMinY < 0.4)? No, maybe user is short.
-            if (velocity > 1.5 && dy > 0.05 && !this.state.isJumping) {
+            // Increased Thresholds significantly to prevent false positives
+            // Velocity > 2.0 (Fast)
+            // Displacement > 0.08 (Big move)
+            if (velocity > 2.0 && dy > 0.08 && !this.state.isJumping) {
                 if (now - this.lastJumpTime > this.JUMP_COOLDOWN) {
                     log(1, 'JUMP', `Jump! Vel: ${velocity.toFixed(2)}, Dy: ${dy.toFixed(2)}`);
                     this.state.isJumping = true;
