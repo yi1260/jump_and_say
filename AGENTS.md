@@ -487,6 +487,8 @@ registerSW({
 - 1-year cache duration for theme assets
 - Maximum file size: 10MB
 - Ignores unused assets (Sprites, backup folders)
+- **MediaPipe WASM caching**: Includes `.wasm` and `.data` files for offline support
+- **Multi-CDN support**: Caches MediaPipe files from jsdelivr, unpkg, and custom CDN
 
 ### Mobile & Responsive Design
 
@@ -713,6 +715,8 @@ rollupOptions: {
 enum GamePhase {
   MENU = 'MENU',                    // Main menu
   THEME_SELECTION = 'THEME_SELECTION', // Theme selection screen
+  LOADING_AI = 'LOADING_AI',        // AI content loading
+  CALIBRATING = 'CALIBRATING',      // Motion calibration
   TUTORIAL = 'TUTORIAL',            // Tutorial mode
   PLAYING = 'PLAYING',              // Active gameplay
   GAME_OVER = 'GAME_OVER'           // Game over screen
@@ -744,10 +748,10 @@ const setPhase = (newPhase: GamePhase) => {
 **Multi-CDN Fallback** (in `index.html`):
 ```javascript
 const CDNS = [
-  'https://npm.elemecdn.com/@mediapipe/pose@0.5.1675469404/',      // 国内镜像 1 (最快)
-  'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',  // 国内镜像 2
-  'https://cdn.maskmysheet.com/mediapipe/',                         // 自有 R2 CDN
-  '/mediapipe/'                                                     // 本地回退
+  'https://fastly.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',  // 国内镜像 1 (最快)
+  'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',    // 国内镜像 2
+  '/mediapipe/',                                                     // 本地回退
+  'https://cdn.maskmysheet.com/mediapipe/'                           // 自有 R2 CDN
 ];
 ```
 
@@ -783,6 +787,9 @@ cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/
 ├── src/
 │   └── config/
 │       └── r2Config.ts           # R2 CDN configuration
+├── scripts/                      # Utility scripts
+│   ├── upload-themes-continue.sh # Continue theme upload to R2
+│   └── upload-themes-to-r2.sh    # Upload themes to R2 CDN
 ├── types.ts                      # TypeScript interfaces & enums
 ├── gameConfig.ts                 # Game state, theme loading, preloading
 ├── App.tsx                       # Main app component
@@ -792,16 +799,63 @@ cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/
 └── tsconfig.json                 # TypeScript configuration
 ```
 
+### Environment Configuration
+
+**Environment Variables**:
+- `.env.local` - Development environment variables
+- `.env.production` - Production environment variables
+
+**Required Variables**:
+```env
+# .env.local
+GEMINI_API_KEY=your_gemini_api_key_here
+VITE_R2_BASE_URL=https://cdn.maskmysheet.com/raz_aa
+
+# .env.production
+VITE_R2_BASE_URL=https://cdn.maskmysheet.com/raz_aa
+```
+
+**Note**: `GEMINI_API_KEY` is defined via Vite's `define` in `vite.config.ts` and is required for AI features.
+
 ### .gitignore
 
 **Ignored Directories**:
 ```
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Theme cache
+public/themes/
+public/themes.*/
+
 # Local asset backups (optional - currently commented out)
 # public/assets/
 # public/mediapipe/
 
-# Theme cache
-# public/themes/
+# Dependencies
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Backup folders
 ```
 
 **Note**: `public/assets/` and `public/mediapipe/` are currently commented out, meaning they may be committed or have different handling strategies.
@@ -836,10 +890,12 @@ cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/
    - Offline-ready for core assets
    - Auto-update mode for seamless updates
    - HTTPS support via @vitejs/plugin-basic-ssl
+   - MediaPipe WASM files cached for offline support
 
 6. **Environment Variables**:
    - `GEMINI_API_KEY` - Required for AI features
    - Set in `.env.local` for development
+   - Set in `.env.production` for production
    - Defined via Vite's `define` in `vite.config.ts`
 
 7. **MediaPipe Integration**:
@@ -849,6 +905,7 @@ cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/
    - Handle WASM warm-up to prevent first-frame lag
    - Implement graceful degradation for tracking loss
    - 3s timeout for CDN switching
+   - **Priority**: fastly.jsdelivr.net → jsdelivr.net → local → R2 CDN
 
 8. **Performance Optimization**:
    - Code splitting for large bundles (phaser, react-vendor)
@@ -865,12 +922,14 @@ cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/
    - Use `@ts-ignore` sparingly and only for known type definition issues
    - Always clean up Phaser games in useEffect cleanup
    - Use registry for passing callbacks to scenes
+   - **Local Fallback**: PreloadScene has CDN → local fallback logic for game assets
 
 10. **Debugging**:
     - Use Eruda for mobile debugging in development
     - Force debug mode via `?debug=true` URL parameter
     - Use tagged console logs for better filtering
     - Monitor FPS and tracking quality
+    - Cache status logged for all loaded assets
 
 11. **Error Handling**:
     - Never use empty catch blocks
@@ -879,6 +938,7 @@ cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/
     - Implement retry logic for network operations
     - Handle device-specific errors (iPad memory, Android camera)
     - Use `handleR2Error()` for CDN-related errors
+    - Global error handlers for TensorFlow and WASM loading issues
 
 12. **Asset Loading**:
     - All assets loaded from R2 CDN
@@ -888,6 +948,7 @@ cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/
     - TTF fonts for Fredoka font family
     - Implement retry logic with 15s timeout
     - Cache detection: < 50ms indicates cache hit
+    - **CDN → Local Fallback**: PreloadScene automatically falls back to local assets if CDN fails
 
 13. **Framer Motion Usage**:
     - Only used in `CompletionOverlay.tsx`
@@ -905,3 +966,19 @@ cp node_modules/@mediapipe/camera_utils/camera_utils.js public/mediapipe/
       - Pause background preloading during gameplay
       - Optimize SVG loading
       - Reduce particle count
+
+15. **Theme Upload Scripts**:
+    - `scripts/upload-themes-to-r2.sh` - Uploads all theme assets to R2 CDN
+    - `scripts/upload-themes-continue.sh` - Continues interrupted upload process
+    - Scripts use AWS CLI for R2 operations
+    - Requires R2 credentials configuration
+
+16. **Server Directory**:
+    - `server/` directory exists but is currently empty
+    - Reserved for future backend server implementation
+    - Do not add files here unless implementing backend features
+
+17. **StrictMode Removed**:
+    - React StrictMode is disabled in `index.tsx`
+    - Prevents double-initialization of webcam in development
+    - Hardware integration (camera) requires careful lifecycle management

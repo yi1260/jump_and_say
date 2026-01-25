@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { prioritizeThemeInQueue } from '../../gameConfig';
+import { pauseBackgroundPreloading, prioritizeThemeInQueue, resumeBackgroundPreloading } from '../../gameConfig';
 import { motionController } from '../../services/motionController';
 import { QuestionData, Theme, ThemeId } from '../../types';
 
@@ -538,6 +538,10 @@ export class MainScene extends Phaser.Scene {
 
   create() {
     console.timeEnd('[MainScene] preload');
+    
+    // PAUSE background preloading when gameplay starts to save CPU/Bandwidth
+    pauseBackgroundPreloading();
+
     this.initThemeDataFromCache();
 
     const startBgLoad = () => this.preloadNonCriticalAssets();
@@ -1234,6 +1238,10 @@ export class MainScene extends Phaser.Scene {
   private async showThemeCompletion() {
     if (this.isGameOver) return;
     this.isGameOver = true;
+
+    // RESUME background preloading during the completion screen
+    // This gives us ~8 seconds to load the next theme while user watches animations
+    resumeBackgroundPreloading();
 
     // 1. 停止所有方块的生成逻辑
     this.isInteractionActive = false;

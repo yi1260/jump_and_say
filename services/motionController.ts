@@ -73,7 +73,8 @@ const JUMP_COOLDOWN = 400;
 const VISIBILITY_THRESHOLD = 0.4;
 
 export class MotionController {
-  private pose: any = null;
+  // private pose: any = null;
+  private worker: Worker | null = null;
   private video: HTMLVideoElement | null = null;
   private isRunning: boolean = false;
   private requestRef: number | null = null;
@@ -161,215 +162,70 @@ export class MotionController {
 
       log(1, 'INIT', `Device: isIPad=${this.isIPad}, isAndroid=${this.isAndroid}, isMobilePhone=${this.isMobilePhone}`);
 
-      // Wait for MediaPipe script to load (with timeout)
-      if (typeof Pose === 'undefined') {
-        log(2, 'INIT', 'MediaPipe Pose not ready, waiting...');
-        let attempts = 0;
-        while (typeof Pose === 'undefined' && attempts < 10) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          attempts++;
-          if (typeof Pose !== 'undefined') {
-            log(1, 'INIT', 'MediaPipe Pose loaded after wait');
-            break;
-          }
-        }
+      // Initialize Worker
+      this.worker = new Worker(new URL('./pose.worker.ts', import.meta.url), { type: 'classic' });
 
-        if (typeof Pose === 'undefined') {
-          const errorMsg = 'MediaPipe Pose script not loaded after 10s. Please check your connection.';
-          log(3, 'INIT', errorMsg);
-          alert(errorMsg);
-          throw new Error(errorMsg);
-        }
+      // Wait for CDN from index.html (or fallback logic)
+      let cdnUrl = window.__MEDIAPIPE_CDN__;
+      if (!cdnUrl) {
+         log(2, 'INIT', 'MediaPipe CDN not set yet, waiting...');
+         let attempts = 0;
+         while (!window.__MEDIAPIPE_CDN__ && attempts < 20) {
+             await new Promise(r => setTimeout(r, 500));
+             attempts++;
+         }
+         cdnUrl = window.__MEDIAPIPE_CDN__ || '/mediapipe/';
       }
 
-      try {
-        this.isReady = false;
-        this.hasFatalError = false;
+      return new Promise<void>((resolve, reject) => {
+          if (!this.worker) return reject('Worker creation failed');
 
-        const preferredList = [
-          window.__MEDIAPIPE_CDN__,
-          'https://fastly.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
-          'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
-          '/mediapipe/',
-          'https://cdn.maskmysheet.com/mediapipe/'
-        ].filter((v): v is string => typeof v === 'string' && v.length > 0);
+          this.worker.onmessage = (e) => {
+              const { type, results, error } = e.data;
+              if (type === 'ready') {
+                  this.isReady = true;
+                  log(1, 'INIT', 'MediaPipe Worker ready');
+                  resolve();
+              } else if (type === 'result') {
+                  this.onResults(results);
+              } else if (type === 'error') {
+                  console.error('[MotionController] Worker error:', error);
+                  // Handle error
+                  this.hasFatalError = true;
+                  reject(error);
+              }
+          };
 
-        const seen = new Set<string>();
-        const baseCandidates: string[] = [];
-        for (const raw of preferredList) {
-          const normalized = this.ensureTrailingSlash(raw);
-          if (!seen.has(normalized)) {
-            seen.add(normalized);
-            baseCandidates.push(normalized);
-          }
-        }
-
-        let initialized = false;
-        let lastError: unknown = null;
-
-        for (const baseUrl of baseCandidates) {
-          log(1, 'INIT', `Trying MediaPipe base: ${baseUrl}`);
-
-          try {
-            await this.initWithBase(baseUrl);
-            initialized = true;
-            break;
-          } catch (e) {
-            lastError = e;
-            log(2, 'INIT', `MediaPipe init failed for base: ${baseUrl}`, e);
-            this.pose?.close?.();
-            this.pose = null;
-            this.isReady = false;
-            this.hasFatalError = false;
-          }
-        }
-
-        if (!initialized) {
-          this.initPromise = null;
-          const errorMsg = 'MediaPipe 初始化失败（依赖文件加载或 WASM 运行失败）';
-          log(3, 'INIT', errorMsg, lastError);
-          throw lastError instanceof Error ? lastError : new Error(errorMsg);
-        }
-
-        const duration = (performance.now() - startTime).toFixed(0);
-        log(1, 'INIT', `Pose initialization completed in ${duration}ms`);
-      } catch (error) {
-        this.initPromise = null;
-        log(3, 'INIT', 'Failed to initialize Pose', error);
-        throw error;
-      }
+          this.worker.postMessage({
+              type: 'init',
+              cdnUrl,
+              config: {
+                  isIPad: this.isIPad,
+                  isAndroid: this.isAndroid,
+                  isMobilePhone: this.isMobilePhone
+              }
+          });
+      });
     })();
 
     return this.initPromise;
   }
 
+  private async initWithBase(baseUrl: string): Promise<void> {
+    // This method is now handled by the worker
+    return Promise.resolve();
+  }
+
+  // Helper methods removed as they are now in the worker
   private ensureTrailingSlash(url: string): string {
     return url.endsWith('/') ? url : `${url}/`;
   }
-
-  private async initWithBase(baseUrl: string): Promise<void> {
-    const resolvedBaseUrl = this.ensureTrailingSlash(baseUrl);
-
-    this.pose = new Pose({
-      locateFile: (file: string) => {
-        const effectiveFile = this.getEffectiveMediapipeFile(file);
-        const url = `${resolvedBaseUrl}${effectiveFile}`;
-        log(1, 'CDN', `Locating file: ${file} -> ${url}`);
-        return url;
-      }
-    });
-
-    const minDetectionConf = (this.isIPad || this.isAndroid || this.isMobilePhone) ? 0.3 : 0.5;
-    const minTrackingConf = (this.isIPad || this.isAndroid || this.isMobilePhone) ? 0.3 : 0.5;
-
-    this.pose.setOptions({
-      modelComplexity: 0,
-      smoothLandmarks: true,
-      minDetectionConfidence: minDetectionConf,
-      minTrackingConfidence: minTrackingConf,
-      selfieMode: false
-    });
-
-    log(1, 'INIT', `Confidence: Detection=${minDetectionConf}, Tracking=${minTrackingConf}`);
-
-    this.pose.onResults(this.onResults.bind(this));
-
-    await this.prefetchMediapipeDependencies(resolvedBaseUrl);
-    await this.warmupPose(5000);
-
-    this.isReady = true;
-    log(1, 'INIT', `MediaPipe ready with base: ${resolvedBaseUrl}`);
-  }
-
-  private getEffectiveMediapipeFile(file: string): string {
-    if (this.isIPad && file.startsWith('pose_solution_simd_wasm_bin')) {
-      return file.replace('pose_solution_simd_wasm_bin', 'pose_solution_wasm_bin');
-    }
-    return file;
-  }
-
-  private async prefetchMediapipeDependencies(baseUrl: string): Promise<void> {
-    const files = [
-      'pose_solution_packed_assets_loader.js',
-      'pose_solution_packed_assets.data',
-      'pose_solution_simd_wasm_bin.js',
-      'pose_solution_simd_wasm_bin.wasm',
-      'pose_solution_wasm_bin.js',
-      'pose_solution_wasm_bin.wasm'
-    ];
-
-    for (const file of files) {
-      const url = `${baseUrl}${file}`;
-      await this.prefetchBinary(url, 15000, 2);
-    }
-  }
-
-  private async prefetchBinary(url: string, timeoutMs: number, retries: number): Promise<void> {
-    let lastError: unknown = null;
-
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        log(1, 'CDN', `Prefetching: ${url} (attempt ${attempt + 1}/${retries + 1})`);
-        const controller = new AbortController();
-        const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
-        const resp = await fetch(url, { mode: 'cors', cache: 'reload', signal: controller.signal });
-        window.clearTimeout(timeoutId);
-
-        if (!resp.ok) {
-          throw new Error(`Prefetch failed: ${resp.status} ${resp.statusText}`);
-        }
-
-        await resp.arrayBuffer();
-        
-        // Log cache status
-        let cacheStatus = 'UNKNOWN';
-        if (performance) {
-           const entries = performance.getEntriesByName(url);
-           if (entries.length > 0) {
-              const entry = entries[entries.length - 1] as PerformanceResourceTiming;
-              // transferSize === 0 often indicates Service Worker cache or Disk cache
-              if (entry.transferSize === 0) cacheStatus = 'HIT (SW/Disk)';
-              else if (entry.transferSize > 0 && entry.transferSize < entry.encodedBodySize) cacheStatus = 'HIT (Revalidated)';
-              else cacheStatus = 'MISS (Network)';
-           }
-        }
-        
-        log(1, 'CDN', `Prefetch ok: ${url} [Cache: ${cacheStatus}]`);
-        return;
-      } catch (e) {
-        lastError = e;
-        log(2, 'CDN', `Prefetch error: ${url}`, e);
-        if (attempt < retries) {
-          await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
-        }
-      }
-    }
-
-    throw lastError instanceof Error ? lastError : new Error(`Prefetch failed: ${url}`);
-  }
-
-  private async warmupPose(timeoutMs: number): Promise<void> {
-    if (!this.pose) throw new Error('Pose not initialized');
-
-    const dummyCanvas = document.createElement('canvas');
-    dummyCanvas.width = 64;
-    dummyCanvas.height = 64;
-    const ctx = dummyCanvas.getContext('2d');
-    if (!ctx) throw new Error('Failed to create canvas context for warmup');
-
-    ctx.fillStyle = 'black';
-    ctx.fillRect(0, 0, 64, 64);
-
-    log(1, 'INIT', 'Warm-up send begin');
-
-    const warmupPromise: Promise<void> = this.pose.send({ image: dummyCanvas });
-    const timeoutPromise = new Promise<void>((_, reject) => {
-      window.setTimeout(() => reject(new Error('Warm-up timeout')), timeoutMs);
-    });
-
-    await Promise.race([warmupPromise, timeoutPromise]);
-    log(1, 'INIT', 'Warm-up send ok');
-  }
+  
+  // These are now handled in the worker or removed
+  private getEffectiveMediapipeFile(file: string): string { return file; }
+  private async prefetchMediapipeDependencies(baseUrl: string): Promise<void> {}
+  private async prefetchBinary(url: string, timeoutMs: number, retries: number): Promise<void> {}
+  private async warmupPose(timeoutMs: number): Promise<void> {}
 
   async start(videoElement: HTMLVideoElement) {
     if (this.isRunning) {
@@ -378,7 +234,7 @@ export class MotionController {
       return;
     }
     log(1, 'START', 'Starting...');
-    if (!this.pose) {
+    if (!this.worker) {
       await this.init();
     }
     this.video = videoElement;
@@ -429,11 +285,11 @@ export class MotionController {
     if (!this.isRunning) return;
 
     // If not ready or video not ready, skip processing but KEEP LOOP ALIVE
-    if (!this.pose || !this.isReady || this.hasFatalError || !this.video || this.video.readyState < 2) {
+    if (!this.worker || !this.isReady || this.hasFatalError || !this.video || this.video.readyState < 2) {
       if (this.isRunning) {
         // Log occasionally to help debugging why it's waiting
         if (Math.random() < 0.01) {
-           log(1, 'LOOP', `Waiting... isReady=${this.isReady}, hasPose=${!!this.pose}, video=${this.video?.readyState}, fatal=${this.hasFatalError}`);
+           log(1, 'LOOP', `Waiting... isReady=${this.isReady}, hasWorker=${!!this.worker}, video=${this.video?.readyState}, fatal=${this.hasFatalError}`);
         }
         this.requestRef = requestAnimationFrame(() => this.processFrame());
       }
@@ -445,7 +301,10 @@ export class MotionController {
 
     if (elapsed >= this.FRAME_MIN_TIME) {
         try {
-          await this.pose.send({ image: this.video });
+          // Efficiently create ImageBitmap to send to worker
+          const imageBitmap = await createImageBitmap(this.video);
+          this.worker.postMessage({ type: 'frame', image: imageBitmap }, [imageBitmap]);
+
           this.lastFrameTime = now;
 
           const actualFrameTime = elapsed;
@@ -468,15 +327,8 @@ export class MotionController {
             this.hasFatalError = true;
             return;
           }
-
-          if (errorStr.includes('WASM') || errorStr.includes('undefined')) {
-            const logRate = this.isIPad ? 0.02 : 0.05;
-            if (Math.random() < logRate) {
-              log(2, 'STABIL', 'MediaPipe still stabilizing...');
-            }
-          } else {
-            log(2, 'FRAME', 'Frame processing error', e);
-          }
+          
+          log(2, 'FRAME', 'Frame processing error', e);
         }
     }
 

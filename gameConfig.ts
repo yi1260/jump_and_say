@@ -41,9 +41,28 @@ export async function loadThemes(): Promise<Theme[]> {
  */
 let globalPreloadQueue: { url: string; themeId: string }[] = [];
 let isPreloadingActive = false;
-let isHighPriorityLoading = false; // Flag to pause background preloading
+let isHighPriorityLoading = false; // Flag to pause background preloading (for priority loads)
+let isBackgroundPaused = false;    // Flag to pause background preloading (for gameplay)
 const MAX_CONCURRENT_DOWNLOADS = 6;
 let activeDownloads = 0;
+
+export function pauseBackgroundPreloading() {
+  if (!isBackgroundPaused) {
+    isBackgroundPaused = true;
+    isPreloadingActive = false;
+    console.log('[Preloader] Background preloading paused for gameplay');
+  }
+}
+
+export function resumeBackgroundPreloading() {
+  if (isBackgroundPaused) {
+    isBackgroundPaused = false;
+    console.log('[Preloader] Background preloading resumed');
+    if (globalPreloadQueue.length > 0) {
+      processPreloadQueue();
+    }
+  }
+}
 
 function startBackgroundPreloading(themes: Theme[]) {
   // Flatten all images from all themes into a queue
@@ -101,9 +120,8 @@ export function prioritizeThemeInQueue(themeId: string) {
 }
 
 function processPreloadQueue() {
-  if (isHighPriorityLoading) {
-    // Pause background loading if high priority loading is active
-    // We will resume when the high priority task finishes
+  if (isHighPriorityLoading || isBackgroundPaused) {
+    // Pause background loading if high priority loading is active OR gameplay is active
     isPreloadingActive = false;
     return;
   }
@@ -118,7 +136,7 @@ function processPreloadQueue() {
 
   while (activeDownloads < MAX_CONCURRENT_DOWNLOADS && globalPreloadQueue.length > 0) {
     // Double check flag inside loop
-    if (isHighPriorityLoading) {
+    if (isHighPriorityLoading || isBackgroundPaused) {
       isPreloadingActive = false;
       return;
     }
