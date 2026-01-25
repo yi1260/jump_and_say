@@ -29,6 +29,7 @@ export class MotionController {
   private video: HTMLVideoElement | null = null;
   private faceDetector: any = null;
   private isRunning: boolean = false;
+  private requestRef: number | null = null;
   private lastFrameTime: number = 0;
   private readonly FRAME_MIN_TIME = 1000 / 30; // 30 FPS cap
 
@@ -99,7 +100,9 @@ export class MotionController {
         const faceDetection = new window.FaceDetection({
             locateFile: (file: string) => {
                 const cdnBase = window.__MEDIAPIPE_FACE_DETECTION_CDN__ || 'https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/';
-                return `${cdnBase}${file}`;
+                // Force file name only to avoid path issues
+                const fileName = file.split('/').pop();
+                return `${cdnBase}${fileName}`;
             }
         });
 
