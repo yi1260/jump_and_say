@@ -49,27 +49,10 @@ export async function preloadAllGameAssets(
       const url = getR2AssetUrl(path);
       try {
         if (path.endsWith('.mp3') || path.endsWith('.ogg')) {
-          const audio = new Audio();
-          audio.src = url;
-          audio.preload = 'auto';
-          await new Promise<void>((resolve) => {
-             const onLoaded = () => {
-                 cleanup();
-                 resolve();
-             };
-             const onError = () => {
-                 cleanup();
-                 resolve(); // Continue on error
-             };
-             const cleanup = () => {
-                 audio.removeEventListener('canplaythrough', onLoaded);
-                 audio.removeEventListener('error', onError);
-             };
-             
-             audio.addEventListener('canplaythrough', onLoaded);
-             audio.addEventListener('error', onError);
-             audio.load();
-          });
+          // Use fetch for audio to ensure it's in the disk cache/memory cache suitable for XHR
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          await response.arrayBuffer(); // Ensure body is downloaded
         } else {
           const img = new Image();
           img.crossOrigin = 'anonymous';
@@ -88,15 +71,20 @@ export async function preloadAllGameAssets(
       onProgress(progress, 'Loading Game Assets...');
     });
     
-    // We don't await assetPromises individually in the loop for progress updates 
-    // because we updated the count inside. But we need to wait for all of them.
-    // However, to make the progress bar move smoothly, we can't just await Promise.all at the end if we want updates.
-    // The inner callback already updates progress.
-    
-    // 3. Preload ONLY the First Theme's Images
-    // We do this in parallel with game assets or after? 
-    // Let's do it in parallel to maximize bandwidth.
-    
+    // 3. Preload Themes List JSON explicitly
+    // This ensures themes-list.json is in the browser cache when Phaser requests it
+    // although we plan to pass the data directly to Phaser to bypass the request entirely.
+    // But it's good practice to have it cached anyway.
+    const themesListPromise = (async () => {
+         try {
+             const response = await fetch('/themes/themes-list.json');
+             if (response.ok) await response.json();
+         } catch (e) {
+             console.warn('Failed to preload themes-list.json', e);
+         }
+    })();
+
+    // 4. Preload ONLY the First Theme's Images
     const firstThemeId = selectedThemes[0];
     const themePromise = (async () => {
         if (firstThemeId) {
@@ -105,7 +93,7 @@ export async function preloadAllGameAssets(
         }
     })();
 
-    await Promise.all([...assetPromises, themePromise]);
+    await Promise.all([...assetPromises, themesListPromise, themePromise]);
     
     onProgress(100, 'Ready!');
     

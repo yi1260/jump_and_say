@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import React, { useEffect, useRef } from 'react';
 import { MainScene } from '../game/scenes/MainScene';
 import { PreloadScene } from '../game/scenes/PreloadScene';
-import { ThemeId } from '../types';
+import { Theme, ThemeId } from '../types';
 
 interface GameCanvasProps {
   onScoreUpdate: (score: number, total: number) => void;
@@ -11,6 +11,7 @@ interface GameCanvasProps {
   onQuestionUpdate?: (question: string) => void;
   onBackgroundUpdate?: (index: number) => void;
   themes: ThemeId[];
+  allThemes: Theme[];
 }
 
 export const GameCanvas: React.FC<GameCanvasProps> = ({ 
@@ -19,7 +20,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   onGameRestart,
   onQuestionUpdate,
   onBackgroundUpdate,
-  themes 
+  themes,
+  allThemes
 }) => {
   const gameRef = useRef<Phaser.Game | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -62,6 +64,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             onBackgroundUpdate
           });
           game.registry.set('initialThemes', themes);
+          game.registry.set('allThemes', allThemes);
           game.registry.set('dpr', window.devicePixelRatio || 1);
         }
       },

@@ -38,6 +38,7 @@ export default defineConfig(({ mode }) => {
             enabled: true
           },
           workbox: {
+            cleanupOutdatedCaches: true,
             globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest,json,wasm,data,tflite}'],
             maximumFileSizeToCacheInBytes: 10 * 1024 * 1024, // 10MB
             globIgnores: [
@@ -45,6 +46,7 @@ export default defineConfig(({ mode }) => {
               'sw.js',
               'workbox-*.js',
               '**/assets/**/*',
+              '**/mediapipe/pose/**/*',
               '**/themes.backup*/**/*',
               '**/assets/kenney/Sprites/**/*',
               '**/assets/kenney/Vector/backup/**/*'

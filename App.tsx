@@ -898,6 +898,7 @@ export default function App() {
               onBackgroundUpdate={setBgIndex}
               // @ts-ignore
               themes={selectedThemes}
+              allThemes={themes}
             />
           </div>
         </>

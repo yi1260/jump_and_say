@@ -86,6 +86,18 @@ export class MotionController {
   async init() {
     if (this.initPromise) return this.initPromise;
 
+    const params = new URLSearchParams(window.location.search);
+    const diagEnabled =
+      window.__APP_DIAG__ === true ||
+      params.get('debug') === 'true' ||
+      params.get('diag') === '1' ||
+      params.get('diag') === 'true';
+    const diagLog = (message: string, data?: unknown) => {
+      if (!diagEnabled) return;
+      if (typeof data === 'undefined') console.info('[DIAG][MediaPipe]', message);
+      else console.info('[DIAG][MediaPipe]', message, data);
+    };
+
     const withTimeout = async <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
       let timeoutId: number | null = null;
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -101,6 +113,7 @@ export class MotionController {
     };
 
     const waitForFaceDetection = async (): Promise<void> => {
+      const start = performance.now();
       let attempts = 0;
       while (!window.FaceDetection && attempts < 50) {
         await new Promise((r) => setTimeout(r, 100));
@@ -109,6 +122,7 @@ export class MotionController {
       if (!window.FaceDetection) {
         throw new Error('FaceDetection library not found');
       }
+      diagLog('FaceDetection global ready', { ms: Math.round(performance.now() - start), attempts });
     };
 
     const createDetector = async (baseOverride?: string): Promise<any> => {
@@ -128,7 +142,32 @@ export class MotionController {
 
       faceDetection.onResults(this.onResults.bind(this));
 
+      if (diagEnabled && 'caches' in window && typeof caches.match === 'function') {
+        const probeFiles = [
+          'face_detection.js',
+          'face_detection_solution_simd_wasm_bin.js',
+          'face_detection_solution_simd_wasm_bin.wasm',
+          'face_detection_solution_wasm_bin.js',
+          'face_detection_solution_wasm_bin.wasm',
+          'face_detection_short_range.tflite'
+        ];
+        const results = await Promise.all(
+          probeFiles.map(async (fileName) => {
+            const url = `${base}${fileName}`;
+            try {
+              const match = await caches.match(url);
+              return { fileName, hit: !!match };
+            } catch (error) {
+              return { fileName, hit: false, error: String(error) };
+            }
+          })
+        );
+        diagLog('Cache probe', { base, results });
+      }
+
+      const initStart = performance.now();
       await withTimeout(faceDetection.initialize(), 8000, 'FaceDetection initialize timeout');
+      diagLog('initialize done', { base, ms: Math.round(performance.now() - initStart) });
 
       return faceDetection;
     };
@@ -137,21 +176,27 @@ export class MotionController {
       log(1, 'INIT', 'Initializing Face Detection...');
 
       try {
+        const totalStart = performance.now();
         await waitForFaceDetection();
         this.faceDetector = await createDetector();
         this.isReady = true;
         log(1, 'INIT', 'Face Detection Ready');
+        diagLog('init success', { ms: Math.round(performance.now() - totalStart), base: window.__MEDIAPIPE_FACE_DETECTION_CDN__ || '/mediapipe/face_detection/' });
       } catch (e) {
         log(2, 'INIT', 'Primary Face Detection init failed, retrying with local files...', e);
+        diagLog('init failed, fallback to local', { error: String(e) });
         try {
+          const fallbackStart = performance.now();
           await waitForFaceDetection();
           this.faceDetector = await createDetector('/mediapipe/face_detection/');
           this.isReady = true;
           log(1, 'INIT', 'Face Detection Ready (local fallback)');
+          diagLog('fallback success', { ms: Math.round(performance.now() - fallbackStart) });
         } catch (fallbackError) {
           this.faceDetector = null;
           this.isReady = false;
           console.error('[MotionController] Init failed', fallbackError);
+          diagLog('fallback failed', { error: String(fallbackError) });
           throw fallbackError;
         }
       }

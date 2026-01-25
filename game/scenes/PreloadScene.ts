@@ -12,7 +12,7 @@ export class PreloadScene extends Phaser.Scene {
   init(data: { theme?: ThemeId }) {
     const initialThemes = this.registry.get('initialThemes');
     const initialTheme = this.registry.get('initialTheme');
-    this.currentTheme = data.theme || (initialThemes && initialThemes.length > 0 ? initialThemes[0] : initialTheme) || '';
+    this.currentTheme = data.theme || initialTheme || (initialThemes && initialThemes.length > 0 ? initialThemes[0] : '') || '';
   }
 
   preload() {
@@ -22,28 +22,6 @@ export class PreloadScene extends Phaser.Scene {
     this.load.on('complete', () => {
       console.timeEnd('[PreloadScene] preload');
       this.scene.start('MainScene', { theme: this.currentTheme, dpr: this.registry.get('dpr') || 1 });
-    });
-
-    // Log file load completion with cache status
-    this.load.on('filecomplete', (key: string, type: string, data: any) => {
-        // We can't easily get the URL from the key alone in filecomplete, 
-        // but for debugging purposes, we can try to find it in the loader queue or cache
-        // However, we can use the Performance API to check recent entries.
-        
-        // This is a heuristic.
-        if (type === 'image' || type === 'audio' || type === 'svg' || type === 'json') {
-             // Try to find the entry in performance
-             const entries = performance.getEntriesByType('resource');
-             // Get the most recent one that matches the type or name?
-             // Since we don't have the exact URL here easily without looking up the loader state,
-             // let's just log that it loaded.
-             // Actually, file object is not passed to filecomplete.
-             // We can use 'load' event on individual files if we want, but 'filecomplete' is simpler.
-             
-             // Let's try to look up the URL from the TextureManager or Cache if possible, 
-             // but simpler is to just log "Loaded: key"
-             // To be more useful, let's use the 'fileload' event which provides the file object
-        }
     });
     
     // Use 'filecomplete' is not enough for URL. Use 'onload' internal event?
