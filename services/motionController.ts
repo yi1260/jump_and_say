@@ -110,7 +110,7 @@ export class MotionController {
         faceDetection.setOptions({
             model: 'short',
             minDetectionConfidence: 0.5,
-            selfieMode: true
+            selfieMode: false
         });
 
         faceDetection.onResults(this.onResults.bind(this));
@@ -177,12 +177,16 @@ export class MotionController {
       this.isNoseDetected = true;
       const detection = results.detections[0];
       const bbox = detection.boundingBox; // { xCenter, yCenter, width, height }
-      
-      // Get Head Center (Note: MediaPipe Face Detection returns normalized coordinates 0-1)
-      // xCenter: 0 (Left) -> 1 (Right). But for selfie camera, we want Mirror effect.
-      // Physical Left -> Camera Right (High X) -> 1-X -> Low X (Left)
-      const targetX = 1 - bbox.xCenter; 
-      const targetY = bbox.yCenter;
+      const keypoints: Array<{ x?: number; y?: number; name?: string }> = Array.isArray(detection.keypoints)
+        ? detection.keypoints
+        : [];
+      const noseKeypoint =
+        keypoints.find((kp) => typeof kp.name === 'string' && kp.name.toLowerCase().includes('nose')) ||
+        keypoints[2] ||
+        null;
+      const rawFaceX = typeof noseKeypoint?.x === 'number' ? noseKeypoint.x : bbox.xCenter;
+      const rawFaceY = typeof noseKeypoint?.y === 'number' ? noseKeypoint.y : bbox.yCenter;
+      const mirroredX = 1 - rawFaceX;
 
       const now = performance.now();
       const elapsed = now - this.lastFrameTime;
@@ -191,17 +195,19 @@ export class MotionController {
 
       // --- 1. Update X (Horizontal) ---
       // Smooth interpolation
-      this.currentHeadX = this.currentHeadX * 0.7 + targetX * 0.3;
+      this.currentHeadX = this.currentHeadX * 0.7 + mirroredX * 0.3;
       
       this.state.bodyX = this.currentHeadX;
-      this.state.rawNoseX = this.currentHeadX;
-      this.state.rawNoseY = targetY; // Direct mapping for visual feedback
+      // rawNoseX/rawNoseY are used by the Live View overlay, which mirrors the video in CSS
+      // Keep these in CAMERA coordinates (not mirrored), the UI will apply (1 - x)
+      this.state.rawNoseX = rawFaceX;
+      this.state.rawNoseY = rawFaceY;
 
       // Lane Logic
       let targetLane = 0;
-      if (this.currentHeadX > (0.5 + this.xThreshold)) {
+      if (this.currentHeadX < (0.5 - this.xThreshold)) {
           targetLane = -1; // Left
-      } else if (this.currentHeadX < (0.5 - this.xThreshold)) {
+      } else if (this.currentHeadX > (0.5 + this.xThreshold)) {
           targetLane = 1;  // Right
       } else {
           targetLane = 0;  // Center
@@ -218,11 +224,11 @@ export class MotionController {
       
       // Calculate velocity
       // Positive Velocity = Moving UP (Old Y > New Y)
-      const dy = this.smoothedHeadY - targetY;
+      const dy = this.smoothedHeadY - rawFaceY;
       const velocity = dy / dtSec;
       
       // Update smoothed baseline (follow head slowly to adapt to height)
-      this.smoothedHeadY = this.smoothedHeadY * 0.9 + targetY * 0.1;
+      this.smoothedHeadY = this.smoothedHeadY * 0.9 + rawFaceY * 0.1;
       this.state.rawShoulderY = this.smoothedHeadY;
 
       // Jump Trigger
