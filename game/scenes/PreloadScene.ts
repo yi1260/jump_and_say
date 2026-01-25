@@ -28,6 +28,44 @@ export class PreloadScene extends Phaser.Scene {
     this.load.on('loaderror', (file: Phaser.Loader.File) => {
         console.warn(`[Loader] Error loading ${file.key} from ${file.url}`);
         
+        // R2 CDN -> Local Fallback Logic
+        // 如果是 CDN 资源加载失败，尝试降级到本地资源
+        if (typeof file.url === 'string' && file.url.includes('cdn.maskmysheet.com') && file.url.includes('/assets/')) {
+             console.log(`[Loader] CDN load failed for ${file.key}, attempting local fallback...`);
+             
+             // 构造本地 URL: 将 CDN 路径替换为本地路径
+             // CDN: https://cdn.maskmysheet.com/assets/kenney/... -> Local: /assets/kenney/...
+             const pathParts = file.url.split('/assets/');
+             if (pathParts.length > 1) {
+                 const newUrl = '/assets/' + pathParts[1];
+                 console.log(`[Loader] Switching to local URL: ${newUrl}`);
+                 
+                 // 根据文件类型重新加载
+                 switch (file.type) {
+                     case 'image':
+                         this.load.image(file.key, newUrl);
+                         break;
+                     case 'svg':
+                         // SVG 需要保留宽高设置，但这里无法获取原始宽高，通常 SVG 重新加载可能需要 metadata
+                         // 幸好 loadGameAssets 里是硬编码的，但在 error handler 里很难拿到。
+                         // 不过 Phaser 的 file 对象里可能有 config?
+                         // 简单起见，尝试直接加载，或者忽略 SVG 的尺寸设置（可能会有显示问题，但在 fallback 情况下可接受）
+                         // 其实 file.width 和 file.height 应该在 file 对象上有（如果是 SVGFile）
+                         // 让我们尝试读取 file.config
+                         this.load.svg(file.key, newUrl, (file as any).config); 
+                         break;
+                     case 'audio':
+                         this.load.audio(file.key, newUrl);
+                         break;
+                     default:
+                         this.load.image(file.key, newUrl);
+                 }
+                 
+                 this.load.start();
+                 return; // 跳过标准重试逻辑
+             }
+        }
+
         // Custom retry logic
         // We add a 'retries' property to the file object to track attempts
         const retries = (file as any).retries || 0;
@@ -44,7 +82,19 @@ export class PreloadScene extends Phaser.Scene {
             // Small delay before retry
             setTimeout(() => {
                 if (typeof file.url === 'string') {
-                    this.load.image(file.key, file.url);
+                    switch (file.type) {
+                        case 'image':
+                            this.load.image(file.key, file.url);
+                            break;
+                        case 'svg':
+                            this.load.svg(file.key, file.url, (file as any).config);
+                            break;
+                        case 'audio':
+                            this.load.audio(file.key, file.url);
+                            break;
+                        default:
+                            this.load.image(file.key, file.url);
+                    }
                     this.load.start(); // Restart loader if it stopped
                 }
             }, 1000 * (retries + 1));
