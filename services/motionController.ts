@@ -209,7 +209,9 @@ export class MotionController {
 
         this.pose.onResults(this.onResults.bind(this));
 
-        const warmupDelay = this.isIPad ? 1500 : 1500;
+        // Increase warm-up delay to allow large .data file (3MB) to download
+        // 1.5s is often too short for slower connections, causing WASM crash if accessed before data is ready
+        const warmupDelay = 4000; 
         log(1, 'INIT', `Warming up WASM in ${warmupDelay}ms...`);
 
         setTimeout(async () => {
