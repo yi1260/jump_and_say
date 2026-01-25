@@ -99,18 +99,18 @@ export class MotionController {
       try {
         const faceDetection = new window.FaceDetection({
             locateFile: (file: string) => {
-                const cdnBase = window.__MEDIAPIPE_FACE_DETECTION_CDN__ || 'https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/';
+                // If using local path, we don't need to strip path, it's flat
+                // If using CDN, we force flat filename
+                const cdnBase = window.__MEDIAPIPE_FACE_DETECTION_CDN__ || '/mediapipe/face_detection/';
                 const fileName = file.split('/').pop();
                 return `${cdnBase}${fileName}`;
             }
         });
 
-        // Use CPU mode to avoid GPU inference errors (solutions_wasm.embind.cc issues)
-        // Face Detection is lightweight enough for CPU
         faceDetection.setOptions({
-            modelSelection: 0, 
+            model: 'short',
             minDetectionConfidence: 0.5,
-            selfieMode: true // Let MediaPipe handle mirroring if possible, though we do it manually too
+            selfieMode: true
         });
 
         faceDetection.onResults(this.onResults.bind(this));
