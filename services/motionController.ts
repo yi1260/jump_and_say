@@ -177,6 +177,12 @@ export class MotionController {
          cdnUrl = window.__MEDIAPIPE_CDN__ || '/mediapipe/';
       }
 
+      // Ensure CDN URL is absolute for Worker
+      if (cdnUrl && !cdnUrl.startsWith('http')) {
+         cdnUrl = new URL(cdnUrl, window.location.origin).href;
+         log(1, 'INIT', `Resolved relative CDN URL to absolute: ${cdnUrl}`);
+      }
+
       return new Promise<void>((resolve, reject) => {
           if (!this.worker) return reject('Worker creation failed');
 

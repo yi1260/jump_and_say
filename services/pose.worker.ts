@@ -18,6 +18,26 @@ interface FrameMessage {
   image: ImageBitmap;
 }
 
+// Global error handlers to catch script errors and promise rejections
+self.addEventListener('error', (event: ErrorEvent) => {
+  const msg = event.message;
+  const filename = event.filename;
+  const lineno = event.lineno;
+  console.error('[Worker Global Error]', msg, filename, lineno, event.error);
+  self.postMessage({ 
+    type: 'error', 
+    error: `Worker Error: ${msg} (Line ${lineno})` 
+  });
+});
+
+self.addEventListener('unhandledrejection', (event: PromiseRejectionEvent) => {
+  console.error('[Worker Unhandled Rejection]', event.reason);
+  self.postMessage({ 
+    type: 'error', 
+    error: `Unhandled Rejection: ${event.reason}` 
+  });
+});
+
 self.onmessage = async (e: MessageEvent<InitMessage | FrameMessage>) => {
   if (e.data.type === 'init') {
     await init(e.data.cdnUrl, e.data.config);
