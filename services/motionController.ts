@@ -135,7 +135,7 @@ export class MotionController {
       });
 
       faceDetection.setOptions({
-        model: 'short',
+        model: 'full',
         minDetectionConfidence: 0.4,
         selfieMode: false
       });
@@ -149,7 +149,7 @@ export class MotionController {
           'face_detection_solution_simd_wasm_bin.wasm',
           'face_detection_solution_wasm_bin.js',
           'face_detection_solution_wasm_bin.wasm',
-          'face_detection_short_range.tflite'
+          'face_detection_full_range.tflite'
         ];
         const results = await Promise.all(
           probeFiles.map(async (fileName) => {
