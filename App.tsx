@@ -314,6 +314,21 @@ export default function App() {
       }
 
       /* Landscape Mobile Specific Fixes (Height constrained) */
+      @media (max-height: 700px) and (orientation: landscape) {
+        .mobile-landscape-control {
+          transform: scale(0.7) !important;
+          transform-origin: top left !important;
+          top: 1rem !important;
+          left: 1rem !important;
+        }
+        .mobile-landscape-camera {
+          transform: scale(0.7) !important;
+          transform-origin: top right !important;
+          top: 1rem !important;
+          right: 1rem !important;
+        }
+      }
+
       @media (max-height: 480px) {
         .mobile-landscape-title {
           font-size: 2.2rem !important;
@@ -1055,14 +1070,14 @@ export default function App() {
 
             {/* TUTORIAL */}
             {phase === GamePhase.TUTORIAL && (
-                <div className="text-center w-full max-w-5xl px-4 md:px-8 flex flex-col items-center h-full max-h-screen pt-[8vh] md:pt-[12vh] gap-[3vh] md:gap-[5vh] overflow-hidden">
+                <div className="text-center w-full max-w-6xl px-8 md:px-20 lg:px-32 flex flex-col items-center h-full max-h-screen pt-[12vh] md:pt-[15vh] gap-[2vh] md:gap-[4vh] overflow-hidden">
                     
                     <h2 className="text-[4vw] sm:text-[5vw] md:text-[6vw] font-normal text-white italic tracking-tight uppercase drop-shadow-[0_4px_0_#333333] md:drop-shadow-[0_6px_0_#333333] rotate-[-1deg] shrink-0 mobile-landscape-title landscape-compact-title leading-none">
                         HOW TO PLAY
                     </h2>
                     
-                    <div className="w-full flex-1 flex flex-col items-center justify-start min-h-0 gap-[3vh] md:gap-[5vh]">
-                        <div className="grid grid-cols-2 gap-[3vw] md:gap-[5vw] w-full max-w-4xl min-h-0 mobile-landscape-tutorial-grid">
+                    <div className="w-full flex-1 flex flex-col items-center justify-start min-h-0 gap-[2vh] md:gap-[4vh]">
+                        <div className="grid grid-cols-2 gap-[3vw] md:gap-[4vw] w-full max-w-3xl lg:max-w-4xl min-h-0 mobile-landscape-tutorial-grid">
                             <div className="kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
                                 <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-4">
                                     <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_walk_a.svg')} className="w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce-horizontal-large mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />

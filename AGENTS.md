@@ -89,7 +89,7 @@ import { getR2ImageUrl, getR2AssetUrl } from './src/config/r2Config';
 - **Components**: PascalCase (e.g., `GameCanvas`, `CompletionOverlay`, `CameraGuide`, `LoadingScreen`)
 - **Functions/Methods**: camelCase (e.g., `handleScoreUpdate`, `initializeGame`, `preloadThemeImages`, `preloadAllGameAssets`)
 - **Classes**: PascalCase (e.g., `MotionController`, `AdaptiveCalibrator`, `MainScene`)
-- **Constants**: UPPER_SNAKE_CASE for true constants (e.g., `MAX_CONCURRENT_DOWNLOADS`, `FRAME_MIN_TIME`)
+- **Constants**: UPPER_SNAKE_CASE for true constants (e.g., `MAX_CONCURRENT_DOWNLOADS`, `FRAME_MIN_TIME`, `JUMP_COOLDOWN`)
   - camelCase for config/calibration values that may be adjusted (e.g., `xThreshold`, `currentHeadX`)
 - **Interfaces/Types**: PascalCase (e.g., `MotionState`, `Theme`, `ThemeQuestion`)
 - **Enum Values**: UPPER_SNAKE_CASE (e.g., `GamePhase.PLAYING`, `GamePhase.MENU`)
@@ -244,13 +244,13 @@ if (isAndroid) {
 - **Lightweight Model**: Uses 'short' model for faster inference
 - **Optimized Settings**: 
   - `minDetectionConfidence: 0.5` - Balanced accuracy/speed
-  - `selfieMode: true` - Mirrored for natural interaction
+  - `selfieMode: false` - No mirroring (mirroring handled in code)
 - **Target FPS**: 30 FPS (controlled by `FRAME_MIN_TIME = 1000 / 30`)
 - **Smooth Values**: Exponential moving average for stable tracking
   - X-axis smoothing: 0.7/0.3 (70% old, 30% new)
-  - Y-axis smoothing: 0.9/0.1 (90% old, 10% new) for jump detection
-- **Jump Detection**: Velocity-based with 1.2 threshold and 0.04 displacement
-- **Cooldown**: 600ms between jumps to prevent spam
+  - Y-axis smoothing: 0.96/0.04 (96% old, 4% new) for jump detection
+- **Jump Detection**: Velocity-based with 1.9 threshold and 0.07 displacement
+- **Cooldown**: 800ms between jumps to prevent spam
 - **Multi-CDN Fallback**: 4 CDN sources for reliable loading
 
 **Phaser Performance**:
@@ -283,7 +283,7 @@ if (isAndroid) {
 **Performance Improvements**:
 - **Reduced Power Consumption**: Face Detection is lighter than full-body Pose
 - **Faster Inference**: 'short' model provides ~2-3x speed improvement
-- **Optimized CDN Loading**: Multi-CDN fallback with 3s timeout
+- **Optimized CDN Loading**: Multi-CDN fallback with 2.5s timeout
 - **Optimization Recommendations**:
   - Use camera only when needed (CALIBRATING, PLAYING phases)
   - Reduce concurrent downloads (16→4)
@@ -503,15 +503,18 @@ registerSW({
 - Cache-first strategy for CDN
 - 1-year cache duration for theme assets
 - Maximum file size: 10MB
-- **Optimized globIgnores**: Excludes backup files, assets, and MediaPipe Pose files
-  - `**/assets/**/*` - All local assets
+- **Optimized globIgnores**: Excludes backup files, assets, and MediaPipe files
+  - `**/assets/kenney/**/*` - All Kenney assets
+  - `**/assets/Fredoka/**/*` - All Fredoka fonts
   - `**/mediapipe/pose/**/*` - MediaPipe Pose files
   - `**/mediapipe/pose*` - MediaPipe Pose files
+  - `**/mediapipe/face_detection/**/*` - MediaPipe Face Detection files
   - `**/themes.backup*/**/*` - Backup theme directories
   - `**/assets/kenney/Sprites/**/*` - Unused sprite assets
   - `**/assets/kenney/Vector/backup/**/*` - Backup vector assets
 - **MediaPipe WASM caching**: Includes `.wasm` and `.data` files for offline support
-- **Multi-CDN support**: Caches MediaPipe Face Detection files from jsdelivr, unpkg, and custom CDN
+- **Multi-CDN support**: Caches MediaPipe Face Detection files from jsdelivr, fastly.jsdelivr, and custom CDN
+- **Google Fonts caching**: Caches Google Fonts for offline support
 
 ### Mobile & Responsive Design
 
@@ -634,29 +637,32 @@ interface MotionState {
 - **Configuration**:
   - `model: 'short'` - Fast inference (~2-3x faster than full model)
   - `minDetectionConfidence: 0.5` - Balanced accuracy/speed
-  - `selfieMode: true` - Mirrored for natural interaction
-- **Detection**: Returns bounding box (xCenter, yCenter, width, height)
+  - `selfieMode: false` - No mirroring (mirroring handled in code)
+- **Detection**: Returns bounding box (xCenter, yCenter, width, height) and keypoints
 - **Coordinates**: Normalized 0-1 range
-- **Mirroring**: X-axis mirrored (1 - xCenter) for selfie view
+- **Mirroring**: X-axis mirrored in code (1 - rawFaceX) for selfie view
 - **Performance**: ~30 FPS on most devices
 
 **Movement Detection**:
 - **Horizontal Movement**: Based on face center X position
-  - Threshold: 0.12 from center (0.5)
-  - Left: < 0.38 (0.5 - 0.12)
-  - Right: > 0.62 (0.5 + 0.12)
-  - Center: 0.38 - 0.62
-  - Smoothing: 0.7/0.3 exponential moving average
+  - Threshold: 0.15 from center (0.5)
+  - Left: < 0.35 (0.5 - 0.15)
+  - Right: > 0.65 (0.5 + 0.15)
+  - Center: 0.35 - 0.65
+  - Smoothing: 0.8/0.2 exponential moving average
 - **Jump Detection**: Velocity-based on face center Y position
-  - Velocity threshold: 1.2 (fast upward movement)
-  - Displacement threshold: 0.04 (significant distance)
-  - Smoothing: 0.9/0.1 (slow adaptation to height)
-  - Cooldown: 600ms between jumps
+  - Velocity threshold: 1.9 (fast upward movement)
+  - Displacement threshold: 0.07 (significant distance)
+  - Smoothing: 0.96/0.04 (slow adaptation to height)
+  - Cooldown: 800ms between jumps
+  - **Jump Candidate Frames**: Requires >= 2 consecutive frames meeting criteria
+  - **Jump Arm Mechanism**: Prevents false positives by requiring downward movement before next jump
+  - **Face Size Ratio Check**: Only triggers jump if face size change < 0.35 (prevents false triggers from distance changes)
 
 **Smoothing Parameters**:
-- X-axis smoothing: 0.7/0.3 (70% old, 30% new) - responsive but stable
-- Y-axis smoothing: 0.9/0.1 (90% old, 10% new) - slow adaptation for jump detection
-- Jump cooldown: 600ms
+- X-axis smoothing: 0.8/0.2 (80% old, 20% new) - stable tracking
+- Y-axis smoothing: 0.96/0.04 (96% old, 4% new) - slow adaptation for jump detection
+- Jump cooldown: 800ms
 - Target FPS: 30
 
 **Multi-CDN Fallback** (in `index.html`):
@@ -667,10 +673,11 @@ const CDNS = [
   '/mediapipe/face_detection/',                                                     // 本地回退
   'https://cdn.maskmysheet.com/mediapipe/face_detection/'                           // 自有 R2 CDN
 ];
+const LOAD_TIMEOUT = 2500; // 2.5s timeout per CDN
 ```
 
 **Loading Process**:
-1. Try CDNs in order with 3s timeout
+1. Try CDNs in order with 2.5s timeout
 2. Successfully loaded CDN is saved to `window.__MEDIAPIPE_FACE_DETECTION_CDN__`
 3. MediaPipe uses this CDN for loading WASM files
 4. On failure, automatically try next CDN
@@ -753,7 +760,7 @@ import { startBackgroundPreloading, prioritizeThemeInQueue } from './gameConfig'
 // Start background preloading
 startBackgroundPreloading(themes);
 
-// Prioritize a theme when user selects it
+// Prioritize a specific theme
 prioritizeThemeInQueue(themeId);
 ```
 
@@ -960,6 +967,7 @@ dist-ssr
    - Auto-update mode for seamless updates
    - HTTPS support via @vitejs/plugin-basic-ssl
    - MediaPipe WASM files cached for offline support
+   - Google Fonts cached for offline support
    - **Optimized globIgnores**: Excludes backup files to reduce precache size
 
 6. **Environment Variables**:
@@ -971,11 +979,11 @@ dist-ssr
 7. **Motion Detection System**:
    - **Primary**: MediaPipe Face Detection
      - Lightweight 'short' model for fast inference
-     - Bounding box detection (xCenter, yCenter, width, height)
-     - Selfie mode with X-axis mirroring
+     - Bounding box detection (xCenter, yCenter, width, height) and keypoints
+     - No mirroring in API (mirroring handled in code)
      - Multi-CDN fallback system (4 CDNs)
      - WASM files cached for offline support
-     - 3s timeout for CDN switching
+     - 2.5s timeout for CDN switching
      - **Priority**: fastly.jsdelivr.net → jsdelivr.net → local → R2 CDN
 
 8. **Performance Optimization**:
@@ -1032,7 +1040,7 @@ dist-ssr
 14. **Performance Improvements**:
     - **Reduced Power Consumption**: Face Detection is lighter than full-body Pose
     - **Faster Inference**: 'short' model provides ~2-3x speed improvement
-    - **Optimized CDN Loading**: Multi-CDN fallback with 3s timeout
+    - **Optimized CDN Loading**: Multi-CDN fallback with 2.5s timeout
     - **Optimization Recommendations**:
       - Use camera only when needed (CALIBRATING, PLAYING phases)
       - Reduce concurrent downloads (16→4)
@@ -1058,16 +1066,19 @@ dist-ssr
 18. **Motion Detection Architecture**:
     - **Primary**: MediaPipe Face Detection in `services/motionController.ts`
       - Uses 'short' model for lightweight inference
-      - Returns bounding box (xCenter, yCenter, width, height)
+      - Returns bounding box (xCenter, yCenter, width, height) and keypoints
       - Normalized coordinates (0-1)
-      - Selfie mode with X-axis mirroring (1 - xCenter)
+      - No mirroring in API (mirroring handled in code: 1 - rawFaceX)
       - Multi-CDN fallback system
       - WASM files cached for offline support
     - **Detection Logic**:
-      - Horizontal: Face center X position with 0.12 threshold
-      - Jump: Velocity-based with 1.2 threshold and 0.04 displacement
-      - Smoothing: 0.7/0.3 for X, 0.9/0.1 for Y
-      - Cooldown: 600ms between jumps
+      - Horizontal: Face center X position with 0.15 threshold
+      - Jump: Velocity-based with 1.9 threshold and 0.07 displacement
+      - Smoothing: 0.8/0.2 for X, 0.96/0.04 for Y
+      - Cooldown: 800ms between jumps
+      - Jump Candidate Frames: Requires >= 2 consecutive frames
+      - Jump Arm Mechanism: Prevents false positives
+      - Face Size Ratio Check: < 0.35 to prevent distance-based false triggers
 
 19. **Calibration System**:
     - Simplified calibration (no-op methods for compatibility)
@@ -1123,6 +1134,8 @@ dist-ssr
     - **Cleanup Outdated Caches**: Automatically removes old cache versions
     - **Skip Waiting**: New Service Worker activates immediately
     - **Clients Claim**: New Service Worker takes control of all clients immediately
+    - **Google Fonts Caching**: Caches Google Fonts for offline support
+    - **Local MediaPipe Caching**: Caches local MediaPipe Face Detection files
 
 26. **PWA Refresh Performance**:
     - **Problem**: Large precache manifests (100+ backup theme files) cause slow refresh
@@ -1131,11 +1144,33 @@ dist-ssr
     - **Configuration**:
       ```javascript
       globIgnores: [
-        '**/assets/**/*',              // All local assets
-        '**/mediapipe/pose/**/*',      // MediaPipe Pose files
-        '**/mediapipe/pose*',          // MediaPipe Pose files
-        '**/themes.backup*/**/*',      // Backup theme directories
-        '**/assets/kenney/Sprites/**/*', // Unused sprites
+        '**/assets/kenney/**/*',              // All Kenney assets
+        '**/assets/Fredoka/**/*',             // All Fredoka fonts
+        '**/mediapipe/pose/**/*',             // MediaPipe Pose files
+        '**/mediapipe/pose*',                 // MediaPipe Pose files
+        '**/mediapipe/face_detection/**/*',   // MediaPipe Face Detection files
+        '**/themes.backup*/**/*',             // Backup theme directories
+        '**/assets/kenney/Sprites/**/*',      // Unused sprites
         '**/assets/kenney/Vector/backup/**/*' // Backup vectors
       ]
       ```
+
+27. **Jump Detection Improvements**:
+    - **Updated Thresholds**: More conservative thresholds to reduce false positives
+      - Velocity threshold: 1.9 (increased from 1.2)
+      - Displacement threshold: 0.07 (increased from 0.04)
+      - Cooldown: 800ms (increased from 600ms)
+    - **Jump Candidate Frames**: Requires >= 2 consecutive frames meeting jump criteria
+    - **Jump Arm Mechanism**: Prevents false positives by requiring downward movement (dy < 0.03) before next jump can be triggered
+    - **Face Size Ratio Check**: Only triggers jump if face size change < 0.35, preventing false triggers from user moving closer/further from camera
+    - **Y-axis Smoothing**: Updated to 0.96/0.04 (from 0.9/0.1) for more stable baseline tracking
+
+28. **CDN Timeout Configuration**:
+    - **Reduced Timeout**: CDN loading timeout reduced to 2.5s (from 3s)
+    - **Faster Fallback**: Quicker fallback to next CDN on failure
+    - **Improved Reliability**: Shorter timeout reduces perceived latency on CDN issues
+
+29. **Selfie Mode Configuration**:
+    - **API Setting**: `selfieMode: false` in MediaPipe Face Detection
+    - **Manual Mirroring**: Mirroring handled in code (1 - rawFaceX)
+    - **Reason**: Better control over mirroring behavior and debugging

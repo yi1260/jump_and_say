@@ -14,6 +14,10 @@ const FONT_STACK = '"FredokaLocal", "Arial Rounded MT Bold", "Chalkboard SE", "C
 export class MainScene extends Phaser.Scene {
   private player!: Phaser.Physics.Arcade.Sprite;
   private jumpBurstEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
+  private blockDebrisEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
+  private blockSmokeEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
+  private blockFlashEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
+  private rewardTrailEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
   private blocks!: Phaser.Physics.Arcade.StaticGroup; 
   private floor!: Phaser.GameObjects.Rectangle;
   
@@ -668,6 +672,48 @@ export class MainScene extends Phaser.Scene {
         emitting: false
     });
 
+    // --- Pre-create Pooled Particle Emitters for Optimizations ---
+    
+    // 1. Block Debris (Optimized: reduced quantity, removed physics bounds)
+    this.blockDebrisEmitter = this.add.particles(0, 0, 'debris_bubble', {
+        speed: { min: 200, max: 600 }, 
+        angle: { min: 0, max: 360 },
+        scale: { start: 0.8 * this.gameScale, end: 0.2 * this.gameScale }, 
+        alpha: { start: 1, end: 0 }, 
+        lifespan: 1000, 
+        rotate: { min: -180, max: 180 }, 
+        gravityY: 1200, 
+        emitting: false
+    }).setDepth(30);
+
+    // 2. Block Smoke
+    this.blockSmokeEmitter = this.add.particles(0, 0, 'particle_gold', {
+        speed: { min: 20, max: 80 },
+        scale: { start: 1.5 * this.gameScale, end: 3 * this.gameScale },
+        alpha: { start: 0.3, end: 0 },
+        lifespan: 800,
+        emitting: false
+    }).setDepth(31);
+
+    // 3. Block Flash
+    this.blockFlashEmitter = this.add.particles(0, 0, 'particle_gold', {
+        speed: { min: 100, max: 300 },
+        scale: { start: 0.8 * this.gameScale, end: 0 },
+        lifespan: 400,
+        blendMode: 'ADD',
+        emitting: false
+    }).setDepth(32);
+
+    // 4. Reward Trail
+    this.rewardTrailEmitter = this.add.particles(0, 0, 'particle_gold', {
+        speed: 10,
+        scale: { start: 0.8, end: 0 },
+        alpha: { start: 0.6, end: 0 },
+        lifespan: 600,
+        blendMode: 'ADD',
+        emitting: false
+    }).setDepth(90);
+
     // 移除重复的 delayedCall，统一由 setupThemeData 触发
     // this.time.delayedCall(2000, () => {
     //   this.spawnQuestion();
@@ -1114,16 +1160,14 @@ export class MainScene extends Phaser.Scene {
         const baseScale = (reward.scale * this.gameScale) / 4; 
         
         const trailTint = reward.surprise ? [0x00FFFF, 0xFF00FF, 0xFFFF00] : [C_GOLD, C_AMBER, 0xFF4500];
-        const rewardTrail = this.add.particles(0, 0, 'particle_gold', {
-            speed: 10,
-            scale: { start: 0.8, end: 0 },
-            alpha: { start: 0.6, end: 0 },
-            lifespan: 600,
-            tint: trailTint,
-            blendMode: 'ADD',
-            follow: rewardItem,
-            frequency: reward.surprise ? 20 : 40
-        });
+        
+        // Use pooled reward trail emitter
+        if (this.rewardTrailEmitter) {
+            this.rewardTrailEmitter.setParticleTint(trailTint[0]); // Simplified tint for performance
+            this.rewardTrailEmitter.startFollow(rewardItem);
+            this.rewardTrailEmitter.start();
+            this.rewardTrailEmitter.setFrequency(reward.surprise ? 20 : 40);
+        }
 
         const rewardTextStr = `+${reward.score}`;
         const rewardText = this.add.text(block.x, block.y - 50 * this.gameScale, rewardTextStr, {
@@ -1173,7 +1217,10 @@ export class MainScene extends Phaser.Scene {
                         ease: 'Expo.easeIn',
                         onComplete: () => {
                             rewardItem.destroy();
-                            rewardTrail.destroy();
+                            if (this.rewardTrailEmitter) {
+                                this.rewardTrailEmitter.stop();
+                                this.rewardTrailEmitter.stopFollow();
+                            }
                             this.score += reward.score;
                             this.themeScore += reward.score;
                             if (this.onScoreUpdate) this.onScoreUpdate(this.score, this.totalQuestions);
@@ -1401,45 +1448,18 @@ export class MainScene extends Phaser.Scene {
   }
 
   private createBlockExplosion(x: number, y: number) {
-    const debris = this.add.particles(x, y, 'debris_bubble', {
-        speed: { min: 200, max: 800 }, 
-        angle: { min: 0, max: 360 },
-        scale: { start: 1 * this.gameScale, end: 0.2 * this.gameScale }, 
-        alpha: { start: 1, end: 1 }, 
-        lifespan: 1500, 
-        quantity: 80, 
-        rotate: { min: -180, max: 180 }, 
-        gravityY: 1500, 
-        bounce: 0.5, 
-        bounds: new Phaser.Geom.Rectangle(0, 0, this.scale.width, this.floorSurfaceY), 
-        blendMode: 'NORMAL'
-    });
-    debris.explode();
+    // Use pooled emitters to avoid object creation overhead
+    if (this.blockDebrisEmitter) {
+        this.blockDebrisEmitter.explode(35, x, y); // Reduced from 80
+    }
     
-    const smoke = this.add.particles(x, y, 'particle_gold', {
-        speed: { min: 20, max: 100 },
-        scale: { start: 2 * this.gameScale, end: 4 * this.gameScale },
-        alpha: { start: 0.3, end: 0 },
-        lifespan: 1000,
-        quantity: 15,
-        blendMode: 'NORMAL'
-    });
-    smoke.explode();
+    if (this.blockSmokeEmitter) {
+        this.blockSmokeEmitter.explode(10, x, y); // Reduced from 15
+    }
 
-    const flash = this.add.particles(x, y, 'particle_gold', {
-        speed: { min: 100, max: 400 },
-        scale: { start: 1 * this.gameScale, end: 0 },
-        lifespan: 500,
-        quantity: 30,
-        blendMode: 'ADD'
-    });
-    flash.explode();
-
-    this.time.delayedCall(1500, () => {
-        debris.destroy();
-        smoke.destroy();
-        flash.destroy();
-    });
+    if (this.blockFlashEmitter) {
+        this.blockFlashEmitter.explode(15, x, y); // Reduced from 30
+    }
   }
 
 

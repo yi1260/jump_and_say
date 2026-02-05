@@ -34,7 +34,7 @@ export class MotionController {
   private readonly FRAME_MIN_TIME = 1000 / 30; // 30 FPS cap
 
   // Thresholds for Face Motion
-  // X: 0.5 is center. > 0.6 is Right, < 0.4 is Left.
+  // X: 0.5 is center. > 0.62 is Right, < 0.38 is Left. (Modified for better sensitivity)
   private xThreshold: number = 0.12; 
   
   public state: MotionState = {
@@ -136,7 +136,7 @@ export class MotionController {
 
       faceDetection.setOptions({
         model: 'short',
-        minDetectionConfidence: 0.5,
+        minDetectionConfidence: 0.4,
         selfieMode: false
       });
 
@@ -291,7 +291,7 @@ export class MotionController {
       const faceSizeRatio = this.smoothedFaceSize > 0 ? Math.abs(faceSize - this.smoothedFaceSize) / this.smoothedFaceSize : 0;
 
       // --- 1. Update X (Horizontal) ---
-      // Smooth interpolation
+      // Smooth interpolation: 70% old, 30% new for better responsiveness
       this.currentHeadX = this.currentHeadX * 0.7 + mirroredX * 0.3;
       
       this.state.bodyX = this.currentHeadX;
@@ -329,16 +329,24 @@ export class MotionController {
       this.state.rawShoulderY = this.smoothedHeadY;
 
       // Jump Trigger
-      // Velocity > 1.2 (Fast upward)
-      // Displacement > 0.04 (Significant distance)
+      // Dynamic thresholds based on face size (distance)
+      // Standard face width ~0.18 in normalized coords
+      const refFaceWidth = 0.18;
+      const currentFaceWidth = typeof bbox?.width === 'number' ? bbox.width : 0.15;
+      // Clamp scale factor between 0.4 (far) and 1.1 (near)
+      const scaleFactor = Math.min(1.1, Math.max(0.4, currentFaceWidth / refFaceWidth));
+      
+      const velocityThreshold = 1.9 * scaleFactor;
+      const displacementThreshold = 0.07 * scaleFactor;
+
       if (faceSizeRatio < 0.35) {
-          if (!this.jumpArmed && dy < 0.03) {
+          if (!this.jumpArmed && dy < 0.03 * scaleFactor) {
               this.jumpArmed = true;
           }
-          const isCandidate = velocity > 1.9 && dy > 0.07;
+          const isCandidate = velocity > velocityThreshold && dy > displacementThreshold;
           this.jumpCandidateFrames = isCandidate ? Math.min(3, this.jumpCandidateFrames + 1) : Math.max(0, this.jumpCandidateFrames - 1);
           if (this.jumpArmed && this.jumpCandidateFrames >= 2 && !this.state.isJumping && now - this.lastJumpTime > this.JUMP_COOLDOWN) {
-              log(1, 'JUMP', `Jump! Vel: ${velocity.toFixed(2)}, Dy: ${dy.toFixed(2)}`);
+              log(1, 'JUMP', `Jump! Vel: ${velocity.toFixed(2)} (Th: ${velocityThreshold.toFixed(2)}), Dy: ${dy.toFixed(2)} (Th: ${displacementThreshold.toFixed(2)}), Scale: ${scaleFactor.toFixed(2)}`);
               this.state.isJumping = true;
               this.lastJumpTime = now;
               this.jumpCandidateFrames = 0;
