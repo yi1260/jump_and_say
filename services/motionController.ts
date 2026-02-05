@@ -290,9 +290,17 @@ export class MotionController {
       }
       const faceSizeRatio = this.smoothedFaceSize > 0 ? Math.abs(faceSize - this.smoothedFaceSize) / this.smoothedFaceSize : 0;
 
+      // Standard face width ~0.18 in normalized coords
+      const refFaceWidth = 0.18;
+      const currentFaceWidth = typeof bbox?.width === 'number' ? bbox.width : 0.15;
+      // Clamp scale factor between 0.2 (far) and 1.2 (near)
+      // Allow it to go lower (0.2) to support further distances (e.g. 3-4 meters)
+      const scaleFactor = Math.min(1.2, Math.max(0.2, currentFaceWidth / refFaceWidth));
+
       // --- 1. Update X (Horizontal) ---
-      // Smooth interpolation: 70% old, 30% new for better responsiveness
-      this.currentHeadX = this.currentHeadX * 0.7 + mirroredX * 0.3;
+      // Smooth interpolation: 60% old, 40% new for better responsiveness
+      // Reduced smoothing from 0.7 to 0.6 to reduce latency
+      this.currentHeadX = this.currentHeadX * 0.6 + mirroredX * 0.4;
       
       this.state.bodyX = this.currentHeadX;
       this.state.rawNoseX = rawFaceX;
@@ -301,10 +309,14 @@ export class MotionController {
       this.smoothedNoseY = this.smoothedNoseY * (1 - noseAlpha) + rawFaceY * noseAlpha;
 
       // Lane Logic
+      // Scale threshold with distance. If far (scale < 1), threshold reduces.
+      // Base threshold 0.12 * scaleFactor
+      const dynamicXThreshold = Math.max(0.04, this.xThreshold * scaleFactor);
+      
       let targetLane = 0;
-      if (this.currentHeadX < (0.5 - this.xThreshold)) {
+      if (this.currentHeadX < (0.5 - dynamicXThreshold)) {
           targetLane = -1; // Left
-      } else if (this.currentHeadX > (0.5 + this.xThreshold)) {
+      } else if (this.currentHeadX > (0.5 + dynamicXThreshold)) {
           targetLane = 1;  // Right
       } else {
           targetLane = 0;  // Center
@@ -329,12 +341,8 @@ export class MotionController {
       this.state.rawShoulderY = this.smoothedHeadY;
 
       // Jump Trigger
-      // Dynamic thresholds based on face size (distance)
-      // Standard face width ~0.18 in normalized coords
-      const refFaceWidth = 0.18;
-      const currentFaceWidth = typeof bbox?.width === 'number' ? bbox.width : 0.15;
-      // Clamp scale factor between 0.4 (far) and 1.1 (near)
-      const scaleFactor = Math.min(1.1, Math.max(0.4, currentFaceWidth / refFaceWidth));
+      // Velocity > 1.2 (Fast upward)
+      // Displacement > 0.04 (Significant distance)
       
       const velocityThreshold = 1.9 * scaleFactor;
       const displacementThreshold = 0.07 * scaleFactor;
