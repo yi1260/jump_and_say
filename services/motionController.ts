@@ -135,8 +135,8 @@ export class MotionController {
       });
 
       faceDetection.setOptions({
-        model: 'full',
-        minDetectionConfidence: 0.4,
+        model: 'short',
+        minDetectionConfidence: 0.5,
         selfieMode: false
       });
 

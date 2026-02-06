@@ -47,8 +47,6 @@ export default defineConfig(({ mode }) => {
               'workbox-*.js',
               '**/assets/kenney/**/*',
               '**/assets/Fredoka/**/*',
-              '**/mediapipe/pose/**/*',
-              '**/mediapipe/pose*',
               '**/mediapipe/face_detection/**/*',
               '**/themes.backup*/**/*',
               '**/assets/kenney/Sprites/**/*',
@@ -103,7 +101,7 @@ export default defineConfig(({ mode }) => {
               // 1. MediaPipe CDN Caching (CDN First, Long-term Cache)
               // Matches jsdelivr, unpkg, and your own CDN for mediapipe files
               {
-                urlPattern: /^https:\/\/(cdn\.jsdelivr\.net|fastly\.jsdelivr\.net|unpkg\.com|cdn\.maskmysheet\.com)\/.*(?:mediapipe|pose).*\.(?:js|wasm|data|tflite)$/i,
+                urlPattern: /^https:\/\/(cdn\.jsdelivr\.net|fastly\.jsdelivr\.net|unpkg\.com|cdn\.maskmysheet\.com)\/.*mediapipe.*\.(?:js|wasm|data|tflite)$/i,
                 handler: 'CacheFirst',
                 options: {
                   cacheName: 'mediapipe-cdn-cache',
