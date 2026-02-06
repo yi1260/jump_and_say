@@ -91,11 +91,12 @@ export default function App() {
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [loadingStatus, setLoadingStatus] = useState('Initializing...');
 
-  const maskScale = 1.1;
-  const maskLeft = clamp(1 - nosePosition.x, 0.05, 0.95);
-  const maskTop = clamp(nosePosition.y, 0.05, 0.95);
-  const maskWidth = Math.max(faceBox.width * maskScale, 0.14);
-  const maskHeight = Math.max(faceBox.height * maskScale, 0.18);
+  const maskScale = 1.35;
+  const maskOffsetX = 0.02;
+  const maskWidth = Math.max(faceBox.width * maskScale, 0.18);
+  const maskHeight = Math.max(faceBox.height * maskScale, 0.24);
+  const maskLeft = clamp(1 - nosePosition.x + maskOffsetX, maskWidth / 2, 1 - maskWidth / 2);
+  const maskTop = clamp(nosePosition.y, maskHeight / 2, 1 - maskHeight / 2);
   
   const setPhase = (newPhase: GamePhase) => {
     phaseRef.current = newPhase;
