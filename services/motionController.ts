@@ -43,6 +43,10 @@ export class MotionController {
     isJumping: false,
     rawNoseX: 0.5,
     rawNoseY: 0.5,
+    rawFaceX: 0.5,
+    rawFaceY: 0.5,
+    rawFaceWidth: 0.18,
+    rawFaceHeight: 0.24,
     rawShoulderY: 0.5,
     smoothedState: {
         x: 0,
@@ -50,6 +54,10 @@ export class MotionController {
         isJumping: false,
         rawNoseX: 0.5,
         rawNoseY: 0.5,
+        rawFaceX: 0.5,
+        rawFaceY: 0.5,
+        rawFaceWidth: 0.18,
+        rawFaceHeight: 0.24,
         rawShoulderY: 0.5
     }
   };
@@ -60,6 +68,10 @@ export class MotionController {
     isJumping: false,
     rawNoseX: 0.5,
     rawNoseY: 0.5,
+    rawFaceX: 0.5,
+    rawFaceY: 0.5,
+    rawFaceWidth: 0.18,
+    rawFaceHeight: 0.24,
     rawShoulderY: 0.5
   };
 
@@ -75,6 +87,10 @@ export class MotionController {
   private smoothedHeadY: number = 0.5;
   private smoothedNoseX: number = 0.5;
   private smoothedNoseY: number = 0.5;
+  private smoothedFaceCenterX: number = 0.5;
+  private smoothedFaceCenterY: number = 0.5;
+  private smoothedFaceWidth: number = 0.18;
+  private smoothedFaceHeight: number = 0.24;
   private smoothedFaceSize: number = 0;
   private jumpCandidateFrames: number = 0;
   private jumpArmed: boolean = true;
@@ -234,6 +250,10 @@ export class MotionController {
     this.smoothedHeadY = 0.5;
     this.smoothedNoseX = 0.5;
     this.smoothedNoseY = 0.5;
+    this.smoothedFaceCenterX = 0.5;
+    this.smoothedFaceCenterY = 0.5;
+    this.smoothedFaceWidth = 0.18;
+    this.smoothedFaceHeight = 0.24;
     this.smoothedFaceSize = 0;
     this.jumpCandidateFrames = 0;
     this.jumpArmed = true;
@@ -241,6 +261,10 @@ export class MotionController {
     this.state.bodyX = 0.5;
     this.state.rawNoseX = 0.5;
     this.state.rawNoseY = 0.5;
+    this.state.rawFaceX = 0.5;
+    this.state.rawFaceY = 0.5;
+    this.state.rawFaceWidth = 0.18;
+    this.state.rawFaceHeight = 0.24;
 
     log(1, 'START', 'Loop starting');
     this.processFrame();
@@ -276,6 +300,10 @@ export class MotionController {
         null;
       const rawFaceX = typeof noseKeypoint?.x === 'number' ? noseKeypoint.x : bbox.xCenter;
       const rawFaceY = typeof noseKeypoint?.y === 'number' ? noseKeypoint.y : bbox.yCenter;
+      const rawFaceCenterX = typeof bbox?.xCenter === 'number' ? bbox.xCenter : rawFaceX;
+      const rawFaceCenterY = typeof bbox?.yCenter === 'number' ? bbox.yCenter : rawFaceY;
+      const rawFaceWidth = typeof bbox?.width === 'number' ? bbox.width : 0.18;
+      const rawFaceHeight = typeof bbox?.height === 'number' ? bbox.height : 0.24;
       const mirroredX = 1 - rawFaceX;
 
       const now = performance.now();
@@ -305,8 +333,16 @@ export class MotionController {
       this.state.bodyX = this.currentHeadX;
       this.state.rawNoseX = rawFaceX;
       this.state.rawNoseY = rawFaceY;
+      this.state.rawFaceX = rawFaceCenterX;
+      this.state.rawFaceY = rawFaceCenterY;
+      this.state.rawFaceWidth = rawFaceWidth;
+      this.state.rawFaceHeight = rawFaceHeight;
       this.smoothedNoseX = this.smoothedNoseX * (1 - noseAlpha) + rawFaceX * noseAlpha;
       this.smoothedNoseY = this.smoothedNoseY * (1 - noseAlpha) + rawFaceY * noseAlpha;
+      this.smoothedFaceCenterX = this.smoothedFaceCenterX * (1 - noseAlpha) + rawFaceCenterX * noseAlpha;
+      this.smoothedFaceCenterY = this.smoothedFaceCenterY * (1 - noseAlpha) + rawFaceCenterY * noseAlpha;
+      this.smoothedFaceWidth = this.smoothedFaceWidth * (1 - noseAlpha) + rawFaceWidth * noseAlpha;
+      this.smoothedFaceHeight = this.smoothedFaceHeight * (1 - noseAlpha) + rawFaceHeight * noseAlpha;
 
       // Lane Logic
       // Scale threshold with distance. If far (scale < 1), threshold reduces.
@@ -374,6 +410,10 @@ export class MotionController {
       this.state.smoothedState.bodyX = this.state.bodyX;
       this.state.smoothedState.rawNoseX = this.smoothedNoseX;
       this.state.smoothedState.rawNoseY = this.smoothedNoseY;
+      this.state.smoothedState.rawFaceX = this.smoothedFaceCenterX;
+      this.state.smoothedState.rawFaceY = this.smoothedFaceCenterY;
+      this.state.smoothedState.rawFaceWidth = this.smoothedFaceWidth;
+      this.state.smoothedState.rawFaceHeight = this.smoothedFaceHeight;
       this.state.smoothedState.x = this.state.x;
       this.state.smoothedState.isJumping = this.state.isJumping;
       

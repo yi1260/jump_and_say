@@ -4,6 +4,10 @@ export interface MotionState {
   isJumping: boolean;
   rawNoseX: number;
   rawNoseY: number;
+  rawFaceX: number; // face box center X (normalized 0..1)
+  rawFaceY: number; // face box center Y (normalized 0..1)
+  rawFaceWidth: number; // face box width (normalized 0..1)
+  rawFaceHeight: number; // face box height (normalized 0..1)
   rawShoulderY: number;
   smoothedState?: MotionState; // Optional recursive reference for smoothed state
 }

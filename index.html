@@ -5,8 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
     <meta name="theme-color" content="#2D1B00" />
     <title>Jump And Say</title>
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link id="favicon" rel="icon" type="image/svg+xml" href="https://cdn.maskmysheet.com/assets/kenney/Vector/Tiles/hud_player_pink.svg" />
+    <script>
+      (function() {
+        var link = document.getElementById('favicon');
+        var img = new Image();
+        img.onerror = function() {
+          link.href = '/assets/kenney/Vector/Tiles/hud_player_pink.svg';
+        };
+        img.src = link.href;
+      })();
+    </script>
     <link rel="manifest" href="/manifest.json" />
     
     <!-- Fonts: 'Fredoka' for that friendly, rounded look -->

@@ -23,6 +23,12 @@ export enum GamePhase {
   PLAYING = 'PLAYING'
 }
 
+interface FaceBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 export default function App() {
   const [score, setScore] = useState(0);
@@ -40,7 +46,9 @@ export default function App() {
   const [themeImagesLoaded, setThemeImagesLoaded] = useState(false);
   const [hasShownEmoji, setHasShownEmoji] = useState(false);
   const [nosePosition, setNosePosition] = useState({ x: 0.5, y: 0.5 });
+  const [faceBox, setFaceBox] = useState<FaceBox>({ x: 0.5, y: 0.5, width: 0.18, height: 0.24 });
   const [isNoseDetected, setIsNoseDetected] = useState(false);
+  const [isMaskAvailable, setIsMaskAvailable] = useState(true);
   const bgmRef = useRef<HTMLAudioElement>(null);
   
   // Loading State
@@ -77,6 +85,7 @@ export default function App() {
   };
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -669,6 +678,18 @@ export default function App() {
                             x: overlayState.rawNoseX,
                             y: overlayState.rawNoseY
                         });
+                        const nextFaceBox: FaceBox = {
+                            x: typeof overlayState.rawFaceX === 'number' ? overlayState.rawFaceX : overlayState.rawNoseX,
+                            y: typeof overlayState.rawFaceY === 'number' ? overlayState.rawFaceY : overlayState.rawNoseY,
+                            width: typeof overlayState.rawFaceWidth === 'number' ? overlayState.rawFaceWidth : 0.18,
+                            height: typeof overlayState.rawFaceHeight === 'number' ? overlayState.rawFaceHeight : 0.24
+                        };
+                        setFaceBox({
+                            x: clamp(nextFaceBox.x, 0.05, 0.95),
+                            y: clamp(nextFaceBox.y, 0.05, 0.95),
+                            width: clamp(nextFaceBox.width, 0.08, 0.7),
+                            height: clamp(nextFaceBox.height, 0.1, 0.8)
+                        });
                         consecutiveMissedFrames = 0;
                     } else {
                         consecutiveMissedFrames++;
@@ -677,6 +698,12 @@ export default function App() {
                             setNosePosition(prev => ({
                                 x: prev.x * (1 - gradualRate) + 0.5 * gradualRate,
                                 y: prev.y * (1 - gradualRate) + 0.5 * gradualRate
+                            }));
+                            setFaceBox(prev => ({
+                                x: prev.x * (1 - gradualRate) + 0.5 * gradualRate,
+                                y: prev.y * (1 - gradualRate) + 0.5 * gradualRate,
+                                width: prev.width * (1 - gradualRate) + 0.18 * gradualRate,
+                                height: prev.height * (1 - gradualRate) + 0.24 * gradualRate
                             }));
                         }
                     }
@@ -837,22 +864,36 @@ export default function App() {
                 <div className="absolute inset-0 pointer-events-none">
                   {/* Soft privacy/clarity mask over live view */}
                   <div className="absolute inset-0 live-view-mask"></div>
-                  {/* Center Dot (Nose/Body Center Visualizer) */}
-                            <div 
-                                className={`absolute w-6 h-4 sm:w-7 sm:h-5 md:w-8 md:h-6 flex items-center justify-center -translate-x-1/2 -translate-y-1/2 ${!isNoseDetected ? 'opacity-0 scale-0' : 'opacity-100 scale-100'} transition-[opacity,transform] duration-300`}
-                                style={{
-                                    left: `${(1 - nosePosition.x) * 100}%`,
-                                    top: `${nosePosition.y * 100}%`
-                                }}
-                            >
-                    <svg className="w-full h-full drop-shadow-[0_1px_2px_rgba(0,0,0,0.6)]" viewBox="0 0 64 40" aria-hidden="true">
-                      <path d="M4 20c0-9 7.2-16 16-16h24c8.8 0 16 7 16 16 0 9-7.2 16-16 16H20C11.2 36 4 29 4 20z" fill="#111827" fillOpacity="0.85" />
-                      <ellipse cx="22" cy="20" rx="7" ry="6" fill="#E5E7EB" fillOpacity="0.9" />
-                      <ellipse cx="42" cy="20" rx="7" ry="6" fill="#E5E7EB" fillOpacity="0.9" />
-                      <circle cx="22" cy="20" r="2.2" fill="#111827" fillOpacity="0.9" />
-                      <circle cx="42" cy="20" r="2.2" fill="#111827" fillOpacity="0.9" />
-                    </svg>
-                  </div>
+                  {/* Face Mask Overlay */}
+                  {isMaskAvailable ? (
+                    <div 
+                      className={`absolute flex items-center justify-center -translate-x-1/2 -translate-y-1/2 ${!isNoseDetected ? 'opacity-0 scale-0' : 'opacity-100 scale-100'} transition-[opacity,transform] duration-200`}
+                      style={{
+                        left: `${(1 - faceBox.x) * 100}%`,
+                        top: `${faceBox.y * 100}%`,
+                        width: `${faceBox.width * 120}%`,
+                        height: `${faceBox.height * 120}%`
+                      }}
+                    >
+                      <img
+                        src={getR2AssetUrl('assets/kenney/Vector/Tiles/hud_player_pink.svg')}
+                        alt="Face mask"
+                        className="w-full h-full object-cover drop-shadow-[0_1px_2px_rgba(0,0,0,0.6)]"
+                        draggable={false}
+                        onError={() => setIsMaskAvailable(false)}
+                      />
+                    </div>
+                  ) : (
+                    <div 
+                      className={`absolute w-2 h-2 sm:w-3 sm:h-3 md:w-4 md:h-4 flex items-center justify-center -translate-x-1/2 -translate-y-1/2 ${!isNoseDetected ? 'opacity-0 scale-0' : 'opacity-100 scale-100'} transition-[opacity,transform] duration-300`}
+                      style={{
+                        left: `${(1 - nosePosition.x) * 100}%`,
+                        top: `${nosePosition.y * 100}%`
+                      }}
+                    >
+                      <div className="w-full h-full rounded-full bg-red-500 drop-shadow-lg border-2 border-red-600"></div>
+                    </div>
+                  )}
                 </div>
              </div>
            <div className="mt-0.5 text-center text-[6px] md:text-[10px] font-black tracking-widest uppercase">Live View</div>
