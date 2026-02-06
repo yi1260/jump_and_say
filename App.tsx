@@ -91,10 +91,11 @@ export default function App() {
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [loadingStatus, setLoadingStatus] = useState('Initializing...');
 
-  const maskOffsetX = faceBox.width * 0.12;
   const maskScale = 1.1;
-  const maskLeft = clamp(1 - faceBox.x + maskOffsetX, 0.05, 0.95);
-  const maskTop = clamp(faceBox.y, 0.05, 0.95);
+  const maskLeft = clamp(1 - nosePosition.x, 0.05, 0.95);
+  const maskTop = clamp(nosePosition.y, 0.05, 0.95);
+  const maskWidth = Math.max(faceBox.width * maskScale, 0.14);
+  const maskHeight = Math.max(faceBox.height * maskScale, 0.18);
   
   const setPhase = (newPhase: GamePhase) => {
     phaseRef.current = newPhase;
@@ -910,8 +911,8 @@ export default function App() {
                     style={{
                       left: `${maskLeft * 100}%`,
                       top: `${maskTop * 100}%`,
-                      width: `${faceBox.width * maskScale * 100}%`,
-                      height: `${faceBox.height * maskScale * 100}%`
+                      width: `${maskWidth * 100}%`,
+                      height: `${maskHeight * 100}%`
                     }}
                   >
                     <FaceMaskSvg />
