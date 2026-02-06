@@ -32,6 +32,15 @@ export class MotionController {
   private requestRef: number | null = null;
   private lastFrameTime: number = 0;
   private readonly FRAME_MIN_TIME = 1000 / 30; // 30 FPS cap
+  private missedDetections: number = 0;
+  private readonly MAX_MISSED_DETECTIONS = 12;
+  private currentModel: 'short' | 'full' = 'short';
+  private lastModelSwitchAt: number = 0;
+  private fullModeUntil: number = 0;
+  private consecutiveDetections: number = 0;
+  private modelSwitchInProgress: boolean = false;
+  private readonly FULL_MODE_DURATION = 6000;
+  private readonly MIN_MODEL_SWITCH_INTERVAL = 2000;
 
   // Thresholds for Face Motion
   // X: 0.5 is center. > 0.62 is Right, < 0.38 is Left. (Modified for better sensitivity)
@@ -151,8 +160,8 @@ export class MotionController {
       });
 
       faceDetection.setOptions({
-        model: 'short',
-        minDetectionConfidence: 0.5,
+        model: this.currentModel,
+        minDetectionConfidence: 0.4,
         selfieMode: false
       });
 
@@ -244,6 +253,12 @@ export class MotionController {
     this.isRunning = true;
     this.isStarted = true;
     this.isNoseDetected = false;
+    this.missedDetections = 0;
+    this.consecutiveDetections = 0;
+    this.currentModel = 'short';
+    this.lastModelSwitchAt = 0;
+    this.fullModeUntil = 0;
+    this.modelSwitchInProgress = false;
 
     // Reset state
     this.currentHeadX = 0.5;
@@ -282,13 +297,24 @@ export class MotionController {
   isCalibrating() { return false; }
 
   private onResults(results: any) {
+      const now = performance.now();
       if (!results.detections || results.detections.length === 0) {
-          this.isNoseDetected = false;
+          this.missedDetections += 1;
           this.jumpCandidateFrames = 0;
+          this.consecutiveDetections = 0;
+          if (this.missedDetections > this.MAX_MISSED_DETECTIONS) {
+              this.isNoseDetected = false;
+              if (this.currentModel === 'short' && now > this.fullModeUntil) {
+                  this.requestModelSwitch('full');
+                  this.fullModeUntil = now + this.FULL_MODE_DURATION;
+              }
+          }
           return;
       }
 
       this.isNoseDetected = true;
+      this.missedDetections = 0;
+      this.consecutiveDetections = Math.min(60, this.consecutiveDetections + 1);
       const detection = results.detections[0];
       const bbox = detection.boundingBox; // { xCenter, yCenter, width, height }
       const keypoints: Array<{ x?: number; y?: number; name?: string }> = Array.isArray(detection.keypoints)
@@ -306,7 +332,6 @@ export class MotionController {
       const rawFaceHeight = typeof bbox?.height === 'number' ? bbox.height : 0.24;
       const mirroredX = 1 - rawFaceX;
 
-      const now = performance.now();
       const elapsed = now - this.lastFrameTime;
       const dtSec = Math.max(0.016, elapsed > 0 && elapsed < 500 ? elapsed / 1000 : 0.033);
       const noseAlpha = 1 - Math.exp(-dtSec / 0.08);
@@ -419,6 +444,29 @@ export class MotionController {
       
       this.smoothedState = this.state.smoothedState;
       this.lastFrameTime = now;
+
+      if (this.currentModel === 'full' && now > this.fullModeUntil && this.consecutiveDetections >= 6) {
+          this.requestModelSwitch('short');
+      }
+  }
+
+  private requestModelSwitch(target: 'short' | 'full') {
+      if (!this.faceDetector) return;
+      if (this.currentModel === target) return;
+      if (this.modelSwitchInProgress) return;
+      const now = performance.now();
+      if (now - this.lastModelSwitchAt < this.MIN_MODEL_SWITCH_INTERVAL) return;
+      this.modelSwitchInProgress = true;
+      try {
+          this.faceDetector.setOptions({ model: target });
+          this.currentModel = target;
+          this.lastModelSwitchAt = now;
+          log(1, 'INIT', `Face Detection model switched to ${target}`);
+      } catch (error) {
+          log(2, 'INIT', 'Face Detection model switch failed', error);
+      } finally {
+          this.modelSwitchInProgress = false;
+      }
   }
 
   private async processFrame() {

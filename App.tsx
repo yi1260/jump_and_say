@@ -30,6 +30,42 @@ interface FaceBox {
   height: number;
 }
 
+const FaceMaskSvg: React.FC = () => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 64 64"
+    className="w-full h-full drop-shadow-[0_1px_2px_rgba(0,0,0,0.6)]"
+    aria-hidden="true"
+  >
+    <g>
+      <path
+        fill="#FFBDD1"
+        d="M52 32 Q52 40.3 46.15 46.15 40.3 52 32 52 23.75 52 17.9 46.15 12 40.3 12 32 12 23.75 17.9 17.9 23.75 12 32 12 40.3 12 46.15 17.9 52 23.75 52 32 M32 14 Q24.6 14 19.35 19.3 L19.3 19.35 Q14 24.6 14 32 14 39.45 19.3 44.75 L19.35 44.75 Q24.6 50 32 50 39.45 50 44.75 44.75 50 39.45 50 32 50 24.6 44.75 19.35 L44.75 19.3 Q39.45 14 32 14"
+      />
+      <path
+        fill="#FF8AAE"
+        d="M32 14 Q39.45 14 44.75 19.3 L44.75 19.35 Q50 24.6 50 32 50 39.45 44.75 44.75 39.45 50 32 50 24.6 50 19.35 44.75 L19.3 44.75 Q14 39.45 14 32 14 24.6 19.3 19.35 L19.35 19.3 Q24.6 14 32 14"
+      />
+      <path
+        fill="#913F58"
+        d="M32 8 Q41.95 8 49 15.1 56 22.1 56 32 56 41.95 49 49 41.95 56 32 56 22.1 56 15.1 49 8 41.95 8 32 8 22.1 15.05 15.1 L15.1 15.05 Q22.1 8 32 8 M52 32 Q52 23.75 46.15 17.9 40.3 12 32 12 23.75 12 17.9 17.9 12 23.75 12 32 12 40.3 17.9 46.15 23.75 52 32 52 40.3 52 46.15 46.15 52 40.3 52 32"
+      />
+      <path
+        fill="#FFFFFF"
+        d="M40 29 Q40 32.3 37.6 34.6 35.35 37 32 37 28.6 37 26.35 34.6 24 32.3 24 29 24 25.65 26.35 23.25 28.6 21 32 21 35.35 21 37.6 23.25 40 25.65 40 29 M36 29 Q36 27.3 34.8 26.1 33.65 25 32 25 30.35 25 29.2 26.1 28 27.3 28 29 28 30.65 29.2 31.8 30.35 33 32 33 33.65 33 34.8 31.8 36 30.65 36 29"
+      />
+      <path
+        fill="#AF4D62"
+        d="M36 29 Q36 30.65 34.8 31.8 33.65 33 32 33 30.35 33 29.2 31.8 28 30.65 28 29 28 27.3 29.2 26.1 30.35 25 32 25 33.65 25 34.8 26.1 36 27.3 36 29"
+      />
+      <path
+        fill="#AF4D62"
+        d="M35.25 42.2 Q33.9 43.5 32 43.5 30.1 43.5 28.65 42.15 L28.65 42.1 28.25 41.65 Q27.95 41.3 28 40.9 28.05 40.5 28.4 40.25 28.7 39.95 29.1 40 29.5 40.05 29.8 40.4 L30.05 40.7 Q30.9 41.5 32 41.5 33.15 41.5 33.95 40.7 L34.05 40.6 34.15 40.5 Q34.35 40.1 34.75 40.05 L35.5 40.15 36 40.75 35.85 41.55 35.25 42.2"
+      />
+    </g>
+  </svg>
+);
+
 export default function App() {
   const [score, setScore] = useState(0);
   const [totalQuestions, setTotalQuestions] = useState(0);
@@ -48,12 +84,17 @@ export default function App() {
   const [nosePosition, setNosePosition] = useState({ x: 0.5, y: 0.5 });
   const [faceBox, setFaceBox] = useState<FaceBox>({ x: 0.5, y: 0.5, width: 0.18, height: 0.24 });
   const [isNoseDetected, setIsNoseDetected] = useState(false);
-  const [isMaskAvailable, setIsMaskAvailable] = useState(true);
   const bgmRef = useRef<HTMLAudioElement>(null);
+  const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
   
   // Loading State
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [loadingStatus, setLoadingStatus] = useState('Initializing...');
+
+  const maskOffsetX = faceBox.width * 0.12;
+  const maskScale = 1.1;
+  const maskLeft = clamp(1 - faceBox.x + maskOffsetX, 0.05, 0.95);
+  const maskTop = clamp(faceBox.y, 0.05, 0.95);
   
   const setPhase = (newPhase: GamePhase) => {
     phaseRef.current = newPhase;
@@ -85,7 +126,6 @@ export default function App() {
   };
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -865,35 +905,17 @@ export default function App() {
                   {/* Soft privacy/clarity mask over live view */}
                   <div className="absolute inset-0 live-view-mask"></div>
                   {/* Face Mask Overlay */}
-                  {isMaskAvailable ? (
-                    <div 
-                      className={`absolute flex items-center justify-center -translate-x-1/2 -translate-y-1/2 ${!isNoseDetected ? 'opacity-0 scale-0' : 'opacity-100 scale-100'} transition-[opacity,transform] duration-200`}
-                      style={{
-                        left: `${(1 - faceBox.x) * 100}%`,
-                        top: `${faceBox.y * 100}%`,
-                        width: `${faceBox.width * 120}%`,
-                        height: `${faceBox.height * 120}%`
-                      }}
-                    >
-                      <img
-                        src={getR2AssetUrl('assets/kenney/Vector/Tiles/hud_player_pink.svg')}
-                        alt="Face mask"
-                        className="w-full h-full object-cover drop-shadow-[0_1px_2px_rgba(0,0,0,0.6)]"
-                        draggable={false}
-                        onError={() => setIsMaskAvailable(false)}
-                      />
-                    </div>
-                  ) : (
-                    <div 
-                      className={`absolute w-2 h-2 sm:w-3 sm:h-3 md:w-4 md:h-4 flex items-center justify-center -translate-x-1/2 -translate-y-1/2 ${!isNoseDetected ? 'opacity-0 scale-0' : 'opacity-100 scale-100'} transition-[opacity,transform] duration-300`}
-                      style={{
-                        left: `${(1 - nosePosition.x) * 100}%`,
-                        top: `${nosePosition.y * 100}%`
-                      }}
-                    >
-                      <div className="w-full h-full rounded-full bg-red-500 drop-shadow-lg border-2 border-red-600"></div>
-                    </div>
-                  )}
+                  <div 
+                    className={`absolute flex items-center justify-center -translate-x-1/2 -translate-y-1/2 ${!isNoseDetected ? 'opacity-0 scale-0' : 'opacity-100 scale-100'} transition-[opacity,transform] duration-200`}
+                    style={{
+                      left: `${maskLeft * 100}%`,
+                      top: `${maskTop * 100}%`,
+                      width: `${faceBox.width * maskScale * 100}%`,
+                      height: `${faceBox.height * maskScale * 100}%`
+                    }}
+                  >
+                    <FaceMaskSvg />
+                  </div>
                 </div>
              </div>
            <div className="mt-0.5 text-center text-[6px] md:text-[10px] font-black tracking-widest uppercase">Live View</div>
