@@ -820,7 +820,9 @@ export default function App() {
         
     } catch (e) {
         console.error("Loading failed:", e);
-        setPhase(GamePhase.MENU);
+        setLoadingStatus('主题资源加载失败，请检查网络后重试。');
+        setLoadingProgress(0);
+        setPhase(GamePhase.LOADING);
     }
   };
 

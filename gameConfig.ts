@@ -330,12 +330,22 @@ export async function preloadThemeImagesStrict(
   console.log(`[preloadThemeImagesStrict] Preloading ${theme.questions.length} images for theme: ${themeId}`);
 
   const BATCH_SIZE = 4;
-  const RETRY_DELAY_MS = 1200;
-  const TIMEOUT_MS = 20000;
+  const RETRY_DELAY_MS = 1500;
+  const TIMEOUT_MS = 30000;
+  const MAX_RETRIES = 6;
 
-  const loadWithRetryForever = async (imgUrl: string, label: string): Promise<void> => {
+  const getCdnLabel = (imgUrl: string): string => {
+    try {
+      return new URL(imgUrl).origin;
+    } catch {
+      return imgUrl;
+    }
+  };
+
+  const loadWithRetryLimited = async (imgUrl: string, label: string): Promise<void> => {
+    const cdnLabel = getCdnLabel(imgUrl);
     let attempt = 0;
-    while (true) {
+    while (attempt <= MAX_RETRIES) {
       attempt += 1;
       try {
         await new Promise<void>((resolve, reject) => {
@@ -358,8 +368,11 @@ export async function preloadThemeImagesStrict(
         });
         return;
       } catch (error) {
-        onStatus?.(`Theme loading slow, retrying... (${label})`);
-        console.warn(`[preloadThemeImagesStrict] Retry ${attempt} for ${label}`, error);
+        if (attempt > MAX_RETRIES) {
+          throw new Error(`[preloadThemeImagesStrict] Failed after ${MAX_RETRIES} retries: ${label} (${imgUrl})`);
+        }
+        onStatus?.(`Theme loading slow, retrying... (${label}) ${cdnLabel}`);
+        console.warn(`[preloadThemeImagesStrict] Retry ${attempt}/${MAX_RETRIES} for ${label} @ ${cdnLabel}`, { imgUrl, error });
         await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
       }
     }
@@ -374,7 +387,7 @@ export async function preloadThemeImagesStrict(
         const imageName = q.image.replace(/\.(png|jpg|jpeg)$/i, '.webp');
         const imgUrl = getR2ImageUrl(imageName);
         const label = `${globalIndex + 1}/${questions.length}`;
-        return loadWithRetryForever(imgUrl, label);
+        return loadWithRetryLimited(imgUrl, label);
       });
       await Promise.all(batchPromises);
     }
