@@ -104,13 +104,13 @@ export default defineConfig(({ mode }) => {
                 urlPattern: /^https:\/\/(cdn\.jsdelivr\.net|fastly\.jsdelivr\.net|unpkg\.com|cdn\.maskmysheet\.com)\/.*mediapipe.*\.(?:js|wasm|data|tflite)$/i,
                 handler: 'CacheFirst',
                 options: {
-                  cacheName: 'mediapipe-cdn-cache',
+                  cacheName: 'mediapipe-cdn-cache-v2',
                   expiration: {
                     maxEntries: 20,
                     maxAgeSeconds: 60 * 60 * 24 * 365 // 1 year
                   },
                   cacheableResponse: {
-                    statuses: [0, 200]
+                    statuses: [200]
                   }
                 }
               },
@@ -119,13 +119,13 @@ export default defineConfig(({ mode }) => {
                 urlPattern: /^https:\/\/cdn\.maskmysheet\.com\/raz_aa\/.*/i,
                 handler: 'CacheFirst',
                 options: {
-                  cacheName: 'raz-aa-cdn-cache',
+                  cacheName: 'raz-aa-cdn-cache-v2',
                   expiration: {
                     maxEntries: 1000,
                     maxAgeSeconds: 60 * 60 * 24 * 365 // 1 year
                   },
                   cacheableResponse: {
-                    statuses: [0, 200]
+                    statuses: [200]
                   }
                 }
               },
@@ -135,13 +135,13 @@ export default defineConfig(({ mode }) => {
                 urlPattern: /^https:\/\/cdn\.maskmysheet\.com\/assets\/.*/i,
                 handler: 'CacheFirst',
                 options: {
-                  cacheName: 'game-assets-cdn-cache',
+                  cacheName: 'game-assets-cdn-cache-v2',
                   expiration: {
                     maxEntries: 500,
                     maxAgeSeconds: 60 * 60 * 24 * 365 // 1 year
                   },
                   cacheableResponse: {
-                    statuses: [0, 200]
+                    statuses: [200]
                   }
                 }
               },
