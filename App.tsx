@@ -272,6 +272,16 @@ export default function App() {
         border-radius: 20px;
         box-shadow: 6px 6px 0px #333333;
       }
+
+      .live-view-video {
+        filter: blur(1.2px) brightness(0.92) contrast(0.92) saturate(0.9);
+      }
+
+      .live-view-mask {
+        background: linear-gradient(135deg, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0.08));
+        -webkit-backdrop-filter: blur(1.5px);
+        backdrop-filter: blur(1.5px);
+      }
       
       #bgm-audio {
         display: none;
@@ -818,22 +828,30 @@ export default function App() {
            <div className="w-20 h-15 sm:w-24 sm:h-18 md:w-32 md:h-24 overflow-hidden relative bg-kenney-dark/10 rounded-lg md:rounded-xl">
                <video 
                  ref={videoRef} 
-                 className="w-full h-full object-cover transform scale-x-[-1]" 
+                 className="w-full h-full object-cover transform scale-x-[-1] live-view-video" 
                  playsInline 
                  muted 
                  autoPlay 
                  webkit-playsinline="true"
                />
                 <div className="absolute inset-0 pointer-events-none">
+                  {/* Soft privacy/clarity mask over live view */}
+                  <div className="absolute inset-0 live-view-mask"></div>
                   {/* Center Dot (Nose/Body Center Visualizer) */}
                             <div 
-                                className={`absolute w-2 h-2 sm:w-3 sm:h-3 md:w-4 md:h-4 flex items-center justify-center -translate-x-1/2 -translate-y-1/2 ${!isNoseDetected ? 'opacity-0 scale-0' : 'opacity-100 scale-100'} transition-[opacity,transform] duration-300`}
+                                className={`absolute w-6 h-4 sm:w-7 sm:h-5 md:w-8 md:h-6 flex items-center justify-center -translate-x-1/2 -translate-y-1/2 ${!isNoseDetected ? 'opacity-0 scale-0' : 'opacity-100 scale-100'} transition-[opacity,transform] duration-300`}
                                 style={{
                                     left: `${(1 - nosePosition.x) * 100}%`,
                                     top: `${nosePosition.y * 100}%`
                                 }}
                             >
-                    <div className="w-full h-full rounded-full bg-red-500 drop-shadow-lg border-2 border-red-600"></div>
+                    <svg className="w-full h-full drop-shadow-[0_1px_2px_rgba(0,0,0,0.6)]" viewBox="0 0 64 40" aria-hidden="true">
+                      <path d="M4 20c0-9 7.2-16 16-16h24c8.8 0 16 7 16 16 0 9-7.2 16-16 16H20C11.2 36 4 29 4 20z" fill="#111827" fillOpacity="0.85" />
+                      <ellipse cx="22" cy="20" rx="7" ry="6" fill="#E5E7EB" fillOpacity="0.9" />
+                      <ellipse cx="42" cy="20" rx="7" ry="6" fill="#E5E7EB" fillOpacity="0.9" />
+                      <circle cx="22" cy="20" r="2.2" fill="#111827" fillOpacity="0.9" />
+                      <circle cx="42" cy="20" r="2.2" fill="#111827" fillOpacity="0.9" />
+                    </svg>
                   </div>
                 </div>
              </div>
