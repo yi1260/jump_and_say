@@ -309,6 +309,83 @@ export async function preloadThemeImages(themeId: string): Promise<void> {
   }
 }
 
+export async function preloadThemeImagesStrict(
+  themeId: string,
+  onStatus?: (status: string) => void
+): Promise<void> {
+  if (!cachedThemes) {
+    await loadThemes();
+  }
+
+  const theme = cachedThemes?.find(t => t.id === themeId);
+  if (!theme || !theme.questions || theme.questions.length === 0) {
+    throw new Error(`[preloadThemeImagesStrict] Theme not found or has no questions: ${themeId}`);
+  }
+
+  isHighPriorityLoading = true;
+
+  const themeUrls = new Set(theme.questions.map(q => getR2ImageUrl(q.image)));
+  globalPreloadQueue = globalPreloadQueue.filter(item => !themeUrls.has(item.url));
+
+  console.log(`[preloadThemeImagesStrict] Preloading ${theme.questions.length} images for theme: ${themeId}`);
+
+  const BATCH_SIZE = 4;
+  const RETRY_DELAY_MS = 1200;
+  const TIMEOUT_MS = 20000;
+
+  const loadWithRetryForever = async (imgUrl: string, label: string): Promise<void> => {
+    let attempt = 0;
+    while (true) {
+      attempt += 1;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          const timeout = setTimeout(() => {
+            img.src = '';
+            reject(new Error('Timeout'));
+          }, TIMEOUT_MS);
+
+          img.onload = () => {
+            clearTimeout(timeout);
+            resolve();
+          };
+          img.onerror = () => {
+            clearTimeout(timeout);
+            reject(new Error('Load error'));
+          };
+          img.src = imgUrl;
+        });
+        return;
+      } catch (error) {
+        onStatus?.(`Theme loading slow, retrying... (${label})`);
+        console.warn(`[preloadThemeImagesStrict] Retry ${attempt} for ${label}`, error);
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+      }
+    }
+  };
+
+  try {
+    const questions = theme.questions;
+    for (let i = 0; i < questions.length; i += BATCH_SIZE) {
+      const batch = questions.slice(i, i + BATCH_SIZE);
+      const batchPromises = batch.map((q, batchIndex) => {
+        const globalIndex = i + batchIndex;
+        const imageName = q.image.replace(/\.(png|jpg|jpeg)$/i, '.webp');
+        const imgUrl = getR2ImageUrl(imageName);
+        const label = `${globalIndex + 1}/${questions.length}`;
+        return loadWithRetryForever(imgUrl, label);
+      });
+      await Promise.all(batchPromises);
+    }
+  } finally {
+    isHighPriorityLoading = false;
+    if (globalPreloadQueue.length > 0) {
+      processPreloadQueue();
+    }
+  }
+}
+
 export function getThemeImagePath(themeId: string, imageName: string): string {
   // Force .webp extension
   const finalImageName = imageName.replace(/\.(png|jpg|jpeg)$/i, '.webp');

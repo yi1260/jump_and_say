@@ -1,4 +1,4 @@
-import { preloadThemeImages } from '@/gameConfig';
+import { preloadThemeImagesStrict } from '@/gameConfig';
 import { getR2AssetUrl, getR2ThemesListCdnUrl, getR2ThemesListUrl } from '@/src/config/r2Config';
 import { ThemeId } from '@/types';
 import { motionController } from './motionController';
@@ -37,6 +37,10 @@ export async function preloadAllGameAssets(
   
   const updateProgress = (status: string) => {
     loadedCount++;
+    const progress = Math.min(100, Math.round((loadedCount / totalItems) * 100));
+    onProgress(progress, status);
+  };
+  const updateStatus = (status: string) => {
     const progress = Math.min(100, Math.round((loadedCount / totalItems) * 100));
     onProgress(progress, status);
   };
@@ -135,8 +139,9 @@ export async function preloadAllGameAssets(
     const firstThemeId = selectedThemes[0];
     const themePromise = (async () => {
         if (firstThemeId) {
-            await preloadThemeImages(firstThemeId);
-            updateProgress('Loading Theme...');
+            updateStatus('Loading Theme...');
+            await preloadThemeImagesStrict(firstThemeId, updateStatus);
+            updateProgress('Theme Ready');
         }
     })();
 
@@ -146,6 +151,6 @@ export async function preloadAllGameAssets(
     
   } catch (error) {
     console.error('Asset loading failed:', error);
-    onProgress(100, 'Starting Game...');
+    throw error;
   }
 }

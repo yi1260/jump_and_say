@@ -387,16 +387,16 @@ export class MotionController {
       // Velocity > 1.2 (Fast upward)
       // Displacement > 0.04 (Significant distance)
       
-      const velocityThreshold = 1.9 * scaleFactor;
-      const displacementThreshold = 0.07 * scaleFactor;
+      const velocityThreshold = 2.4 * scaleFactor;
+      const displacementThreshold = 0.09 * scaleFactor;
 
       if (faceSizeRatio < 0.35) {
-          if (!this.jumpArmed && dy < 0.03 * scaleFactor) {
+          if (!this.jumpArmed && dy < 0.02 * scaleFactor) {
               this.jumpArmed = true;
           }
           const isCandidate = velocity > velocityThreshold && dy > displacementThreshold;
-          this.jumpCandidateFrames = isCandidate ? Math.min(3, this.jumpCandidateFrames + 1) : Math.max(0, this.jumpCandidateFrames - 1);
-          if (this.jumpArmed && this.jumpCandidateFrames >= 2 && !this.state.isJumping && now - this.lastJumpTime > this.JUMP_COOLDOWN) {
+          this.jumpCandidateFrames = isCandidate ? Math.min(4, this.jumpCandidateFrames + 1) : Math.max(0, this.jumpCandidateFrames - 1);
+          if (this.jumpArmed && this.jumpCandidateFrames >= 3 && !this.state.isJumping && now - this.lastJumpTime > this.JUMP_COOLDOWN) {
               log(1, 'JUMP', `Jump! Vel: ${velocity.toFixed(2)} (Th: ${velocityThreshold.toFixed(2)}), Dy: ${dy.toFixed(2)} (Th: ${displacementThreshold.toFixed(2)}), Scale: ${scaleFactor.toFixed(2)}`);
               this.state.isJumping = true;
               this.lastJumpTime = now;
