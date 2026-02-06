@@ -371,7 +371,7 @@ export async function preloadThemeImagesStrict(
         if (attempt > MAX_RETRIES) {
           throw new Error(`[preloadThemeImagesStrict] Failed after ${MAX_RETRIES} retries: ${label} (${imgUrl})`);
         }
-        onStatus?.(`Theme loading slow, retrying... (${label}) ${cdnLabel}`);
+        onStatus?.(`Theme loading slow, retrying... (${label})`);
         console.warn(`[preloadThemeImagesStrict] Retry ${attempt}/${MAX_RETRIES} for ${label} @ ${cdnLabel}`, { imgUrl, error });
         await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
       }
