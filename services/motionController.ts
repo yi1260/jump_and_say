@@ -97,6 +97,12 @@ export class MotionController {
   private jumpCandidateFrames: number = 0;
   private jumpArmed: boolean = true;
   
+  // Optical Flow vars
+  private prevFrameData: Uint8ClampedArray | null = null;
+  private opticalFlowY: number = 0;
+  private opticalFlowCanvas: HTMLCanvasElement | null = null;
+  private opticalFlowContext: CanvasRenderingContext2D | null = null;
+
   // Jump Logic
   private lastJumpTime: number = 0;
   private readonly JUMP_COOLDOWN = 800;
@@ -284,6 +290,85 @@ export class MotionController {
   getCalibrationProgress() { return 1; }
   isCalibrating() { return false; }
 
+  // Calculate simple optical flow for vertical movement
+  private calculateOpticalFlow(video: HTMLVideoElement, bbox: any) {
+    if (!this.opticalFlowCanvas) {
+        this.opticalFlowCanvas = document.createElement('canvas');
+        this.opticalFlowCanvas.width = 64; // Small resolution for performance
+        this.opticalFlowCanvas.height = 48;
+        this.opticalFlowContext = this.opticalFlowCanvas.getContext('2d', { willReadFrequently: true });
+    }
+
+    if (!this.opticalFlowContext) return 0;
+
+    // Draw current frame to small canvas
+    this.opticalFlowContext.drawImage(video, 0, 0, 64, 48);
+    const frameData = this.opticalFlowContext.getImageData(0, 0, 64, 48).data;
+
+    let totalDy = 0;
+    let validPoints = 0;
+
+    if (this.prevFrameData) {
+        // Calculate vertical flow only in the center region (where the person is likely to be)
+        // Skip edges to avoid background noise
+        const width = 64;
+        const height = 48;
+        const marginX = 16;
+        const marginY = 8;
+        
+        // Simple block matching or brightness difference gradient
+        // Here we use a very simplified gradient approach:
+        // If pixel(x, y) is similar to pixel(x, y+1) in prev frame -> moving up
+        
+        // Actually, a simpler approach for "Jump" detection in games:
+        // Just check if the whole image shifted up.
+        // We compare row R in current frame with row R+1 in prev frame.
+        
+        // Let's implement a sparse Lucas-Kanade like check on a grid
+        const step = 4;
+        for (let y = marginY; y < height - marginY - step; y += step) {
+            for (let x = marginX; x < width - marginX; x += step) {
+                const idx = (y * width + x) * 4;
+                const brightness = (frameData[idx] + frameData[idx+1] + frameData[idx+2]) / 3;
+                
+                // Search for best match in vertical neighborhood in previous frame
+                let bestDy = 0;
+                let minDiff = 255;
+                
+                // Search range: -4 to +4 pixels vertically
+                for (let dy = -4; dy <= 4; dy++) {
+                    const searchY = y + dy;
+                    if (searchY < 0 || searchY >= height) continue;
+                    
+                    const prevIdx = (searchY * width + x) * 4;
+                    const prevBrightness = (this.prevFrameData[prevIdx] + this.prevFrameData[prevIdx+1] + this.prevFrameData[prevIdx+2]) / 3;
+                    
+                    const diff = Math.abs(brightness - prevBrightness);
+                    if (diff < minDiff) {
+                        minDiff = diff;
+                        bestDy = dy;
+                    }
+                }
+                
+                // If we found a good match
+                if (minDiff < 30) {
+                   // If best match in prev frame was at y+dy, it means pixels moved by -dy
+                   // Example: Current pixel at Y=10 matches Prev pixel at Y=12 (dy=2)
+                   // It means the object moved UP by 2 pixels (from 12 to 10)
+                   // So movement is -bestDy
+                   totalDy += (-bestDy);
+                   validPoints++;
+                }
+            }
+        }
+    }
+
+    // Store for next frame
+    this.prevFrameData = new Uint8ClampedArray(frameData);
+
+    return validPoints > 0 ? totalDy / validPoints : 0;
+  }
+
   private onResults(results: any) {
       const now = performance.now();
       if (!results.detections || results.detections.length === 0) {
@@ -383,6 +468,13 @@ export class MotionController {
       this.smoothedHeadY = this.smoothedHeadY * 0.96 + rawFaceY * 0.04;
       this.state.rawShoulderY = this.smoothedHeadY;
 
+      // Optical Flow Check
+      // Calculate optical flow movement (positive = UP)
+      // This runs on every frame but only when results are available to save power
+      const opticalFlowMovement = this.video ? this.calculateOpticalFlow(this.video, bbox) : 0;
+      // Smooth the flow value
+      this.opticalFlowY = this.opticalFlowY * 0.5 + opticalFlowMovement * 0.5;
+
       // Jump Trigger
       // Velocity > 1.2 (Fast upward)
       // Displacement > 0.04 (Significant distance)
@@ -391,21 +483,40 @@ export class MotionController {
       const displacementThreshold = 0.09 * scaleFactor;
 
       // Robustness Improvements:
-       // 1. Stricter Size Stability: Reduced from 0.35 to 0.25 to prevent false positives during fast forward/backward movement
-       // 2. Forward Movement Suppression: If face is significantly larger than smoothed average (>15%) AND moving up, 
-       //    it's likely the user zooming in (perspective shift), not jumping.
-       const isZoomingIn = faceSize > this.smoothedFaceSize * 1.15;
-       const isMovingUp = dy > 0;
+      // 1. Stricter Size Stability: Reduced from 0.35 to 0.25 to prevent false positives during fast forward/backward movement
+      // 2. Forward Movement Suppression: If face is significantly larger than smoothed average (>15%) AND moving up, 
+      //    it's likely the user zooming in (perspective shift), not jumping.
+      // 3. Optical Flow Confirmation: Require at least some upward pixel movement (> 0.2 pixels avg) to confirm jump
       
-      // Only allow jump if size is stable AND we are not just zooming in
+      const isZoomingIn = faceSize > this.smoothedFaceSize * 1.15;
+      const isMovingUp = dy > 0;
+      const isOpticalFlowUp = this.opticalFlowY > 0.2; // Threshold for upward pixel movement
+      
+      // Only allow jump if size is stable AND we are not just zooming in AND optical flow agrees (or is neutral)
       if (faceSizeRatio < 0.25 && !(isZoomingIn && isMovingUp)) {
           if (!this.jumpArmed && dy < 0.02 * scaleFactor) {
               this.jumpArmed = true;
           }
-          const isCandidate = velocity > velocityThreshold && dy > displacementThreshold;
+          
+          // Primary check: Face velocity & displacement
+          const isFaceJump = velocity > velocityThreshold && dy > displacementThreshold;
+          
+          // Secondary check: Optical flow must NOT be strongly downward (which would contradict upward face movement)
+          // Ideally it should be positive. We accept it if it's > 0.2
+          const isFlowValid = isOpticalFlowUp;
+          
+          // Combine checks:
+          // We trust Face Detection mostly, but use Optical Flow to VETO false positives.
+          // However, if Face Detection is VERY strong (velocity > threshold * 1.5), we might skip flow check to be responsive.
+          // But for now, let's require flow confirmation to solve the "leaning forward" issue.
+          // When leaning forward, face moves UP in frame, but shoulders/body might not move much or move forward.
+          // Optical flow on the whole frame (mostly body) should reflect the true motion.
+          
+          const isCandidate = isFaceJump && isFlowValid;
+
           this.jumpCandidateFrames = isCandidate ? Math.min(4, this.jumpCandidateFrames + 1) : Math.max(0, this.jumpCandidateFrames - 1);
           if (this.jumpArmed && this.jumpCandidateFrames >= 3 && !this.state.isJumping && now - this.lastJumpTime > this.JUMP_COOLDOWN) {
-              log(1, 'JUMP', `Jump! Vel: ${velocity.toFixed(2)} (Th: ${velocityThreshold.toFixed(2)}), Dy: ${dy.toFixed(2)} (Th: ${displacementThreshold.toFixed(2)}), Scale: ${scaleFactor.toFixed(2)}`);
+              log(1, 'JUMP', `Jump! Vel: ${velocity.toFixed(2)}, Dy: ${dy.toFixed(2)}, Flow: ${this.opticalFlowY.toFixed(2)}`);
               this.state.isJumping = true;
               this.lastJumpTime = now;
               this.jumpCandidateFrames = 0;
