@@ -390,7 +390,15 @@ export class MotionController {
       const velocityThreshold = 2.4 * scaleFactor;
       const displacementThreshold = 0.09 * scaleFactor;
 
-      if (faceSizeRatio < 0.35) {
+      // Robustness Improvements:
+       // 1. Stricter Size Stability: Reduced from 0.35 to 0.25 to prevent false positives during fast forward/backward movement
+       // 2. Forward Movement Suppression: If face is significantly larger than smoothed average (>15%) AND moving up, 
+       //    it's likely the user zooming in (perspective shift), not jumping.
+       const isZoomingIn = faceSize > this.smoothedFaceSize * 1.15;
+       const isMovingUp = dy > 0;
+      
+      // Only allow jump if size is stable AND we are not just zooming in
+      if (faceSizeRatio < 0.25 && !(isZoomingIn && isMovingUp)) {
           if (!this.jumpArmed && dy < 0.02 * scaleFactor) {
               this.jumpArmed = true;
           }
