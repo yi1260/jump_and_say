@@ -1,4 +1,4 @@
-Original prompt: MoveNet Lightning 或 MediaPipe Pose Lite 这两个你推荐用哪个? 然后直接帮我改成这种方案吧, 完全替代之前的face detection的方案
+Original prompt: MoveNet Lightning 或 MediaPipe Pose Lite 这两个你推荐用哪个? 然后直接帮我改成这种方案吧, 完全替代之前的face的方案
 
 - Plan: Switch motion detection to MediaPipe Pose Lite to preserve existing MediaPipe pipeline and CDN fallback while reducing model complexity.
 - Updated dependencies and CDN loader to MediaPipe Pose Lite; swapped caching rules for /mediapipe/pose.
