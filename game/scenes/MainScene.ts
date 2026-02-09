@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { pauseBackgroundPreloading, prioritizeThemeInQueue, resumeBackgroundPreloading } from '../../gameConfig';
 import { motionController } from '../../services/motionController';
-import { QuestionData, Theme, ThemeId } from '../../types';
+import { QuestionData, Theme, ThemeId, ThemeList } from '../../types';
 
 // --- CONFIGURATION ---
 
@@ -203,11 +203,21 @@ export class MainScene extends Phaser.Scene {
   private async loadThemeDataFallback() {
       try {
         // 动态引入避免循环依赖
-        const { getR2ThemesListUrl } = await import('@/src/config/r2Config');
-        const response = await fetch(getR2ThemesListUrl());
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        
-        const themeList = await response.json();
+        const { getR2ThemesListUrl, getR2ThemesListCdnUrl } = await import('@/src/config/r2Config');
+        const fetchThemeList = async (url: string): Promise<ThemeList> => {
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = (await response.json()) as ThemeList;
+          return data;
+        };
+
+        let themeList: ThemeList;
+        try {
+          themeList = await fetchThemeList(getR2ThemesListUrl());
+        } catch (localError) {
+          console.warn('[MainScene] Local themes-list failed, falling back to CDN', localError);
+          themeList = await fetchThemeList(getR2ThemesListCdnUrl());
+        }
         // 更新缓存供后续使用
         this.cache.json.add('themes_list', themeList);
         
@@ -831,17 +841,6 @@ export class MainScene extends Phaser.Scene {
     const isOnGround = this.player.body.touching.down;
 
     const motionState = motionController.state;
-    const isNoseDetected = motionController.isNoseDetected;
-    
-    if (!isNoseDetected) {
-        this.player.setVelocityX(0);
-        if (this.player.body.touching.down) {
-            this.player.anims.stop();
-            this.player.setTexture('p1_stand');
-        }
-        return;
-    }
-    
     if (isOnGround) {
         // Use smoothed state for movement logic to prevent jitter/lag
         // Fallback to raw state if smoothedState is not available yet
@@ -873,7 +872,7 @@ export class MainScene extends Phaser.Scene {
  
         // Use smoothed jump state too? No, jump is an event, use immediate state but with latching in controller
         // Actually, we should check if jump was triggered in the last few frames if we missed it
-        if (effectiveState.isJumping && this.isInteractionActive && isNoseDetected) {
+        if (effectiveState.isJumping && this.isInteractionActive) {
             this.player.setVelocityY(-this.jumpVelocity); 
             this.player.setTexture('p1_jump');
             this.player.anims.stop();
@@ -915,11 +914,17 @@ export class MainScene extends Phaser.Scene {
       if ('speechSynthesis' in window) {
           // Cancel any pending speech immediately to ensure the new one plays
           window.speechSynthesis.cancel();
+          if (window.setBGMVolume) {
+            window.setBGMVolume(0);
+          }
           
           const u = new SpeechSynthesisUtterance(text);
           u.lang = 'en-US';
           u.pitch = 1.0;
           u.rate = 0.9;
+          u.volume = 1.0;
+          u.onend = () => window.restoreBGMVolume?.();
+          u.onerror = () => window.restoreBGMVolume?.();
           
           let voices = window.speechSynthesis.getVoices();
           
@@ -1251,11 +1256,10 @@ export class MainScene extends Phaser.Scene {
         
         // 增加错误计数
         this.wrongAttempts++;
-        
-        // 如果错误超过3次，重新播放单词语音
-        if (this.wrongAttempts > 3 && this.currentQuestion) {
+
+        // 每次碰撞错误都重新朗读
+        if (this.currentQuestion) {
             this.speak(this.currentQuestion.question);
-            this.wrongAttempts = 0; // 重置计数
         }
         
         if (visuals) {

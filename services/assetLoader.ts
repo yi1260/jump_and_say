@@ -1,4 +1,4 @@
-import { preloadThemeImagesStrict } from '@/gameConfig';
+import { isThemePreloaded, preloadThemeImagesStrict } from '@/gameConfig';
 import { getR2AssetUrl, getR2ThemesListCdnUrl, getR2ThemesListUrl } from '@/src/config/r2Config';
 import { ThemeId } from '@/types';
 import { motionController } from './motionController';
@@ -25,12 +25,52 @@ const GAME_ASSETS = [
 
 const PRELOAD_TIMEOUT = 15000; // 增加到 15 秒超时，允许更慢的网络拉取基础素材
 const PRELOAD_RETRIES = 1;    // 基础素材失败后允许重试 1 次
+let gameAssetsPreloaded = false;
+
+const getLastResourceTiming = (url: string): PerformanceResourceTiming | null => {
+  if (typeof performance === 'undefined' || typeof performance.getEntriesByName !== 'function') return null;
+  const entries = performance.getEntriesByName(url);
+  if (!entries || entries.length === 0) return null;
+  const entry = entries[entries.length - 1];
+  if ('transferSize' in entry) {
+    return entry as PerformanceResourceTiming;
+  }
+  return null;
+};
+
+const inferCacheLabel = (timing: PerformanceResourceTiming | null, durationMs: number): string => {
+  if (timing) {
+    if (timing.transferSize === 0 && timing.decodedBodySize > 0) return 'CACHE (transferSize=0)';
+    if (timing.transferSize > 0) return 'NETWORK';
+  }
+  if (durationMs < 50) return 'CACHE (heuristic<50ms)';
+  return 'UNKNOWN';
+};
+
+const logAssetTiming = (label: string, url: string, durationMs: number) => {
+  const timing = getLastResourceTiming(url);
+  const cacheLabel = inferCacheLabel(timing, durationMs);
+  if (timing) {
+    console.log(
+      `[AssetTiming] ${label} ${durationMs.toFixed(1)}ms [${cacheLabel}]`,
+      { url, transferSize: timing.transferSize, encodedBodySize: timing.encodedBodySize, decodedBodySize: timing.decodedBodySize }
+    );
+  } else {
+    console.log(
+      `[AssetTiming] ${label} ${durationMs.toFixed(1)}ms [${cacheLabel}]`,
+      { url }
+    );
+  }
+};
 
 export async function preloadAllGameAssets(
   selectedThemes: ThemeId[], 
   onProgress: (progress: number, status: string) => void
 ) {
   let loadedCount = 0;
+  const firstThemeId = selectedThemes[0];
+  const themeAlreadyPreloaded = firstThemeId ? isThemePreloaded(firstThemeId) : false;
+
   // Calculate total items
   // 1 (MediaPipe) + Game Assets + 1 (First Theme)
   const totalItems = 1 + GAME_ASSETS.length + 1;
@@ -48,70 +88,82 @@ export async function preloadAllGameAssets(
   try {
     // 1. Initialize MediaPipe (AI Models)
     onProgress(0, 'Initializing AI...');
-    await motionController.init();
+    if (!motionController.isReady) {
+      await motionController.init();
+    }
     updateProgress('AI Ready');
 
     // 2. Preload Game Assets (Parallel)
-    const assetPromises = GAME_ASSETS.map(async (path) => {
-      const url = getR2AssetUrl(path);
-      
-      const loadWithRetry = async (retriesLeft: number): Promise<void> => {
-        try {
-          if (path.endsWith('.mp3') || path.endsWith('.ogg')) {
-            // Use fetch with AbortController for timeout
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), PRELOAD_TIMEOUT);
-            
+    const assetPromises = gameAssetsPreloaded
+      ? []
+      : GAME_ASSETS.map(async (path) => {
+          const url = getR2AssetUrl(path);
+          
+          const loadWithRetry = async (retriesLeft: number): Promise<void> => {
             try {
-              const response = await fetch(url, { signal: controller.signal });
-              clearTimeout(timeoutId);
-              if (!response.ok) throw new Error(`HTTP ${response.status}`);
-              await response.arrayBuffer();
-            } catch (err) {
-              clearTimeout(timeoutId);
-              throw err;
+              const start = performance.now();
+              if (path.endsWith('.mp3') || path.endsWith('.ogg')) {
+                // Use fetch with AbortController for timeout
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), PRELOAD_TIMEOUT);
+                
+                try {
+                  const response = await fetch(url, { signal: controller.signal });
+                  clearTimeout(timeoutId);
+                  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                  await response.arrayBuffer();
+                  logAssetTiming(path, url, performance.now() - start);
+                } catch (err) {
+                  clearTimeout(timeoutId);
+                  throw err;
+                }
+              } else {
+                // Use Image with explicit timeout
+                await new Promise<void>((resolve, reject) => {
+                  const img = new Image();
+                  img.crossOrigin = 'anonymous';
+                  const timeoutId = setTimeout(() => {
+                    img.src = ''; // 停止加载
+                    reject(new Error('Timeout'));
+                  }, PRELOAD_TIMEOUT);
+                  
+                  img.onload = () => {
+                    clearTimeout(timeoutId);
+                    logAssetTiming(path, url, performance.now() - start);
+                    resolve();
+                  };
+                  img.onerror = () => {
+                    clearTimeout(timeoutId);
+                    reject(new Error('Load error'));
+                  };
+                  img.src = url;
+                });
+              }
+            } catch (e) {
+              if (retriesLeft > 0) {
+                console.warn(`Retrying ${path} (${retriesLeft} retries left)...`);
+                return loadWithRetry(retriesLeft - 1);
+              }
+              throw e;
             }
-          } else {
-            // Use Image with explicit timeout
-            await new Promise<void>((resolve, reject) => {
-              const img = new Image();
-              img.crossOrigin = 'anonymous';
-              const timeoutId = setTimeout(() => {
-                img.src = ''; // 停止加载
-                reject(new Error('Timeout'));
-              }, PRELOAD_TIMEOUT);
-              
-              img.onload = () => {
-                clearTimeout(timeoutId);
-                resolve();
-              };
-              img.onerror = () => {
-                clearTimeout(timeoutId);
-                reject(new Error('Load error'));
-              };
-              img.src = url;
-            });
-          }
-        } catch (e) {
-          if (retriesLeft > 0) {
-            console.warn(`Retrying ${path} (${retriesLeft} retries left)...`);
-            return loadWithRetry(retriesLeft - 1);
-          }
-          throw e;
-        }
-      };
+          };
 
-      try {
-        await loadWithRetry(PRELOAD_RETRIES);
-      } catch (e) {
-        console.warn(`Failed to preload ${path} after retries`, e);
-      }
-      
-      // Just increment count, don't update status text for every single file
-      loadedCount++;
+          try {
+            await loadWithRetry(PRELOAD_RETRIES);
+          } catch (e) {
+            console.warn(`Failed to preload ${path} after retries`, e);
+          }
+          
+          // Just increment count, don't update status text for every single file
+          loadedCount++;
+          const progress = Math.min(100, Math.round((loadedCount / totalItems) * 100));
+          onProgress(progress, 'Loading Game Assets...');
+        });
+    if (gameAssetsPreloaded) {
+      loadedCount += GAME_ASSETS.length;
       const progress = Math.min(100, Math.round((loadedCount / totalItems) * 100));
       onProgress(progress, 'Loading Game Assets...');
-    });
+    }
     
     // 3. Preload Themes List JSON explicitly
     // This ensures themes-list.json is in the browser cache when Phaser requests it
@@ -136,16 +188,24 @@ export async function preloadAllGameAssets(
     })();
 
     // 4. Preload ONLY the First Theme's Images
-    const firstThemeId = selectedThemes[0];
     const themePromise = (async () => {
-        if (firstThemeId) {
-            updateStatus('Loading Theme...');
-            await preloadThemeImagesStrict(firstThemeId, updateStatus);
-            updateProgress('Theme Ready');
+      if (firstThemeId) {
+        if (themeAlreadyPreloaded) {
+          loadedCount++;
+          const progress = Math.min(100, Math.round((loadedCount / totalItems) * 100));
+          onProgress(progress, 'Theme Cached');
+          return;
         }
+        updateStatus('Loading Theme...');
+        await preloadThemeImagesStrict(firstThemeId, updateStatus);
+        updateProgress('Theme Ready');
+      }
     })();
 
     await Promise.all([...assetPromises, themesListPromise, themePromise]);
+    if (!gameAssetsPreloaded) {
+      gameAssetsPreloaded = true;
+    }
     
     onProgress(100, 'Ready!');
     

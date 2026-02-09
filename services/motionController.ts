@@ -1,4 +1,4 @@
-import { MotionState } from '../types';
+import { MotionState, PoseLandmark } from '../types';
 
 const LOG_LEVEL = {
   DEBUG: 0,
@@ -8,7 +8,7 @@ const LOG_LEVEL = {
 };
 const CURRENT_LOG_LEVEL = (import.meta as { prod?: boolean }).prod ? LOG_LEVEL.WARN : LOG_LEVEL.INFO;
 
-function log(level: number, tag: string, message: string, data?: any) {
+function log(level: number, tag: string, message: string, data?: unknown) {
   if (level < CURRENT_LOG_LEVEL) return;
   const prefix = `[${tag}]`;
   if (level === LOG_LEVEL.DEBUG) console.debug(prefix, message, data);
@@ -17,28 +17,62 @@ function log(level: number, tag: string, message: string, data?: any) {
   else console.error(prefix, message, data);
 }
 
-// Type definition for MediaPipe FaceDetection
+interface PoseResults {
+  poseLandmarks?: PoseLandmark[];
+}
+
+interface PoseOptions {
+  modelComplexity: 0 | 1 | 2;
+  smoothLandmarks?: boolean;
+  minDetectionConfidence?: number;
+  minTrackingConfidence?: number;
+  selfieMode?: boolean;
+}
+
+interface PoseInitOptions {
+  locateFile: (file: string) => string;
+}
+
+interface PoseLike {
+  setOptions: (options: PoseOptions) => void;
+  onResults: (callback: (results: PoseResults) => void) => void;
+  send: (input: { image: HTMLVideoElement }) => Promise<void>;
+  initialize: () => Promise<void>;
+  close?: () => void;
+}
+
+type PoseConstructor = new (options: PoseInitOptions) => PoseLike;
+
+interface Point2D {
+  x: number;
+  y: number;
+}
+
 declare global {
-    interface Window {
-        FaceDetection: any;
-        __MEDIAPIPE_FACE_DETECTION_CDN__?: string;
-    }
+  interface Window {
+    Pose?: PoseConstructor;
+    __MEDIAPIPE_POSE_CDN__?: string;
+    __MEDIAPIPE_POSE_NEXT_BASE__?: () => string | null;
+    __APP_DIAG__?: boolean;
+  }
 }
 
 export class MotionController {
   private video: HTMLVideoElement | null = null;
-  private faceDetector: any = null;
+  private pose: PoseLike | null = null;
   private isRunning: boolean = false;
   private requestRef: number | null = null;
-  private lastFrameTime: number = 0;
-  private readonly FRAME_MIN_TIME = 1000 / 30; // 30 FPS cap
+  private lastResultTime: number = 0;
+  private lastSendTime: number = 0;
+  private readonly FRAME_MIN_TIME = 1000 / 35;
   private missedDetections: number = 0;
   private readonly MAX_MISSED_DETECTIONS = 12;
 
-  // Thresholds for Face Motion
-  // X: 0.5 is center. > 0.62 is Right, < 0.38 is Left. (Modified for better sensitivity)
-  private xThreshold: number = 0.12; 
-  
+  private readonly REF_SHOULDER_WIDTH = 0.22;
+  private readonly REF_TORSO_HEIGHT = 0.25;
+
+  private xThreshold: number = 0.12;
+
   public state: MotionState = {
     x: 0,
     bodyX: 0.5,
@@ -51,16 +85,16 @@ export class MotionController {
     rawFaceHeight: 0.24,
     rawShoulderY: 0.5,
     smoothedState: {
-        x: 0,
-        bodyX: 0.5,
-        isJumping: false,
-        rawNoseX: 0.5,
-        rawNoseY: 0.5,
-        rawFaceX: 0.5,
-        rawFaceY: 0.5,
-        rawFaceWidth: 0.18,
-        rawFaceHeight: 0.24,
-        rawShoulderY: 0.5
+      x: 0,
+      bodyX: 0.5,
+      isJumping: false,
+      rawNoseX: 0.5,
+      rawNoseY: 0.5,
+      rawFaceX: 0.5,
+      rawFaceY: 0.5,
+      rawFaceWidth: 0.18,
+      rawFaceHeight: 0.24,
+      rawShoulderY: 0.5
     }
   };
 
@@ -79,33 +113,72 @@ export class MotionController {
 
   public isReady: boolean = false;
   public isStarted: boolean = false;
-  public isNoseDetected: boolean = false;
   public onMotionDetected: ((type: 'jump' | 'move') => void) | null = null;
+  public poseLandmarks: PoseLandmark[] | null = null;
 
   private initPromise: Promise<void> | null = null;
-  
-  // Smoothing vars
-  private currentHeadX: number = 0.5;
+
+  private currentBodyX: number = 0.5;
+  private neutralX: number = 0.5;
+  private smoothedBodyY: number = 0.5;
   private smoothedHeadY: number = 0.5;
   private smoothedNoseX: number = 0.5;
   private smoothedNoseY: number = 0.5;
-  private smoothedFaceCenterX: number = 0.5;
-  private smoothedFaceCenterY: number = 0.5;
-  private smoothedFaceWidth: number = 0.18;
-  private smoothedFaceHeight: number = 0.24;
-  private smoothedFaceSize: number = 0;
+  private smoothedBoxCenterX: number = 0.5;
+  private smoothedBoxCenterY: number = 0.5;
+  private smoothedBoxWidth: number = 0.18;
+  private smoothedBoxHeight: number = 0.24;
+  private smoothedShoulderWidth: number = 0.22;
+  private smoothedTorsoHeight: number = 0.25;
   private jumpCandidateFrames: number = 0;
   private jumpArmed: boolean = true;
-  
-  // Optical Flow vars
-  private prevFrameData: Uint8ClampedArray | null = null;
-  private opticalFlowY: number = 0;
-  private opticalFlowCanvas: HTMLCanvasElement | null = null;
-  private opticalFlowContext: CanvasRenderingContext2D | null = null;
 
-  // Jump Logic
   private lastJumpTime: number = 0;
   private readonly JUMP_COOLDOWN = 800;
+
+  private async prewarmPoseAssets(base: string): Promise<void> {
+    if (!('caches' in window)) return;
+
+    const cacheName = base.startsWith('/') ? 'local-mediapipe-pose-cache' : 'mediapipe-cdn-cache-v2';
+    const assets = [
+      'pose.js',
+      'pose_solution_packed_assets_loader.js',
+      'pose_solution_packed_assets.data',
+      'pose_solution_simd_wasm_bin.js',
+      'pose_solution_simd_wasm_bin.wasm',
+      'pose_solution_simd_wasm_bin.data',
+      'pose_solution_wasm_bin.js',
+      'pose_solution_wasm_bin.wasm',
+      'pose_web.binarypb',
+      'pose_landmark_lite.tflite'
+    ];
+
+    try {
+      const cache = await caches.open(cacheName);
+      await Promise.all(
+        assets.map(async (file) => {
+          const url = `${base}${file}`;
+          try {
+            const response = await fetch(url, { mode: 'cors', cache: 'reload' });
+            if (response.ok || response.type === 'opaque') {
+              await cache.put(url, response.clone());
+            }
+          } catch {
+            try {
+              const response = await fetch(url, { mode: 'no-cors', cache: 'reload' });
+              if (response) {
+                await cache.put(url, response.clone());
+              }
+            } catch {
+              // Ignore prewarm errors; main init handles failures.
+            }
+          }
+        })
+      );
+    } catch (error) {
+      log(2, 'INIT', 'Pose cache prewarm failed', error);
+    }
+  }
 
   async init() {
     if (this.initPromise) return this.initPromise;
@@ -136,44 +209,53 @@ export class MotionController {
       }
     };
 
-    const waitForFaceDetection = async (): Promise<void> => {
+    const waitForPose = async (): Promise<void> => {
       const start = performance.now();
       let attempts = 0;
-      while (!window.FaceDetection && attempts < 50) {
+      while (!window.Pose && attempts < 50) {
         await new Promise((r) => setTimeout(r, 100));
         attempts++;
       }
-      if (!window.FaceDetection) {
-        throw new Error('FaceDetection library not found');
+      if (!window.Pose) {
+        throw new Error('Pose library not found');
       }
-      diagLog('FaceDetection global ready', { ms: Math.round(performance.now() - start), attempts });
+      diagLog('Pose global ready', { ms: Math.round(performance.now() - start), attempts });
     };
 
-    const createDetector = async (baseOverride?: string): Promise<any> => {
-      const base = baseOverride || window.__MEDIAPIPE_FACE_DETECTION_CDN__ || '/mediapipe/face_detection/';
-      const faceDetection = new window.FaceDetection({
+    const createPose = async (baseOverride?: string): Promise<PoseLike> => {
+      const base = baseOverride || window.__MEDIAPIPE_POSE_CDN__ || '/assets/mediapipe/pose/';
+      if (!window.Pose) {
+        throw new Error('Pose constructor missing');
+      }
+      const pose = new window.Pose({
         locateFile: (file: string) => {
-          const fileName = file.split('/').pop();
+          const fileName = file.split('/').pop() || file;
           return `${base}${fileName}`;
         }
       });
 
-      faceDetection.setOptions({
-        model: 'full',
-        minDetectionConfidence: 0.4,
+      pose.setOptions({
+        modelComplexity: 0,
+        smoothLandmarks: false,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5,
         selfieMode: false
       });
 
-      faceDetection.onResults(this.onResults.bind(this));
+      pose.onResults(this.onResults.bind(this));
 
       if (diagEnabled && 'caches' in window && typeof caches.match === 'function') {
         const probeFiles = [
-          'face_detection.js',
-          'face_detection_solution_simd_wasm_bin.js',
-          'face_detection_solution_simd_wasm_bin.wasm',
-          'face_detection_solution_wasm_bin.js',
-          'face_detection_solution_wasm_bin.wasm',
-          'face_detection_full_range.tflite'
+          'pose.js',
+          'pose_solution_packed_assets_loader.js',
+          'pose_solution_packed_assets.data',
+          'pose_solution_simd_wasm_bin.js',
+          'pose_solution_simd_wasm_bin.wasm',
+          'pose_solution_simd_wasm_bin.data',
+          'pose_solution_wasm_bin.js',
+          'pose_solution_wasm_bin.wasm',
+          'pose_web.binarypb',
+          'pose_landmark_lite.tflite'
         ];
         const results = await Promise.all(
           probeFiles.map(async (fileName) => {
@@ -190,39 +272,61 @@ export class MotionController {
       }
 
       const initStart = performance.now();
-      await withTimeout(faceDetection.initialize(), 8000, 'FaceDetection initialize timeout');
+      await withTimeout(pose.initialize(), 8000, 'Pose initialize timeout');
       diagLog('initialize done', { base, ms: Math.round(performance.now() - initStart) });
 
-      return faceDetection;
+      return pose;
+    };
+
+    const getNextBase = (): string | null => {
+      if (typeof window.__MEDIAPIPE_POSE_NEXT_BASE__ === 'function') {
+        return window.__MEDIAPIPE_POSE_NEXT_BASE__();
+      }
+      return null;
     };
 
     this.initPromise = (async () => {
-      log(1, 'INIT', 'Initializing Face Detection...');
+      log(1, 'INIT', 'Initializing Pose...');
 
       try {
         const totalStart = performance.now();
-        await waitForFaceDetection();
-        this.faceDetector = await createDetector();
+        await waitForPose();
+        this.pose = await createPose();
         this.isReady = true;
-        log(1, 'INIT', 'Face Detection Ready');
-        diagLog('init success', { ms: Math.round(performance.now() - totalStart), base: window.__MEDIAPIPE_FACE_DETECTION_CDN__ || '/mediapipe/face_detection/' });
+        log(1, 'INIT', 'Pose Ready');
+        const activeBase = window.__MEDIAPIPE_POSE_CDN__ || '/assets/mediapipe/pose/';
+        diagLog('init success', { ms: Math.round(performance.now() - totalStart), base: activeBase });
+        void this.prewarmPoseAssets(activeBase);
       } catch (e) {
-        log(2, 'INIT', 'Primary Face Detection init failed, retrying with local files...', e);
-        diagLog('init failed, fallback to local', { error: String(e) });
-        try {
-          const fallbackStart = performance.now();
-          await waitForFaceDetection();
-          this.faceDetector = await createDetector('/mediapipe/face_detection/');
-          this.isReady = true;
-          log(1, 'INIT', 'Face Detection Ready (local fallback)');
-          diagLog('fallback success', { ms: Math.round(performance.now() - fallbackStart) });
-        } catch (fallbackError) {
-          this.faceDetector = null;
-          this.isReady = false;
-          console.error('[MotionController] Init failed', fallbackError);
-          diagLog('fallback failed', { error: String(fallbackError) });
-          throw fallbackError;
+        log(2, 'INIT', 'Primary Pose init failed, retrying with alternate CDN...', e);
+        diagLog('init failed, retrying', { error: String(e) });
+
+        let retryBase = getNextBase();
+        let attempts = 0;
+        let lastError: unknown = e;
+        while (retryBase && attempts < 12) {
+          try {
+            const retryStart = performance.now();
+            await waitForPose();
+            this.pose = await createPose(retryBase);
+            this.isReady = true;
+            window.__MEDIAPIPE_POSE_CDN__ = retryBase;
+            log(1, 'INIT', 'Pose Ready (retry)');
+            diagLog('retry success', { ms: Math.round(performance.now() - retryStart), base: retryBase });
+            void this.prewarmPoseAssets(retryBase);
+            return;
+          } catch (retryError) {
+            lastError = retryError;
+            attempts += 1;
+            retryBase = getNextBase();
+          }
         }
+
+        this.pose = null;
+        this.isReady = false;
+        console.error('[MotionController] Init failed', lastError);
+        diagLog('retry failed', { error: String(lastError) });
+        throw lastError;
       }
     })();
 
@@ -240,30 +344,33 @@ export class MotionController {
       return;
     }
     log(1, 'START', 'Starting Motion Controller...');
-    
-    if (!this.faceDetector) {
-        await this.init();
-        if (!this.faceDetector) {
-          throw new Error('Face detector not initialized');
-        }
+
+    if (!this.pose) {
+      await this.init();
+      if (!this.pose) {
+        throw new Error('Pose not initialized');
+      }
     }
-    
+
     this.video = videoElement;
     this.isRunning = true;
     this.isStarted = true;
-    this.isNoseDetected = false;
     this.missedDetections = 0;
+    this.lastResultTime = 0;
+    this.lastSendTime = 0;
 
-    // Reset state
-    this.currentHeadX = 0.5;
+    this.currentBodyX = 0.5;
+    this.neutralX = 0.5;
+    this.smoothedBodyY = 0.5;
     this.smoothedHeadY = 0.5;
     this.smoothedNoseX = 0.5;
     this.smoothedNoseY = 0.5;
-    this.smoothedFaceCenterX = 0.5;
-    this.smoothedFaceCenterY = 0.5;
-    this.smoothedFaceWidth = 0.18;
-    this.smoothedFaceHeight = 0.24;
-    this.smoothedFaceSize = 0;
+    this.smoothedBoxCenterX = 0.5;
+    this.smoothedBoxCenterY = 0.5;
+    this.smoothedBoxWidth = 0.18;
+    this.smoothedBoxHeight = 0.24;
+    this.smoothedShoulderWidth = 0.22;
+    this.smoothedTorsoHeight = 0.25;
     this.jumpCandidateFrames = 0;
     this.jumpArmed = true;
     this.state.isJumping = false;
@@ -274,6 +381,7 @@ export class MotionController {
     this.state.rawFaceY = 0.5;
     this.state.rawFaceWidth = 0.18;
     this.state.rawFaceHeight = 0.24;
+    this.state.rawShoulderY = 0.5;
 
     log(1, 'START', 'Loop starting');
     this.processFrame();
@@ -282,288 +390,241 @@ export class MotionController {
   stop() {
     this.isRunning = false;
     this.isStarted = false;
-    // faceDetector doesn't have a stop method, just stop feeding it frames
+    this.poseLandmarks = null;
+    if (this.requestRef !== null) {
+      cancelAnimationFrame(this.requestRef);
+      this.requestRef = null;
+    }
   }
 
-  // No-op for compatibility
-  calibrate() {}
-  getCalibrationProgress() { return 1; }
-  isCalibrating() { return false; }
-
-  // Calculate simple optical flow for vertical movement
-  private calculateOpticalFlow(video: HTMLVideoElement, bbox: any) {
-    if (!this.opticalFlowCanvas) {
-        this.opticalFlowCanvas = document.createElement('canvas');
-        this.opticalFlowCanvas.width = 64; // Small resolution for performance
-        this.opticalFlowCanvas.height = 48;
-        this.opticalFlowContext = this.opticalFlowCanvas.getContext('2d', { willReadFrequently: true });
-    }
-
-    if (!this.opticalFlowContext) return 0;
-
-    // Draw current frame to small canvas
-    this.opticalFlowContext.drawImage(video, 0, 0, 64, 48);
-    const frameData = this.opticalFlowContext.getImageData(0, 0, 64, 48).data;
-
-    let totalDy = 0;
-    let validPoints = 0;
-
-    if (this.prevFrameData) {
-        // Calculate vertical flow only in the center region (where the person is likely to be)
-        // Skip edges to avoid background noise
-        const width = 64;
-        const height = 48;
-        const marginX = 16;
-        const marginY = 8;
-        
-        // Simple block matching or brightness difference gradient
-        // Here we use a very simplified gradient approach:
-        // If pixel(x, y) is similar to pixel(x, y+1) in prev frame -> moving up
-        
-        // Actually, a simpler approach for "Jump" detection in games:
-        // Just check if the whole image shifted up.
-        // We compare row R in current frame with row R+1 in prev frame.
-        
-        // Let's implement a sparse Lucas-Kanade like check on a grid
-        const step = 4;
-        for (let y = marginY; y < height - marginY - step; y += step) {
-            for (let x = marginX; x < width - marginX; x += step) {
-                const idx = (y * width + x) * 4;
-                const brightness = (frameData[idx] + frameData[idx+1] + frameData[idx+2]) / 3;
-                
-                // Search for best match in vertical neighborhood in previous frame
-                let bestDy = 0;
-                let minDiff = 255;
-                
-                // Search range: -4 to +4 pixels vertically
-                for (let dy = -4; dy <= 4; dy++) {
-                    const searchY = y + dy;
-                    if (searchY < 0 || searchY >= height) continue;
-                    
-                    const prevIdx = (searchY * width + x) * 4;
-                    const prevBrightness = (this.prevFrameData[prevIdx] + this.prevFrameData[prevIdx+1] + this.prevFrameData[prevIdx+2]) / 3;
-                    
-                    const diff = Math.abs(brightness - prevBrightness);
-                    if (diff < minDiff) {
-                        minDiff = diff;
-                        bestDy = dy;
-                    }
-                }
-                
-                // If we found a good match
-                if (minDiff < 30) {
-                   // If best match in prev frame was at y+dy, it means pixels moved by -dy
-                   // Example: Current pixel at Y=10 matches Prev pixel at Y=12 (dy=2)
-                   // It means the object moved UP by 2 pixels (from 12 to 10)
-                   // So movement is -bestDy
-                   totalDy += (-bestDy);
-                   validPoints++;
-                }
-            }
-        }
-    }
-
-    // Store for next frame
-    this.prevFrameData = new Uint8ClampedArray(frameData);
-
-    return validPoints > 0 ? totalDy / validPoints : 0;
+  calibrate() {
+    this.neutralX = this.currentBodyX;
+    this.smoothedBodyY = this.smoothedBodyY * 0.7 + this.state.rawShoulderY * 0.3;
   }
 
-  private onResults(results: any) {
-      const now = performance.now();
-      if (!results.detections || results.detections.length === 0) {
-          this.missedDetections += 1;
-          this.jumpCandidateFrames = 0;
-          if (this.missedDetections > this.MAX_MISSED_DETECTIONS) {
-              this.isNoseDetected = false;
-          }
-          return;
+  getCalibrationProgress() {
+    return 1;
+  }
+
+  isCalibrating() {
+    return false;
+  }
+
+  private clamp(value: number, min: number, max: number): number {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  private toPoint(landmark?: PoseLandmark): Point2D | null {
+    if (!landmark) return null;
+    if (!Number.isFinite(landmark.x) || !Number.isFinite(landmark.y)) return null;
+    const visibility = typeof landmark.visibility === 'number' ? landmark.visibility : 1;
+    const presence = typeof landmark.presence === 'number' ? landmark.presence : 1;
+    if (visibility < 0.35 || presence < 0.35) return null;
+    return { x: landmark.x, y: landmark.y };
+  }
+
+  private resolveCenter(a: Point2D | null, b: Point2D | null, fallback: Point2D): Point2D {
+    if (a && b) {
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    }
+    if (a) return a;
+    if (b) return b;
+    return fallback;
+  }
+
+  private onResults(results: PoseResults) {
+    const now = performance.now();
+    const landmarks = Array.isArray(results.poseLandmarks) ? results.poseLandmarks : null;
+    if (!landmarks || landmarks.length === 0) {
+      this.missedDetections += 1;
+      this.jumpCandidateFrames = 0;
+      this.poseLandmarks = null;
+      this.lastResultTime = now;
+      return;
+    }
+
+    this.missedDetections = 0;
+    this.poseLandmarks = landmarks;
+
+    const nose = this.toPoint(landmarks[0]);
+    const leftShoulder = this.toPoint(landmarks[11]);
+    const rightShoulder = this.toPoint(landmarks[12]);
+    const leftHip = this.toPoint(landmarks[23]);
+    const rightHip = this.toPoint(landmarks[24]);
+
+    const fallbackCenter: Point2D = nose || { x: 0.5, y: 0.5 };
+    const shoulderCenter = this.resolveCenter(leftShoulder, rightShoulder, fallbackCenter);
+    const hipCenter = this.resolveCenter(leftHip, rightHip, shoulderCenter);
+    const bodyCenter: Point2D = {
+      x: (shoulderCenter.x + hipCenter.x) / 2,
+      y: (shoulderCenter.y + hipCenter.y) / 2
+    };
+
+    const rawNoseX = nose?.x ?? shoulderCenter.x;
+    const rawNoseY = nose?.y ?? shoulderCenter.y;
+
+    const boxPoints = [nose, leftShoulder, rightShoulder, leftHip, rightHip].filter(
+      (point): point is Point2D => !!point
+    );
+    let boxCenterX = fallbackCenter.x;
+    let boxCenterY = fallbackCenter.y;
+    let boxWidth = 0.18;
+    let boxHeight = 0.24;
+    if (boxPoints.length > 0) {
+      let minX = boxPoints[0].x;
+      let maxX = boxPoints[0].x;
+      let minY = boxPoints[0].y;
+      let maxY = boxPoints[0].y;
+      boxPoints.forEach((point) => {
+        if (point.x < minX) minX = point.x;
+        if (point.x > maxX) maxX = point.x;
+        if (point.y < minY) minY = point.y;
+        if (point.y > maxY) maxY = point.y;
+      });
+      boxCenterX = (minX + maxX) / 2;
+      boxCenterY = (minY + maxY) / 2;
+      boxWidth = Math.max(0.08, maxX - minX);
+      boxHeight = Math.max(0.1, maxY - minY);
+    }
+
+    const elapsed = now - this.lastResultTime;
+    const dtSec = Math.max(0.016, elapsed > 0 && elapsed < 500 ? elapsed / 1000 : 0.033);
+    const alpha = 1 - Math.exp(-dtSec / 0.08);
+
+    const shoulderWidth = leftShoulder && rightShoulder ? Math.abs(leftShoulder.x - rightShoulder.x) : 0;
+    const hipWidth = leftHip && rightHip ? Math.abs(leftHip.x - rightHip.x) : 0;
+    const widthCandidate = shoulderWidth > 0 ? shoulderWidth : hipWidth;
+    if (widthCandidate > 0) {
+      this.smoothedShoulderWidth = this.smoothedShoulderWidth * 0.9 + widthCandidate * 0.1;
+    }
+
+    const torsoHeight = Math.abs(hipCenter.y - shoulderCenter.y);
+    const torsoHeightCandidate = torsoHeight > 0.02 ? torsoHeight : this.smoothedTorsoHeight;
+    const torsoHeightRatio = this.smoothedTorsoHeight > 0
+      ? Math.abs(torsoHeightCandidate - this.smoothedTorsoHeight) / this.smoothedTorsoHeight
+      : 0;
+    this.smoothedTorsoHeight = this.smoothedTorsoHeight * 0.92 + torsoHeightCandidate * 0.08;
+
+    const mirroredBodyX = 1 - bodyCenter.x;
+    this.currentBodyX = this.currentBodyX * 0.55 + mirroredBodyX * 0.45;
+    this.state.bodyX = this.currentBodyX;
+    this.state.rawNoseX = rawNoseX;
+    this.state.rawNoseY = rawNoseY;
+    this.state.rawFaceX = boxCenterX;
+    this.state.rawFaceY = boxCenterY;
+    this.state.rawFaceWidth = boxWidth;
+    this.state.rawFaceHeight = boxHeight;
+    this.state.rawShoulderY = shoulderCenter.y;
+
+    this.smoothedNoseX = this.smoothedNoseX * (1 - alpha) + rawNoseX * alpha;
+    this.smoothedNoseY = this.smoothedNoseY * (1 - alpha) + rawNoseY * alpha;
+    this.smoothedBoxCenterX = this.smoothedBoxCenterX * (1 - alpha) + boxCenterX * alpha;
+    this.smoothedBoxCenterY = this.smoothedBoxCenterY * (1 - alpha) + boxCenterY * alpha;
+    this.smoothedBoxWidth = this.smoothedBoxWidth * (1 - alpha) + boxWidth * alpha;
+    this.smoothedBoxHeight = this.smoothedBoxHeight * (1 - alpha) + boxHeight * alpha;
+
+    const scaleFactor = this.clamp(this.smoothedShoulderWidth / this.REF_SHOULDER_WIDTH, 0.35, 1.6);
+    const dynamicXThreshold = this.clamp(this.xThreshold * scaleFactor, 0.05, 0.22);
+    const offsetX = this.currentBodyX - this.neutralX;
+
+    let targetLane = 0;
+    if (offsetX < -dynamicXThreshold) {
+      targetLane = -1;
+    } else if (offsetX > dynamicXThreshold) {
+      targetLane = 1;
+    } else {
+      targetLane = 0;
+    }
+
+    if (Math.abs(offsetX) < dynamicXThreshold * 0.6) {
+      this.neutralX = this.neutralX * 0.98 + this.currentBodyX * 0.02;
+    }
+
+    if (this.state.x !== targetLane) {
+      this.onMotionDetected?.('move');
+    }
+    this.state.x = targetLane;
+
+    const bodyDy = this.smoothedBodyY - bodyCenter.y;
+    const headDy = this.smoothedHeadY - rawNoseY;
+    const velocity = bodyDy / dtSec;
+
+    this.smoothedBodyY = this.smoothedBodyY * 0.9 + bodyCenter.y * 0.1;
+    this.smoothedHeadY = this.smoothedHeadY * 0.9 + rawNoseY * 0.1;
+
+    const torsoScale = this.clamp(this.smoothedTorsoHeight / this.REF_TORSO_HEIGHT, 0.35, 1.6);
+    const velocityThreshold = 1.4 * torsoScale;
+    const displacementThreshold = 0.045 * torsoScale;
+    const headDisplacementThreshold = 0.03 * torsoScale;
+
+    if (torsoHeightRatio < 0.25) {
+      if (!this.jumpArmed && bodyDy < -0.015 * torsoScale) {
+        this.jumpArmed = true;
       }
 
-      this.isNoseDetected = true;
-      this.missedDetections = 0;
-      const detection = results.detections[0];
-      const bbox = detection.boundingBox; // { xCenter, yCenter, width, height }
-      const keypoints: Array<{ x?: number; y?: number; name?: string }> = Array.isArray(detection.keypoints)
-        ? detection.keypoints
-        : [];
-      const noseKeypoint =
-        keypoints.find((kp) => typeof kp.name === 'string' && kp.name.toLowerCase().includes('nose')) ||
-        keypoints[2] ||
-        null;
-      const rawFaceX = typeof noseKeypoint?.x === 'number' ? noseKeypoint.x : bbox.xCenter;
-      const rawFaceY = typeof noseKeypoint?.y === 'number' ? noseKeypoint.y : bbox.yCenter;
-      const rawFaceCenterX = typeof bbox?.xCenter === 'number' ? bbox.xCenter : rawFaceX;
-      const rawFaceCenterY = typeof bbox?.yCenter === 'number' ? bbox.yCenter : rawFaceY;
-      const rawFaceWidth = typeof bbox?.width === 'number' ? bbox.width : 0.18;
-      const rawFaceHeight = typeof bbox?.height === 'number' ? bbox.height : 0.24;
-      const mirroredX = 1 - rawFaceX;
+      const isCandidate = velocity > velocityThreshold && bodyDy > displacementThreshold && headDy > headDisplacementThreshold;
+      this.jumpCandidateFrames = isCandidate
+        ? Math.min(4, this.jumpCandidateFrames + 1)
+        : Math.max(0, this.jumpCandidateFrames - 1);
 
-      const elapsed = now - this.lastFrameTime;
-      const dtSec = Math.max(0.016, elapsed > 0 && elapsed < 500 ? elapsed / 1000 : 0.033);
-      const noseAlpha = 1 - Math.exp(-dtSec / 0.08);
-      const faceSize = (typeof bbox?.width === 'number' ? bbox.width : 0) * (typeof bbox?.height === 'number' ? bbox.height : 0);
-      if (this.smoothedFaceSize <= 0) {
-          this.smoothedFaceSize = faceSize;
-      } else {
-          this.smoothedFaceSize = this.smoothedFaceSize * 0.95 + faceSize * 0.05;
+      if (
+        this.jumpArmed &&
+        this.jumpCandidateFrames >= 2 &&
+        !this.state.isJumping &&
+        now - this.lastJumpTime > this.JUMP_COOLDOWN
+      ) {
+        log(1, 'JUMP', `Jump! Vel: ${velocity.toFixed(2)}, Dy: ${bodyDy.toFixed(3)}`);
+        this.state.isJumping = true;
+        this.lastJumpTime = now;
+        this.jumpCandidateFrames = 0;
+        this.jumpArmed = false;
+        this.onMotionDetected?.('jump');
+        setTimeout(() => {
+          this.state.isJumping = false;
+        }, 450);
       }
-      const faceSizeRatio = this.smoothedFaceSize > 0 ? Math.abs(faceSize - this.smoothedFaceSize) / this.smoothedFaceSize : 0;
+    } else {
+      this.jumpCandidateFrames = 0;
+    }
 
-      // Standard face width ~0.18 in normalized coords
-      const refFaceWidth = 0.18;
-      const currentFaceWidth = typeof bbox?.width === 'number' ? bbox.width : 0.15;
-      // Clamp scale factor between 0.2 (far) and 1.2 (near)
-      // Allow it to go lower (0.2) to support further distances (e.g. 3-4 meters)
-      const scaleFactor = Math.min(1.2, Math.max(0.2, currentFaceWidth / refFaceWidth));
+    if (!this.state.smoothedState) {
+      this.state.smoothedState = { ...this.state };
+    }
 
-      // --- 1. Update X (Horizontal) ---
-      // Smooth interpolation: 60% old, 40% new for better responsiveness
-      // Reduced smoothing from 0.7 to 0.6 to reduce latency
-      this.currentHeadX = this.currentHeadX * 0.6 + mirroredX * 0.4;
-      
-      this.state.bodyX = this.currentHeadX;
-      this.state.rawNoseX = rawFaceX;
-      this.state.rawNoseY = rawFaceY;
-      this.state.rawFaceX = rawFaceCenterX;
-      this.state.rawFaceY = rawFaceCenterY;
-      this.state.rawFaceWidth = rawFaceWidth;
-      this.state.rawFaceHeight = rawFaceHeight;
-      this.smoothedNoseX = this.smoothedNoseX * (1 - noseAlpha) + rawFaceX * noseAlpha;
-      this.smoothedNoseY = this.smoothedNoseY * (1 - noseAlpha) + rawFaceY * noseAlpha;
-      this.smoothedFaceCenterX = this.smoothedFaceCenterX * (1 - noseAlpha) + rawFaceCenterX * noseAlpha;
-      this.smoothedFaceCenterY = this.smoothedFaceCenterY * (1 - noseAlpha) + rawFaceCenterY * noseAlpha;
-      this.smoothedFaceWidth = this.smoothedFaceWidth * (1 - noseAlpha) + rawFaceWidth * noseAlpha;
-      this.smoothedFaceHeight = this.smoothedFaceHeight * (1 - noseAlpha) + rawFaceHeight * noseAlpha;
+    this.state.smoothedState.bodyX = this.state.bodyX;
+    this.state.smoothedState.rawNoseX = this.smoothedNoseX;
+    this.state.smoothedState.rawNoseY = this.smoothedNoseY;
+    this.state.smoothedState.rawFaceX = this.smoothedBoxCenterX;
+    this.state.smoothedState.rawFaceY = this.smoothedBoxCenterY;
+    this.state.smoothedState.rawFaceWidth = this.smoothedBoxWidth;
+    this.state.smoothedState.rawFaceHeight = this.smoothedBoxHeight;
+    this.state.smoothedState.rawShoulderY = this.state.rawShoulderY;
+    this.state.smoothedState.x = this.state.x;
+    this.state.smoothedState.isJumping = this.state.isJumping;
 
-      // Lane Logic
-      // Scale threshold with distance. If far (scale < 1), threshold reduces.
-      // Base threshold 0.12 * scaleFactor
-      const dynamicXThreshold = Math.max(0.04, this.xThreshold * scaleFactor);
-      
-      let targetLane = 0;
-      if (this.currentHeadX < (0.5 - dynamicXThreshold)) {
-          targetLane = -1; // Left
-      } else if (this.currentHeadX > (0.5 + dynamicXThreshold)) {
-          targetLane = 1;  // Right
-      } else {
-          targetLane = 0;  // Center
-      }
-
-      if (this.state.x !== targetLane) {
-          this.onMotionDetected?.('move');
-      }
-      this.state.x = targetLane;
-
-      // --- 2. Update Y (Jump) ---
-      // Jump Logic: Detect rapid UPWARD movement of the HEAD
-      // Up = Negative Y direction (0 is top)
-      
-      // Calculate velocity
-      // Positive Velocity = Moving UP (Old Y > New Y)
-      const dy = this.smoothedHeadY - rawFaceY;
-      const velocity = dy / dtSec;
-      
-      // Update smoothed baseline (follow head slowly to adapt to height)
-      this.smoothedHeadY = this.smoothedHeadY * 0.96 + rawFaceY * 0.04;
-      this.state.rawShoulderY = this.smoothedHeadY;
-
-      // Optical Flow Check
-      // Calculate optical flow movement (positive = UP)
-      // This runs on every frame but only when results are available to save power
-      const opticalFlowMovement = this.video ? this.calculateOpticalFlow(this.video, bbox) : 0;
-      // Smooth the flow value
-      this.opticalFlowY = this.opticalFlowY * 0.5 + opticalFlowMovement * 0.5;
-
-      // Jump Trigger
-      // Velocity > 1.2 (Fast upward)
-      // Displacement > 0.04 (Significant distance)
-      
-      const velocityThreshold = 2.4 * scaleFactor;
-      const displacementThreshold = 0.09 * scaleFactor;
-
-      // Robustness Improvements:
-      // 1. Stricter Size Stability: Reduced from 0.35 to 0.25 to prevent false positives during fast forward/backward movement
-      // 2. Forward Movement Suppression: If face is significantly larger than smoothed average (>15%) AND moving up, 
-      //    it's likely the user zooming in (perspective shift), not jumping.
-      // 3. Optical Flow Confirmation: Require at least some upward pixel movement (> 0.2 pixels avg) to confirm jump
-      
-      const isZoomingIn = faceSize > this.smoothedFaceSize * 1.15;
-      const isMovingUp = dy > 0;
-      const isOpticalFlowUp = this.opticalFlowY > 0.2; // Threshold for upward pixel movement
-      
-      // Only allow jump if size is stable AND we are not just zooming in AND optical flow agrees (or is neutral)
-      if (faceSizeRatio < 0.25 && !(isZoomingIn && isMovingUp)) {
-          if (!this.jumpArmed && dy < 0.02 * scaleFactor) {
-              this.jumpArmed = true;
-          }
-          
-          // Primary check: Face velocity & displacement
-          const isFaceJump = velocity > velocityThreshold && dy > displacementThreshold;
-          
-          // Secondary check: Optical flow must NOT be strongly downward (which would contradict upward face movement)
-          // Ideally it should be positive. We accept it if it's > 0.2
-          const isFlowValid = isOpticalFlowUp;
-          
-          // Combine checks:
-          // We trust Face Detection mostly, but use Optical Flow to VETO false positives.
-          // However, if Face Detection is VERY strong (velocity > threshold * 1.5), we might skip flow check to be responsive.
-          // But for now, let's require flow confirmation to solve the "leaning forward" issue.
-          // When leaning forward, face moves UP in frame, but shoulders/body might not move much or move forward.
-          // Optical flow on the whole frame (mostly body) should reflect the true motion.
-          
-          const isCandidate = isFaceJump && isFlowValid;
-
-          this.jumpCandidateFrames = isCandidate ? Math.min(4, this.jumpCandidateFrames + 1) : Math.max(0, this.jumpCandidateFrames - 1);
-          if (this.jumpArmed && this.jumpCandidateFrames >= 3 && !this.state.isJumping && now - this.lastJumpTime > this.JUMP_COOLDOWN) {
-              log(1, 'JUMP', `Jump! Vel: ${velocity.toFixed(2)}, Dy: ${dy.toFixed(2)}, Flow: ${this.opticalFlowY.toFixed(2)}`);
-              this.state.isJumping = true;
-              this.lastJumpTime = now;
-              this.jumpCandidateFrames = 0;
-              this.jumpArmed = false;
-              this.onMotionDetected?.('jump');
-              setTimeout(() => { this.state.isJumping = false; }, 450);
-          }
-      } else {
-          this.jumpCandidateFrames = 0;
-      }
-
-      // --- 3. Sync Smoothed State ---
-      if (!this.state.smoothedState) {
-           this.state.smoothedState = { ...this.state };
-      }
-      
-      this.state.smoothedState.bodyX = this.state.bodyX;
-      this.state.smoothedState.rawNoseX = this.smoothedNoseX;
-      this.state.smoothedState.rawNoseY = this.smoothedNoseY;
-      this.state.smoothedState.rawFaceX = this.smoothedFaceCenterX;
-      this.state.smoothedState.rawFaceY = this.smoothedFaceCenterY;
-      this.state.smoothedState.rawFaceWidth = this.smoothedFaceWidth;
-      this.state.smoothedState.rawFaceHeight = this.smoothedFaceHeight;
-      this.state.smoothedState.x = this.state.x;
-      this.state.smoothedState.isJumping = this.state.isJumping;
-      
-      this.smoothedState = this.state.smoothedState;
-      this.lastFrameTime = now;
-
+    this.smoothedState = this.state.smoothedState;
+    this.lastResultTime = now;
   }
 
   private async processFrame() {
-    if (!this.isRunning || !this.video || !this.faceDetector) return;
+    if (!this.isRunning || !this.video || !this.pose) return;
+
+    const now = performance.now();
+    if (now - this.lastSendTime < this.FRAME_MIN_TIME) {
+      this.requestRef = requestAnimationFrame(() => this.processFrame());
+      return;
+    }
+    this.lastSendTime = now;
 
     try {
-        // Send frame to Face Detector
-        // Note: Face Detector is async, result handled in onResults
-        if (this.video.videoWidth > 0 && !this.video.paused) {
-            await this.faceDetector.send({image: this.video});
-        }
+      if (this.video.videoWidth > 0 && !this.video.paused) {
+        await this.pose.send({ image: this.video });
+      }
     } catch (e) {
-        console.warn("Face detection send error", e);
+      console.warn('Pose send error', e);
     }
 
     if (this.isRunning) {
-      // Throttle to target FPS? FaceDetector is usually fast enough
-      // But we can use requestAnimationFrame loop to drive the sending
       this.requestRef = requestAnimationFrame(() => this.processFrame());
     }
   }

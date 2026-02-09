@@ -20,11 +20,16 @@ const CompletionOverlay: React.FC<CompletionOverlayProps> = ({ score, total, isV
       if ('speechSynthesis' in window) {
         const speak = () => {
           window.speechSynthesis.cancel();
+          if (window.setBGMVolume) {
+            window.setBGMVolume(0);
+          }
           const utterance = new SpeechSynthesisUtterance(feedbackText);
           utterance.lang = 'en-US';
           utterance.pitch = 1.4;
           utterance.rate = 1.1;
           utterance.volume = 1.0;
+          utterance.onend = () => window.restoreBGMVolume?.();
+          utterance.onerror = () => window.restoreBGMVolume?.();
           window.speechSynthesis.speak(utterance);
         };
         const voiceTimer = setTimeout(speak, 100);
@@ -66,72 +71,74 @@ const CompletionOverlay: React.FC<CompletionOverlayProps> = ({ score, total, isV
           exit={{ opacity: 0 }}
           className="fixed inset-0 z-[1000] pointer-events-none flex flex-col items-center justify-center bg-black/70 overflow-hidden"
         >
-          <motion.div
-            initial={{ y: -100, opacity: 0, scale: 0.5 }}
-            animate={{ 
-              y: 0, 
-              opacity: 1,
-              scale: isPerfect ? [1, 1.1, 1] : 1
-            }}
-            transition={{ 
-              y: { duration: 0.6, ease: "backOut" },
-              scale: isPerfect ? { repeat: Infinity, duration: 2, ease: "easeInOut" } : { duration: 0.4 }
-            }}
-            className="mb-[4vh] md:mb-[8vh]"
-          >
-            <h1 className={`text-[6vw] md:text-[8vw] font-['Fredoka_One'] italic tracking-wider drop-shadow-[0_8px_0_#333333] ${
-              isPerfect ? 'text-kenney-yellow' : 'text-white'
-            }`}>
-              {feedbackText}
-            </h1>
-          </motion.div>
+          <div className="non-game-scale flex flex-col items-center justify-center">
+            <motion.div
+              initial={{ y: -100, opacity: 0, scale: 0.5 }}
+              animate={{ 
+                y: 0, 
+                opacity: 1,
+                scale: isPerfect ? [1, 1.1, 1] : 1
+              }}
+              transition={{ 
+                y: { duration: 0.6, ease: "backOut" },
+                scale: isPerfect ? { repeat: Infinity, duration: 2, ease: "easeInOut" } : { duration: 0.4 }
+              }}
+              className="mb-[4vh] md:mb-[8vh]"
+            >
+              <h1 className={`text-[6vw] md:text-[8vw] font-['Fredoka_One'] italic tracking-wider drop-shadow-[0_8px_0_#333333] ${
+                isPerfect ? 'text-kenney-yellow' : 'text-white'
+              }`}>
+                {feedbackText}
+              </h1>
+            </motion.div>
 
-          <div className="flex flex-wrap justify-center gap-[2vw] md:gap-[4vw] max-w-[80vw] mb-[4vh] md:mb-[8vh]">
-            {Array.from({ length: total }).map((_, i) => (
-              <motion.div
-                key={i}
-                initial={{ scale: 0, rotate: -30 }}
-                 animate={{ 
-                   scale: i < score ? [0, 1.2, 1] : 1, 
-                   rotate: 0,
-                   opacity: 1
-                 }}
-                 transition={{ 
-                   scale: {
-                     delay: 1.2 + i * 0.5,
-                     duration: 0.5,
-                     times: [0, 0.8, 1],
-                     ease: "easeOut"
-                   },
-                   rotate: {
-                     delay: 1.2 + i * 0.5,
-                     duration: 0.5
-                   },
-                   opacity: {
-                     delay: 1.2 + i * 0.5,
-                     duration: 0.3
-                   }
-                 }}
-              >
-                <ImgWithFallback 
-                  src={getR2AssetUrl('assets/kenney/Vector/Tiles/star.svg')}
-                  className={`w-[8vw] h-[8vw] md:w-[12vw] md:h-[12vw] drop-shadow-lg ${i < score ? '' : 'grayscale opacity-30 blur-[1px]'}`}
-                  alt="Star"
-                />
-              </motion.div>
-            ))}
+            <div className="flex flex-wrap justify-center gap-[2vw] md:gap-[4vw] max-w-[80vw] mb-[4vh] md:mb-[8vh]">
+              {Array.from({ length: total }).map((_, i) => (
+                <motion.div
+                  key={i}
+                  initial={{ scale: 0, rotate: -30 }}
+                  animate={{ 
+                    scale: i < score ? [0, 1.2, 1] : 1, 
+                    rotate: 0,
+                    opacity: 1
+                  }}
+                  transition={{ 
+                    scale: {
+                      delay: 1.2 + i * 0.5,
+                      duration: 0.5,
+                      times: [0, 0.8, 1],
+                      ease: "easeOut"
+                    },
+                    rotate: {
+                      delay: 1.2 + i * 0.5,
+                      duration: 0.5
+                    },
+                    opacity: {
+                      delay: 1.2 + i * 0.5,
+                      duration: 0.3
+                    }
+                  }}
+                >
+                  <ImgWithFallback 
+                    src={getR2AssetUrl('assets/kenney/Vector/Tiles/star.svg')}
+                    className={`w-[8vw] h-[8vw] md:w-[12vw] md:h-[12vw] drop-shadow-lg ${i < score ? '' : 'grayscale opacity-30 blur-[1px]'}`}
+                    alt="Star"
+                  />
+                </motion.div>
+              ))}
+            </div>
+
+            <motion.div
+              initial={{ y: 50, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: 2.0 + score * 0.6, duration: 0.5 }}
+              className="bg-white rounded-full px-[4vw] md:px-[8vw] py-[2vh] md:py-[3vh] shadow-[0_6px_0_#333333] border-[4px] md:border-[6px] border-kenney-dark"
+            >
+              <span className="text-[4vw] md:text-[5vw] font-black text-kenney-orange tabular-nums">
+                {score} / {total}
+              </span>
+            </motion.div>
           </div>
-
-           <motion.div
-             initial={{ y: 50, opacity: 0 }}
-             animate={{ y: 0, opacity: 1 }}
-             transition={{ delay: 2.0 + score * 0.6, duration: 0.5 }}
-            className="bg-white rounded-full px-[4vw] md:px-[8vw] py-[2vh] md:py-[3vh] shadow-[0_6px_0_#333333] border-[4px] md:border-[6px] border-kenney-dark"
-          >
-            <span className="text-[4vw] md:text-[5vw] font-black text-kenney-orange tabular-nums">
-              {score} / {total}
-            </span>
-          </motion.div>
         </motion.div>
       )}
     </AnimatePresence>

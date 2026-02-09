@@ -10,6 +10,11 @@ export class PreloadScene extends Phaser.Scene {
     super({ key: 'PreloadScene' });
   }
 
+  private ensureThemesListCached(themesList: { themes: Theme[] }) {
+    // Keep MainScene in sync: it relies on Phaser JSON cache for theme data.
+    this.cache.json.add('themes_list', themesList);
+  }
+
   init(data: { theme?: ThemeId }) {
     const initialThemes = this.registry.get('initialThemes');
     const initialTheme = this.registry.get('initialTheme');
@@ -166,6 +171,7 @@ export class PreloadScene extends Phaser.Scene {
     const allThemes = this.registry.get('allThemes');
     if (allThemes && Array.isArray(allThemes) && allThemes.length > 0) {
         console.log('[PreloadScene] Using injected themes data from registry');
+        this.ensureThemesListCached({ themes: allThemes });
         this.loadThemeAssets({ themes: allThemes });
         return;
     }
@@ -174,6 +180,7 @@ export class PreloadScene extends Phaser.Scene {
     const cachedThemes = getCachedThemes();
     if (cachedThemes && cachedThemes.length > 0) {
         console.log('[PreloadScene] Using cached themes from gameConfig');
+        this.ensureThemesListCached({ themes: cachedThemes });
         this.loadThemeAssets({ themes: cachedThemes });
         return;
     }
@@ -181,6 +188,7 @@ export class PreloadScene extends Phaser.Scene {
     // Strategy 3: Check Phaser Cache
     const themesList = this.cache.json.get('themes_list');
     if (themesList) {
+      this.ensureThemesListCached(themesList);
       this.loadThemeAssets(themesList);
       return;
     }

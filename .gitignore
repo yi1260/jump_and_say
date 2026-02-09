@@ -9,7 +9,7 @@ lerna-debug.log*
 # public/themes/
 public/themes.*/
 # public/assets/
-# public/mediapipe/
+public/mediapipe/
 
 node_modules
 dist

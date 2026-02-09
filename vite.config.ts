@@ -47,7 +47,7 @@ export default defineConfig(({ mode }) => {
               'workbox-*.js',
               '**/assets/kenney/**/*',
               '**/assets/Fredoka/**/*',
-              '**/mediapipe/face_detection/**/*',
+              '**/assets/mediapipe/pose/**/*',
               '**/themes.backup*/**/*',
               '**/assets/kenney/Sprites/**/*',
               '**/assets/kenney/Vector/backup/**/*'
@@ -85,10 +85,10 @@ export default defineConfig(({ mode }) => {
                 }
               },
               {
-                urlPattern: ({ url }) => url.origin === self.location.origin && url.pathname.startsWith('/mediapipe/face_detection/'),
+                urlPattern: ({ url }) => url.origin === self.location.origin && url.pathname.startsWith('/assets/mediapipe/pose/'),
                 handler: 'CacheFirst',
                 options: {
-                  cacheName: 'local-mediapipe-face-cache',
+                  cacheName: 'local-mediapipe-pose-cache',
                   expiration: {
                     maxEntries: 30,
                     maxAgeSeconds: 60 * 60 * 24 * 365
@@ -110,7 +110,7 @@ export default defineConfig(({ mode }) => {
                     maxAgeSeconds: 60 * 60 * 24 * 365 // 1 year
                   },
                   cacheableResponse: {
-                    statuses: [200]
+                    statuses: [0, 200]
                   }
                 }
               },

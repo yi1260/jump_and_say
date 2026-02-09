@@ -7,11 +7,12 @@ import { loadThemes, startBackgroundPreloading } from './gameConfig';
 import { preloadAllGameAssets } from './services/assetLoader';
 import { motionController } from './services/motionController';
 import { getLocalAssetUrl, getR2AssetUrl } from './src/config/r2Config';
-import { Theme, ThemeId } from './types';
+import { PoseLandmark, Theme, ThemeId } from './types';
 
 declare global {
   interface Window {
     setBGMVolume?: (vol: number) => void;
+    restoreBGMVolume?: () => void;
   }
 }
 
@@ -23,56 +24,16 @@ export enum GamePhase {
   PLAYING = 'PLAYING'
 }
 
-interface FaceBox {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-const FaceMaskSvg: React.FC = () => (
-  <svg
-    xmlns="http://www.w3.org/2000/svg"
-    viewBox="0 0 64 64"
-    className="w-full h-full drop-shadow-[0_1px_2px_rgba(0,0,0,0.6)]"
-    aria-hidden="true"
-  >
-    <g>
-      <path
-        fill="#FFBDD1"
-        d="M52 32 Q52 40.3 46.15 46.15 40.3 52 32 52 23.75 52 17.9 46.15 12 40.3 12 32 12 23.75 17.9 17.9 23.75 12 32 12 40.3 12 46.15 17.9 52 23.75 52 32 M32 14 Q24.6 14 19.35 19.3 L19.3 19.35 Q14 24.6 14 32 14 39.45 19.3 44.75 L19.35 44.75 Q24.6 50 32 50 39.45 50 44.75 44.75 50 39.45 50 32 50 24.6 44.75 19.35 L44.75 19.3 Q39.45 14 32 14"
-      />
-      <path
-        fill="#FF8AAE"
-        d="M32 14 Q39.45 14 44.75 19.3 L44.75 19.35 Q50 24.6 50 32 50 39.45 44.75 44.75 39.45 50 32 50 24.6 50 19.35 44.75 L19.3 44.75 Q14 39.45 14 32 14 24.6 19.3 19.35 L19.35 19.3 Q24.6 14 32 14"
-      />
-      <path
-        fill="#913F58"
-        d="M32 8 Q41.95 8 49 15.1 56 22.1 56 32 56 41.95 49 49 41.95 56 32 56 22.1 56 15.1 49 8 41.95 8 32 8 22.1 15.05 15.1 L15.1 15.05 Q22.1 8 32 8 M52 32 Q52 23.75 46.15 17.9 40.3 12 32 12 23.75 12 17.9 17.9 12 23.75 12 32 12 40.3 17.9 46.15 23.75 52 32 52 40.3 52 46.15 46.15 52 40.3 52 32"
-      />
-      <path
-        fill="#FFFFFF"
-        d="M40 29 Q40 32.3 37.6 34.6 35.35 37 32 37 28.6 37 26.35 34.6 24 32.3 24 29 24 25.65 26.35 23.25 28.6 21 32 21 35.35 21 37.6 23.25 40 25.65 40 29 M36 29 Q36 27.3 34.8 26.1 33.65 25 32 25 30.35 25 29.2 26.1 28 27.3 28 29 28 30.65 29.2 31.8 30.35 33 32 33 33.65 33 34.8 31.8 36 30.65 36 29"
-      />
-      <path
-        fill="#AF4D62"
-        d="M36 29 Q36 30.65 34.8 31.8 33.65 33 32 33 30.35 33 29.2 31.8 28 30.65 28 29 28 27.3 29.2 26.1 30.35 25 32 25 33.65 25 34.8 26.1 36 27.3 36 29"
-      />
-      <path
-        fill="#AF4D62"
-        d="M35.25 42.2 Q33.9 43.5 32 43.5 30.1 43.5 28.65 42.15 L28.65 42.1 28.25 41.65 Q27.95 41.3 28 40.9 28.05 40.5 28.4 40.25 28.7 39.95 29.1 40 29.5 40.05 29.8 40.4 L30.05 40.7 Q30.9 41.5 32 41.5 33.15 41.5 33.95 40.7 L34.05 40.6 34.15 40.5 Q34.35 40.1 34.75 40.05 L35.5 40.15 36 40.75 35.85 41.55 35.25 42.2"
-      />
-    </g>
-  </svg>
-);
-
 export default function App() {
+  const BGM_VOLUME_PLAYING = 0.003;
+  const BGM_VOLUME_IDLE = 0.003;
   const [score, setScore] = useState(0);
   const [totalQuestions, setTotalQuestions] = useState(0);
   const [selectedThemes, setSelectedThemes] = useState<ThemeId[]>([]);
   const [isPortrait, setIsPortrait] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showCompletion, setShowCompletion] = useState(false);
+  const [isBgmEnabled, setIsBgmEnabled] = useState(true);
   const [bgIndex, setBgIndex] = useState(0);
   const [themes, setThemes] = useState<Theme[]>([]);
 
@@ -81,33 +42,63 @@ export default function App() {
   const [initStatus, setInitStatus] = useState<string>('');
   const [themeImagesLoaded, setThemeImagesLoaded] = useState(false);
   const [hasShownEmoji, setHasShownEmoji] = useState(false);
-  const [nosePosition, setNosePosition] = useState({ x: 0.5, y: 0.5 });
-  const [faceBox, setFaceBox] = useState<FaceBox>({ x: 0.5, y: 0.5, width: 0.18, height: 0.24 });
-  const [isNoseDetected, setIsNoseDetected] = useState(false);
   const bgmRef = useRef<HTMLAudioElement>(null);
-  const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
+  const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
+  const isBgmEnabledRef = useRef<boolean>(isBgmEnabled);
+  const isBgmPlayingRef = useRef<boolean>(false);
+  const poseCanvasRef = useRef<HTMLCanvasElement>(null);
+  const poseLoopRef = useRef<number | null>(null);
   
   // Loading State
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [loadingStatus, setLoadingStatus] = useState('Initializing...');
 
-  const maskScale = 1.35;
-  const maskOffsetX = 0.02;
-  const maskWidth = Math.max(faceBox.width * maskScale, 0.18);
-  const maskHeight = Math.max(faceBox.height * maskScale, 0.24);
-  const maskLeft = clamp(1 - nosePosition.x + maskOffsetX, maskWidth / 2, 1 - maskWidth / 2);
-  const maskTop = clamp(nosePosition.y, maskHeight / 2, 1 - maskHeight / 2);
+  const POSE_CONNECTIONS: Array<[number, number]> = [
+    [0, 1], [1, 2], [2, 3],
+    [0, 4], [4, 5], [5, 6],
+    [1, 7], [4, 8],
+    [9, 10],
+    [11, 12],
+    [11, 13], [13, 15],
+    [12, 14], [14, 16],
+    [15, 17], [15, 19], [15, 21],
+    [16, 18], [16, 20], [16, 22],
+    [11, 23], [12, 24], [23, 24],
+    [23, 25], [25, 27], [27, 29], [29, 31],
+    [24, 26], [26, 28], [28, 30], [30, 32]
+  ];
+
+  const getBgmTargetVolume = (targetPhase: GamePhase): number => {
+    return targetPhase === GamePhase.PLAYING ? BGM_VOLUME_PLAYING : BGM_VOLUME_IDLE;
+  };
+
+  const applyBgmState = (enabled: boolean): void => {
+    const audio = bgmAudioRef.current;
+    if (!audio) return;
+
+    const shouldPlay = enabled && phaseRef.current === GamePhase.PLAYING;
+    if (shouldPlay) {
+      audio.muted = false;
+      audio.volume = getBgmTargetVolume(phaseRef.current);
+      audio.play().then(() => {
+        isBgmPlayingRef.current = true;
+      }).catch(() => {});
+    } else {
+      audio.pause();
+      audio.muted = true;
+      audio.volume = 0;
+      isBgmPlayingRef.current = false;
+    }
+  };
   
   const setPhase = (newPhase: GamePhase) => {
     phaseRef.current = newPhase;
     setPhaseState(newPhase);
     
-    // Adjust BGM volume based on game phase
-    if (newPhase === GamePhase.PLAYING) {
-      window.setBGMVolume?.(0.2);
-    } else {
-      window.setBGMVolume?.(0.3);
-      
+    // BGM only plays during gameplay; keep user toggle as preference
+    applyBgmState(isBgmEnabledRef.current);
+
+    if (newPhase !== GamePhase.PLAYING) {
       // Force exit fullscreen when entering MENU or THEME_SELECTION
       if (newPhase === GamePhase.MENU || newPhase === GamePhase.THEME_SELECTION) {
         const doc = document as any;
@@ -149,51 +140,87 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    return () => {
+      if (poseLoopRef.current !== null) {
+        cancelAnimationFrame(poseLoopRef.current);
+        poseLoopRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    isBgmEnabledRef.current = isBgmEnabled;
+  }, [isBgmEnabled]);
+
+  useEffect(() => {
     let bgmAudio: HTMLAudioElement | null = null;
-    let isPlaying = false;
     let hasTriedFallback = false;
     
     const updateVolume = (vol: number) => {
       if (bgmAudio) {
+        if (!isBgmEnabledRef.current || phaseRef.current !== GamePhase.PLAYING) {
+          bgmAudio.volume = 0;
+          return;
+        }
         bgmAudio.volume = vol;
       }
     };
     
     window.setBGMVolume = updateVolume;
+    window.restoreBGMVolume = () => {
+      updateVolume(isBgmEnabledRef.current ? getBgmTargetVolume(phaseRef.current) : 0);
+    };
     
     const initBGM = async () => {
-      if (isPlaying) return;
+      if (isBgmPlayingRef.current) return;
       
       const bgmCdnUrl = getR2AssetUrl('assets/kenney/Sounds/funny-kids-video-322163.mp3');
       const bgmLocalUrl = getLocalAssetUrl(bgmCdnUrl);
       bgmAudio = new Audio(bgmCdnUrl);
+      bgmAudioRef.current = bgmAudio;
       bgmAudio.loop = true;
-      bgmAudio.volume = 0.3;
+      const shouldPlay = isBgmEnabledRef.current && phaseRef.current === GamePhase.PLAYING;
+      bgmAudio.volume = shouldPlay ? getBgmTargetVolume(phaseRef.current) : 0;
+      bgmAudio.muted = !shouldPlay;
       bgmAudio.preload = 'auto';
+      bgmAudio.addEventListener('play', () => {
+        isBgmPlayingRef.current = true;
+      });
+      bgmAudio.addEventListener('pause', () => {
+        isBgmPlayingRef.current = false;
+      });
+      bgmAudio.addEventListener('ended', () => {
+        isBgmPlayingRef.current = false;
+      });
       bgmAudio.addEventListener('error', () => {
         if (!bgmAudio || hasTriedFallback) return;
         hasTriedFallback = true;
         bgmAudio.src = bgmLocalUrl;
         bgmAudio.load();
-        if (isPlaying) {
+        if (isBgmPlayingRef.current) {
           bgmAudio.play().catch(() => {});
         }
       });
       
-      try {
-        await bgmAudio.play();
-        isPlaying = true;
-        console.log('BGM started playing');
-      } catch (e) {
-        console.log('BGM play failed, waiting for user interaction:', e);
+      if (isBgmEnabledRef.current && phaseRef.current === GamePhase.PLAYING) {
+        try {
+          await bgmAudio.play();
+          isBgmPlayingRef.current = true;
+          console.log('BGM started playing');
+        } catch (e) {
+          console.log('BGM play failed, waiting for user interaction:', e);
+        }
       }
     };
     
     initBGM();
     
     const handleInteraction = () => {
-      if (!isPlaying && bgmAudio) {
-        bgmAudio.play().catch(() => {});
+      if (!isBgmEnabledRef.current || phaseRef.current !== GamePhase.PLAYING || !bgmAudio) return;
+      if (!isBgmPlayingRef.current) {
+        bgmAudio.play().then(() => {
+          isBgmPlayingRef.current = true;
+        }).catch(() => {});
       }
     };
     
@@ -210,7 +237,10 @@ export default function App() {
         bgmAudio.src = '';
         bgmAudio = null;
       }
-      isPlaying = false;
+      bgmAudioRef.current = null;
+      isBgmPlayingRef.current = false;
+      window.setBGMVolume = undefined;
+      window.restoreBGMVolume = undefined;
     };
   }, []);
 
@@ -324,14 +354,185 @@ export default function App() {
         box-shadow: 6px 6px 0px #333333;
       }
 
-      .live-view-video {
-        filter: blur(1.2px) brightness(0.92) contrast(0.92) saturate(0.9);
+      .non-game-shell {
+        padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)) !important;
       }
 
-      .live-view-mask {
-        background: linear-gradient(135deg, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0.08));
-        -webkit-backdrop-filter: blur(1.5px);
-        backdrop-filter: blur(1.5px);
+      .non-game-scale {
+        --ui-scale: 1;
+        transform: scale(var(--ui-scale));
+        transform-origin: center;
+      }
+
+      .menu-shell,
+      .theme-shell,
+      .tutorial-shell {
+        width: 100%;
+      }
+
+      .theme-grid-wrap {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100%;
+      }
+
+      .theme-start {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: clamp(2.5rem, 6vh, 5rem);
+      }
+
+      @media (max-width: 640px) {
+        .theme-start {
+          position: static !important;
+          margin-top: 0.75rem;
+          padding-bottom: 0.5rem;
+        }
+        .menu-shell {
+          padding-top: 0.5rem !important;
+          padding-bottom: 0.5rem !important;
+        }
+        .tutorial-shell {
+          padding-top: 3vh !important;
+        }
+      }
+
+      @media (max-height: 640px) {
+        .menu-shell {
+          padding-top: 0.25rem !important;
+          padding-bottom: 0.25rem !important;
+        }
+        .tutorial-shell {
+          padding-top: 2vh !important;
+        }
+      }
+
+      @media (max-width: 768px) {
+        .non-game-scale {
+          --ui-scale: 0.95;
+        }
+      }
+
+      @media (max-height: 640px) {
+        .non-game-scale {
+          --ui-scale: 0.9;
+        }
+      }
+
+      @media (max-height: 520px) {
+        .non-game-scale {
+          --ui-scale: 0.82;
+        }
+      }
+
+      @media (max-height: 420px) {
+        .non-game-scale {
+          --ui-scale: 0.75;
+        }
+      }
+
+      @media (max-width: 640px) {
+        .mobile-landscape-title {
+          font-size: clamp(1.6rem, 8.5vw, 3rem) !important;
+        }
+        .mobile-landscape-button {
+          padding: 0.5rem 1.75rem !important;
+          font-size: clamp(1rem, 4.8vw, 1.6rem) !important;
+        }
+        .mobile-landscape-character {
+          width: 4.5rem !important;
+          height: 4.5rem !important;
+        }
+        .theme-card {
+          height: 3.25rem !important;
+          padding: 0.5rem !important;
+        }
+        .theme-card-title {
+          font-size: 0.75rem !important;
+        }
+        .theme-badge {
+          width: 1.5rem !important;
+          height: 1.5rem !important;
+        }
+        .theme-badge span {
+          font-size: 0.6rem !important;
+        }
+      }
+
+      @media (max-height: 640px) {
+        .tutorial-title {
+          font-size: clamp(1.4rem, 6vh, 2.2rem) !important;
+        }
+        .tutorial-card-title {
+          font-size: clamp(0.9rem, 3.2vh, 1.3rem) !important;
+        }
+        .tutorial-card-subtitle {
+          font-size: clamp(0.65rem, 2.4vh, 0.9rem) !important;
+        }
+        .tutorial-card-img {
+          width: 10vh !important;
+          height: 10vh !important;
+        }
+      }
+
+      @media (max-height: 520px) {
+        .tutorial-card {
+          padding: 0.75rem !important;
+        }
+      }
+
+      .loading-content {
+        gap: 1.5rem;
+      }
+
+      .loading-character {
+        width: clamp(5rem, 12vw, 10rem);
+        height: clamp(5rem, 12vw, 10rem);
+      }
+
+      .loading-title {
+        font-size: clamp(1.6rem, 4.5vw, 3rem);
+      }
+
+      .loading-bar {
+        height: clamp(2rem, 4.5vw, 3rem);
+      }
+
+      .loading-status {
+        font-size: clamp(0.85rem, 2.4vw, 1.25rem);
+      }
+
+      @media (max-height: 560px) {
+        .loading-content {
+          flex-direction: row;
+          text-align: left;
+          gap: 1rem;
+        }
+        .loading-text {
+          align-items: flex-start;
+        }
+        .loading-character {
+          width: 5rem;
+          height: 5rem;
+        }
+        .loading-bar {
+          height: 2rem;
+        }
+      }
+
+      .live-view-video {
+        /* Filter removed for clear view */
+      }
+      
+      .live-view-texture {
+        background-image: radial-gradient(rgba(0, 0, 0, 0.25) 1px, transparent 1px);
+        background-size: 3px 3px;
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        z-index: 1;
       }
       
       #bgm-audio {
@@ -462,44 +663,32 @@ export default function App() {
         }
 
         /* Theme Grid Responsive Fixes */
-        @media (max-height: 480px) {
-          .theme-selection-container {
-            gap: 0.5rem !important;
-          }
-          .theme-grid {
-            gap: 0.75rem !important;
-          }
-          .theme-card {
-            border-width: 2px !important;
-            padding: 0.5rem !important;
-          }
-          .theme-card span {
-            font-size: 0.9rem !important;
-          }
-          .theme-card p {
-            font-size: 0.65rem !important;
-            line-clamp: 2;
-          }
-          .theme-badge {
-            font-size: 8px !important;
-            padding: 0.25rem 0.5rem !important;
-          }
+        .theme-selection-container {
+          gap: 0.5rem !important;
         }
-        
-        @media (max-height: 600px) and (max-width: 768px) {
-          .theme-card p {
-            font-size: 0.7rem !important;
-          }
-          .theme-card span {
-            font-size: 1rem !important;
-          }
+        .theme-grid {
+          gap: 0.75rem !important;
         }
+        .theme-card {
+          border-width: 2px !important;
+          padding: 0.5rem !important;
+        }
+        .theme-card-title {
+          font-size: 0.9rem !important;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+        .theme-badge {
+          font-size: 8px !important;
+          padding: 0.25rem 0.5rem !important;
+        }
+      }
 
-        /* Smooth scrolling for theme grid */
-        .scrollbar-hide {
-          scroll-behavior: smooth;
-        }
-          font-size: 0.6rem !important;
+      @media (max-height: 600px) and (max-width: 768px) {
+        .theme-card-title {
+          font-size: 1rem !important;
         }
       }
     `;
@@ -554,6 +743,22 @@ export default function App() {
     
     setPhase(GamePhase.THEME_SELECTION);
   };
+
+  const handleToggleBgm = useCallback((e?: React.MouseEvent | React.TouchEvent) => {
+    if (e) {
+      if (typeof e.cancelable !== 'boolean' || e.cancelable) {
+        e.preventDefault();
+      }
+      e.stopPropagation();
+    }
+
+    setIsBgmEnabled(prev => {
+      const next = !prev;
+      isBgmEnabledRef.current = next;
+      applyBgmState(next);
+      return next;
+    });
+  }, []);
 
   const enterFullscreenAndLockOrientation = async () => {
     try {
@@ -644,9 +849,6 @@ export default function App() {
             }
             motionController.calibrate();
             
-            // 启动 nose position update loop
-            startNoseTrackingLoop();
-            
             return true;
         } catch (e) {
             console.error('Failed to reuse camera:', e);
@@ -687,8 +889,8 @@ export default function App() {
              await videoRef.current.play();
              await motionController.start(videoRef.current);
              
-             // 启动 nose position update loop
-             startNoseTrackingLoop();
+             // 启动 pose overlay loop
+             startPoseOverlayLoop();
              
              return true;
         }
@@ -700,62 +902,82 @@ export default function App() {
     }
   };
 
-  const startNoseTrackingLoop = () => {
-        let lastUpdateTime = 0;
-        let consecutiveMissedFrames = 0;
-        const updateNosePosition = (timestamp: number) => {
-            if (phaseRef.current !== GamePhase.TUTORIAL && phaseRef.current !== GamePhase.PLAYING && phaseRef.current !== GamePhase.LOADING) {
-                // Keep running during LOADING to detect nose early
-                // But maybe stop if we exit to MENU
-                if (phaseRef.current === GamePhase.MENU || phaseRef.current === GamePhase.THEME_SELECTION) {
-                    return; 
-                }
-            }
-            
-            if (timestamp - lastUpdateTime >= 30) {
-                if (motionController.state) {
-                    if (motionController.isNoseDetected) {
-                        const overlayState = motionController.smoothedState || motionController.state;
-                        setNosePosition({
-                            x: overlayState.rawNoseX,
-                            y: overlayState.rawNoseY
-                        });
-                        const nextFaceBox: FaceBox = {
-                            x: typeof overlayState.rawFaceX === 'number' ? overlayState.rawFaceX : overlayState.rawNoseX,
-                            y: typeof overlayState.rawFaceY === 'number' ? overlayState.rawFaceY : overlayState.rawNoseY,
-                            width: typeof overlayState.rawFaceWidth === 'number' ? overlayState.rawFaceWidth : 0.18,
-                            height: typeof overlayState.rawFaceHeight === 'number' ? overlayState.rawFaceHeight : 0.24
-                        };
-                        setFaceBox({
-                            x: clamp(nextFaceBox.x, 0.05, 0.95),
-                            y: clamp(nextFaceBox.y, 0.05, 0.95),
-                            width: clamp(nextFaceBox.width, 0.08, 0.7),
-                            height: clamp(nextFaceBox.height, 0.1, 0.8)
-                        });
-                        consecutiveMissedFrames = 0;
-                    } else {
-                        consecutiveMissedFrames++;
-                        if (consecutiveMissedFrames >= 10) {
-                            const gradualRate = 0.05;
-                            setNosePosition(prev => ({
-                                x: prev.x * (1 - gradualRate) + 0.5 * gradualRate,
-                                y: prev.y * (1 - gradualRate) + 0.5 * gradualRate
-                            }));
-                            setFaceBox(prev => ({
-                                x: prev.x * (1 - gradualRate) + 0.5 * gradualRate,
-                                y: prev.y * (1 - gradualRate) + 0.5 * gradualRate,
-                                width: prev.width * (1 - gradualRate) + 0.18 * gradualRate,
-                                height: prev.height * (1 - gradualRate) + 0.24 * gradualRate
-                            }));
-                        }
-                    }
-                    setIsNoseDetected(motionController.isNoseDetected);
-                }
-                lastUpdateTime = timestamp;
-            }
-            requestAnimationFrame(updateNosePosition);
+  const startPoseOverlayLoop = () => {
+        if (poseLoopRef.current !== null) return;
+
+        const minVisibility = 0.4;
+        const resolvePoint = (landmarks: PoseLandmark[], index: number): { x: number; y: number } | null => {
+            const landmark = landmarks[index];
+            if (!landmark) return null;
+            const visibility = typeof landmark.visibility === 'number' ? landmark.visibility : 1;
+            const presence = typeof landmark.presence === 'number' ? landmark.presence : 1;
+            if (visibility < minVisibility || presence < minVisibility) return null;
+            return { x: landmark.x, y: landmark.y };
         };
-        requestAnimationFrame(updateNosePosition);
+
+        const drawPoseOverlay = () => {
+            const canvas = poseCanvasRef.current;
+            const video = videoRef.current;
+            if (!canvas || !video) {
+                poseLoopRef.current = requestAnimationFrame(drawPoseOverlay);
+                return;
+            }
+
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+                poseLoopRef.current = requestAnimationFrame(drawPoseOverlay);
+                return;
+            }
+
+            const width = canvas.clientWidth;
+            const height = canvas.clientHeight;
+            const dpr = window.devicePixelRatio || 1;
+            if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
+                canvas.width = Math.floor(width * dpr);
+                canvas.height = Math.floor(height * dpr);
+                ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            }
+
+            ctx.clearRect(0, 0, width, height);
+
+            const landmarks = motionController.poseLandmarks;
+            if (!landmarks || landmarks.length === 0) {
+                poseLoopRef.current = requestAnimationFrame(drawPoseOverlay);
+                return;
+            }
+
+            ctx.lineWidth = 1.8;
+            ctx.strokeStyle = 'rgba(0, 255, 163, 0.85)';
+            ctx.fillStyle = 'rgba(0, 255, 163, 0.9)';
+
+            POSE_CONNECTIONS.forEach(([start, end]) => {
+                const p1 = resolvePoint(landmarks, start);
+                const p2 = resolvePoint(landmarks, end);
+                if (!p1 || !p2) return;
+                const x1 = (1 - p1.x) * width;
+                const y1 = p1.y * height;
+                const x2 = (1 - p2.x) * width;
+                const y2 = p2.y * height;
+                ctx.beginPath();
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+                ctx.stroke();
+            });
+
+            landmarks.forEach((landmark, index) => {
+                const point = resolvePoint(landmarks, index);
+                if (!point) return;
+                const x = (1 - point.x) * width;
+                const y = point.y * height;
+                ctx.beginPath();
+                ctx.arc(x, y, 2.4, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            poseLoopRef.current = requestAnimationFrame(drawPoseOverlay);
+        };
+
+        poseLoopRef.current = requestAnimationFrame(drawPoseOverlay);
   };
 
   const handleStartGame = async () => {
@@ -860,30 +1082,32 @@ export default function App() {
       {/* 0. Portrait Warning Overlay */}
       {isPortrait && (
           <div 
-            className="fixed inset-0 z-[1000] bg-kenney-dark/95 backdrop-blur-md flex flex-col items-center justify-center p-8 text-center text-white touch-none"
+            className="fixed inset-0 z-[1000] bg-kenney-dark/95 backdrop-blur-md flex items-center justify-center p-8 text-center text-white touch-none non-game-shell"
             onWheel={(e) => e.preventDefault()}
             onTouchMove={(e) => e.preventDefault()}
           >
-              <div className="mb-4 md:mb-8 relative w-32 h-32 md:w-64 md:h-64 flex items-center justify-center">
-                  {/* Visual Instruction for Kids */}
-                  <div className="absolute inset-0 border-4 border-dashed border-white/20 rounded-3xl animate-pulse"></div>
-                  <div className="relative animate-rotate-device">
-                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-24 h-24 md:w-48 md:h-48">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18.75h3" />
-                      </svg>
-                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-8 h-8 md:w-12 md:h-12 text-kenney-yellow animate-bounce">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+              <div className="non-game-scale flex flex-col items-center justify-center text-center">
+                <div className="mb-4 md:mb-8 relative w-32 h-32 md:w-64 md:h-64 flex items-center justify-center">
+                    {/* Visual Instruction for Kids */}
+                    <div className="absolute inset-0 border-4 border-dashed border-white/20 rounded-3xl animate-pulse"></div>
+                    <div className="relative animate-rotate-device">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-24 h-24 md:w-48 md:h-48">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18.75h3" />
                         </svg>
-                      </div>
-                  </div>
+                        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
+                          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-8 h-8 md:w-12 md:h-12 text-kenney-yellow animate-bounce">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                          </svg>
+                        </div>
+                    </div>
+                </div>
+                <h2 className="text-2xl md:text-6xl font-black mb-2 uppercase italic tracking-tighter text-kenney-yellow">
+                    Rotate Screen
+                </h2>
+                <p className="text-lg md:text-2xl font-bold opacity-90 uppercase tracking-widest">
+                    Turn your phone!
+                </p>
               </div>
-              <h2 className="text-2xl md:text-6xl font-black mb-2 uppercase italic tracking-tighter text-kenney-yellow">
-                  Rotate Screen
-              </h2>
-              <p className="text-lg md:text-2xl font-bold opacity-90 uppercase tracking-widest">
-                  Turn your phone!
-              </p>
           </div>
       )}
 
@@ -894,7 +1118,7 @@ export default function App() {
       />
 
       {/* 1. Camera HUD */}
-      <div className={`fixed top-4 md:top-6 right-4 md:right-6 z-[60] transition-transform duration-500 ease-in-out mobile-landscape-camera ${phase === GamePhase.MENU || phase === GamePhase.THEME_SELECTION ? 'translate-x-[200%]' : 'translate-x-0'}`}>
+      <div className={`fixed top-4 md:top-6 right-4 md:right-6 z-[60] transition-all duration-500 ease-in-out mobile-landscape-camera ${phase === GamePhase.MENU || phase === GamePhase.THEME_SELECTION ? 'translate-x-[200%] opacity-0 pointer-events-none' : 'translate-x-0 opacity-100'}`}>
         <div className="bg-white p-1 md:p-2 border-[2px] md:border-[4px] border-kenney-dark rounded-kenney shadow-lg scale-75 md:scale-100 origin-top-right">
            <div className="w-20 h-15 sm:w-24 sm:h-18 md:w-32 md:h-24 overflow-hidden relative bg-kenney-dark/10 rounded-lg md:rounded-xl">
                <video 
@@ -905,22 +1129,11 @@ export default function App() {
                  autoPlay 
                  webkit-playsinline="true"
                />
-                <div className="absolute inset-0 pointer-events-none">
-                  {/* Soft privacy/clarity mask over live view */}
-                  <div className="absolute inset-0 live-view-mask"></div>
-                  {/* Face Mask Overlay */}
-                  <div 
-                    className={`absolute flex items-center justify-center -translate-x-1/2 -translate-y-1/2 ${!isNoseDetected ? 'opacity-0 scale-0' : 'opacity-100 scale-100'} transition-[opacity,transform] duration-200`}
-                    style={{
-                      left: `${maskLeft * 100}%`,
-                      top: `${maskTop * 100}%`,
-                      width: `${maskWidth * 100}%`,
-                      height: `${maskHeight * 100}%`
-                    }}
-                  >
-                    <FaceMaskSvg />
-                  </div>
-                </div>
+               <div className="live-view-texture" />
+                <canvas
+                  ref={poseCanvasRef}
+                  className="absolute inset-0 w-full h-full pointer-events-none"
+                />
              </div>
            <div className="mt-0.5 text-center text-[6px] md:text-[10px] font-black tracking-widest uppercase">Live View</div>
         </div>
@@ -993,6 +1206,28 @@ export default function App() {
                   )}
                 </button>
             )}
+
+            {/* BGM Toggle (PLAYING only) */}
+            {phase === GamePhase.PLAYING && (
+              <button
+                onTouchStart={(e) => handleToggleBgm(e)}
+                onClick={(e) => handleToggleBgm(e)}
+                style={{ pointerEvents: 'auto', touchAction: 'none' }}
+                className={`kenney-button-circle group scale-90 md:scale-100 ${isBgmEnabled ? 'bg-kenney-green' : 'bg-gray-400'}`}
+                title={isBgmEnabled ? 'BGM On' : 'BGM Off'}
+                aria-pressed={!isBgmEnabled}
+              >
+                {isBgmEnabled ? (
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3.5} stroke="currentColor" className="w-5 h-5 md:w-8 md:h-8 group-hover:scale-110 transition-transform">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M11 5 6 9H3v6h3l5 4V5zM15.5 8.5a4 4 0 0 1 0 7M18 6a7 7 0 0 1 0 12" />
+                  </svg>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3.5} stroke="currentColor" className="w-5 h-5 md:w-8 md:h-8 group-hover:scale-110 transition-transform">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M11 5 6 9H3v6h3l5 4V5zM16 9l4 4m0-4-4 4" />
+                  </svg>
+                )}
+              </button>
+            )}
           </div>
       )}
 
@@ -1027,7 +1262,7 @@ export default function App() {
 
       {/* 5. Menus & Overlays */}
       {phase !== GamePhase.PLAYING && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-kenney-blue/60 backdrop-blur-sm p-4">
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-kenney-blue/60 backdrop-blur-sm p-4 non-game-shell">
             
             {/* LOADING SCREEN */}
             {phase === GamePhase.LOADING && (
@@ -1036,7 +1271,7 @@ export default function App() {
             
             {/* MAIN MENU */}
             {phase === GamePhase.MENU && (
-                <div className="text-center w-full max-w-4xl px-4 md:px-8 relative flex flex-col items-center justify-center min-h-0 h-full max-h-screen overflow-y-auto py-4 md:py-12 gap-2 md:gap-6 scrollbar-hide">
+                <div className="menu-shell non-game-scale text-center w-full max-w-4xl px-4 md:px-8 relative flex flex-col items-center justify-center min-h-0 h-full max-h-screen overflow-y-auto py-4 md:py-12 gap-2 md:gap-6 scrollbar-hide">
                     {/* Top: Player Character */}
                     <div className="relative shrink-0">
                       <img 
@@ -1065,87 +1300,89 @@ export default function App() {
 
             {/* THEME SELECTION */}
             {phase === GamePhase.THEME_SELECTION && (
-                <div className="text-center w-full max-w-[98vw] lg:max-w-[95vw] px-2 md:px-4 flex flex-col items-center justify-center h-full max-h-screen py-2 md:py-4 gap-2 md:gap-3 overflow-hidden relative">
+                <div className="theme-shell non-game-scale theme-selection-container text-center w-full max-w-[98vw] lg:max-w-[95vw] px-2 md:px-4 flex flex-col items-center justify-center h-full max-h-screen py-2 md:py-4 gap-2 md:gap-3 overflow-hidden relative">
                     <h2 className="text-lg sm:text-2xl md:text-4xl lg:text-5xl font-black text-white mb-1 md:mb-2 tracking-wide uppercase drop-shadow-[0_4px_0_#333333] italic shrink-0 mobile-landscape-title">
                         SELECT THEME
                     </h2>
                     <div className="w-full overflow-y-auto overflow-x-hidden pb-3 px-0.5 md:px-2 scrollbar-hide min-h-0 flex-1 will-change-transform">
-                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 md:gap-2.5 px-1 md:px-0 auto-rows-min pb-32">
-                            {themes.map((theme, index) => {
-                                const isSelected = selectedThemes.includes(theme.id as ThemeId);
-                                const selectionIndex = selectedThemes.indexOf(theme.id as ThemeId);
-                                return (
-                                <button
-                                    key={theme.id}
-                                    onClick={() => theme.isAvailable !== false && handleThemeSelect(theme.id as ThemeId)}
-                                    className={`group relative overflow-hidden rounded-xl transition-all duration-200 will-change-transform ${
-                                        theme.isAvailable === false 
-                                          ? 'opacity-35 grayscale cursor-not-allowed' 
-                                          : isSelected 
-                                            ? 'ring-4 ring-kenney-green scale-95 opacity-100 shadow-inner'
-                                            : 'hover:scale-105 hover:shadow-xl active:scale-95'
-                                    }`}
-                                    disabled={theme.isAvailable === false}
-                                    title={theme.name}
-                                    style={{ 
-                                        perspective: '1000px',
-                                        backfaceVisibility: 'hidden'
-                                    }}
-                                >
-                                    {/* Theme Card with soft color - shorter */}
-                                    <div className={`relative w-full h-16 sm:h-20 md:h-24 lg:h-28 bg-white p-1.5 md:p-2 flex flex-col items-center justify-center border-2 md:border-3 border-kenney-dark rounded-xl shadow-lg transition-all will-change-transform ${isSelected ? 'bg-gray-100' : 'group-hover:shadow-2xl'}`}>
-                                        {/* Cute dots pattern background */}
-                                        <div className="absolute inset-0 opacity-5 pointer-events-none rounded-xl" style={{
-                                            backgroundImage: 'radial-gradient(circle, #333333 1px, transparent 1px)',
-                                            backgroundSize: '12px 12px'
-                                        }} />
-                                        
-                                        {/* Soft colored background circle */}
-                                        <div className="absolute inset-1 rounded-lg opacity-15 pointer-events-none" style={{
-                                            background: ['#4c99ff', '#77b039', '#ff5c5c', '#ffcc00', '#a67c52'][
-                                                index % 5
-                                            ]
-                                        }} />
-                                        
-                                        {/* Selection Order Number Overlay */}
-                                        {isSelected && (
-                                            <div className="absolute inset-0 flex items-center justify-center z-20 bg-kenney-green/20 backdrop-blur-[1px] rounded-xl">
-                                                <div className="w-8 h-8 md:w-12 md:h-12 bg-kenney-green border-2 md:border-4 border-white rounded-full flex items-center justify-center shadow-lg animate-bounce-short">
-                                                    <span className="text-lg md:text-2xl font-black text-white leading-none">
-                                                        {selectionIndex + 1}
-                                                    </span>
-                                                </div>
-                                            </div>
-                                        )}
-                                        
-                                        {/* Content - centered */}
-                                        <div className="relative z-10 w-full h-full flex flex-col items-center justify-center px-0.5">
-                                            {/* Theme Name - properly sized */}
-                                            <h3 className="text-[10px] sm:text-xs md:text-sm lg:text-base font-black text-kenney-dark text-center leading-tight line-clamp-3 break-words">
-                                                {theme.name}
-                                            </h3>
-                                        </div>
-                                    </div>
-                                    
-                                    {/* Word count badge - cute corner */}
-                                    {theme.questions?.length ? (
-                                        <div className="absolute -top-1 -right-1 bg-kenney-yellow border-2 border-kenney-dark rounded-full w-6 h-6 md:w-8 md:h-8 shadow-lg flex items-center justify-center transform group-hover:scale-125 transition-transform">
-                                            <span className="text-[8px] md:text-[10px] font-black text-kenney-dark leading-none">
-                                                {theme.questions.length}
-                                            </span>
-                                        </div>
-                                    ) : null}
-                                </button>
-                            )})}
+                        <div className="theme-grid-wrap">
+                          <div className="theme-grid grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 md:gap-2.5 px-1 md:px-0 auto-rows-min pb-24 sm:pb-32">
+                              {themes.map((theme, index) => {
+                                  const isSelected = selectedThemes.includes(theme.id as ThemeId);
+                                  const selectionIndex = selectedThemes.indexOf(theme.id as ThemeId);
+                                  return (
+                                  <button
+                                      key={theme.id}
+                                      onClick={() => theme.isAvailable !== false && handleThemeSelect(theme.id as ThemeId)}
+                                      className={`group relative overflow-hidden rounded-xl transition-all duration-200 will-change-transform ${
+                                          theme.isAvailable === false 
+                                            ? 'opacity-35 grayscale cursor-not-allowed' 
+                                            : isSelected 
+                                              ? 'ring-4 ring-kenney-green scale-95 opacity-100 shadow-inner'
+                                              : 'hover:scale-105 hover:shadow-xl active:scale-95'
+                                      }`}
+                                      disabled={theme.isAvailable === false}
+                                      title={theme.name}
+                                      style={{ 
+                                          perspective: '1000px',
+                                          backfaceVisibility: 'hidden'
+                                      }}
+                                  >
+                                      {/* Theme Card with soft color - shorter */}
+                                      <div className={`theme-card relative w-full h-16 sm:h-20 md:h-24 lg:h-28 bg-white p-1.5 md:p-2 flex flex-col items-center justify-center border-2 md:border-3 border-kenney-dark rounded-xl shadow-lg transition-all will-change-transform ${isSelected ? 'bg-gray-100' : 'group-hover:shadow-2xl'}`}>
+                                          {/* Cute dots pattern background */}
+                                          <div className="absolute inset-0 opacity-5 pointer-events-none rounded-xl" style={{
+                                              backgroundImage: 'radial-gradient(circle, #333333 1px, transparent 1px)',
+                                              backgroundSize: '12px 12px'
+                                          }} />
+                                          
+                                          {/* Soft colored background circle */}
+                                          <div className="absolute inset-1 rounded-lg opacity-15 pointer-events-none" style={{
+                                              background: ['#4c99ff', '#77b039', '#ff5c5c', '#ffcc00', '#a67c52'][
+                                                  index % 5
+                                              ]
+                                          }} />
+                                          
+                                          {/* Selection Order Number Overlay */}
+                                          {isSelected && (
+                                              <div className="absolute inset-0 flex items-center justify-center z-20 bg-kenney-green/20 backdrop-blur-[1px] rounded-xl">
+                                                  <div className="w-8 h-8 md:w-12 md:h-12 bg-kenney-green border-2 md:border-4 border-white rounded-full flex items-center justify-center shadow-lg animate-bounce-short">
+                                                      <span className="text-lg md:text-2xl font-black text-white leading-none">
+                                                          {selectionIndex + 1}
+                                                      </span>
+                                                  </div>
+                                              </div>
+                                          )}
+                                          
+                                          {/* Content - centered */}
+                                          <div className="relative z-10 w-full h-full flex flex-col items-center justify-center px-0.5">
+                                              {/* Theme Name - properly sized */}
+                                              <h3 className="theme-card-title text-[10px] sm:text-xs md:text-sm lg:text-base font-black text-kenney-dark text-center leading-tight line-clamp-3 break-words">
+                                                  {theme.name}
+                                              </h3>
+                                          </div>
+                                      </div>
+                                      
+                                      {/* Word count badge - cute corner */}
+                                      {theme.questions?.length ? (
+                                          <div className="theme-badge absolute -top-1 -right-1 bg-kenney-yellow border-2 border-kenney-dark rounded-full w-6 h-6 md:w-8 md:h-8 shadow-lg flex items-center justify-center transform group-hover:scale-125 transition-transform">
+                                              <span className="text-[8px] md:text-[10px] font-black text-kenney-dark leading-none">
+                                                  {theme.questions.length}
+                                              </span>
+                                          </div>
+                                      ) : null}
+                                  </button>
+                              )})}
+                          </div>
                         </div>
                     </div>
                     
                     {/* START BUTTON FIXED BOTTOM - Adjusted for non-fullscreen layouts */}
-                    <div className="absolute bottom-10 sm:bottom-14 md:bottom-20 left-0 right-0 flex justify-center px-4 pointer-events-none z-50">
+                    <div className="theme-start flex justify-center px-4 pointer-events-none z-50">
                          <button 
                             onClick={handleStartGame}
                             disabled={selectedThemes.length === 0}
-                            className={`pointer-events-auto kenney-button kenney-button-handdrawn px-8 py-3 text-xl md:text-2xl shadow-2xl transition-all transform duration-300 ${selectedThemes.length > 0 ? 'scale-100 opacity-100 translate-y-0' : 'scale-50 opacity-0 translate-y-10'}`}
+                            className={`pointer-events-auto kenney-button kenney-button-handdrawn mobile-landscape-button px-8 py-3 text-xl md:text-2xl shadow-2xl transition-all transform duration-300 ${selectedThemes.length > 0 ? 'scale-100 opacity-100 translate-y-0' : 'scale-50 opacity-0 translate-y-10'}`}
                         >
                             START GAME ({selectedThemes.length})
                         </button>
@@ -1155,31 +1392,31 @@ export default function App() {
 
             {/* TUTORIAL */}
             {phase === GamePhase.TUTORIAL && (
-                <div className="text-center w-full max-w-6xl px-8 md:px-20 lg:px-32 flex flex-col items-center h-full max-h-screen pt-[12vh] md:pt-[15vh] gap-[2vh] md:gap-[4vh] overflow-hidden">
+                <div className="tutorial-shell non-game-scale text-center w-full max-w-6xl px-8 md:px-20 lg:px-32 flex flex-col items-center h-full max-h-screen pt-[12vh] md:pt-[15vh] gap-[2vh] md:gap-[4vh] overflow-hidden">
                     
-                    <h2 className="text-[4vw] sm:text-[5vw] md:text-[6vw] font-normal text-white italic tracking-tight uppercase drop-shadow-[0_4px_0_#333333] md:drop-shadow-[0_6px_0_#333333] rotate-[-1deg] shrink-0 mobile-landscape-title landscape-compact-title leading-none">
+                    <h2 className="tutorial-title text-[4vw] sm:text-[5vw] md:text-[6vw] font-normal text-white italic tracking-tight uppercase drop-shadow-[0_4px_0_#333333] md:drop-shadow-[0_6px_0_#333333] rotate-[-1deg] shrink-0 mobile-landscape-title landscape-compact-title leading-none">
                         HOW TO PLAY
                     </h2>
                     
                     <div className="w-full flex-1 flex flex-col items-center justify-start min-h-0 gap-[2vh] md:gap-[4vh]">
                         <div className="grid grid-cols-2 gap-[3vw] md:gap-[4vw] w-full max-w-3xl lg:max-w-4xl min-h-0 mobile-landscape-tutorial-grid">
-                            <div className="kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
+                            <div className="tutorial-card kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
                                 <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-4">
-                                    <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_walk_a.svg')} className="w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce-horizontal-large mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
+                                    <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_walk_a.svg')} className="tutorial-card-img w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce-horizontal-large mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
                                 </div>
                                 <div className="shrink-0 flex flex-col items-center gap-1">
-                                    <h3 className="text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark uppercase tracking-tighter italic mobile-landscape-card-text drop-shadow-sm">MOVE</h3>
-                                    <p className="hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">Tilt your body</p>
+                                    <h3 className="tutorial-card-title text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark uppercase tracking-tighter italic mobile-landscape-card-text drop-shadow-sm">MOVE</h3>
+                                    <p className="tutorial-card-subtitle hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">Tilt your body</p>
                                 </div>
                             </div>
 
-                            <div className="kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
+                            <div className="tutorial-card kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
                                 <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-4">
-                                    <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')} className="w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
+                                    <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')} className="tutorial-card-img w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
                                 </div>
                                 <div className="shrink-0 flex flex-col items-center gap-1">
-                                    <h3 className="text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark uppercase tracking-tighter italic mobile-landscape-card-text drop-shadow-sm">JUMP</h3>
-                                    <p className="hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">Jump to hit blocks</p>
+                                    <h3 className="tutorial-card-title text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark uppercase tracking-tighter italic mobile-landscape-card-text drop-shadow-sm">JUMP</h3>
+                                    <p className="tutorial-card-subtitle hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">Jump to hit blocks</p>
                                 </div>
                             </div>
                         </div>
@@ -1194,18 +1431,18 @@ export default function App() {
                                     setPhase(GamePhase.PLAYING);
                                 }}
                                 disabled={!motionController.isStarted || !themeImagesLoaded}
-                                className={`kenney-button kenney-button-handdrawn px-8 sm:px-16 md:px-24 py-3 sm:py-5 md:py-6 hover:scale-105 active:scale-95 transition-all shadow-2xl shrink-0 mobile-landscape-button landscape-compact-button flex items-center justify-center gap-3 md:gap-4 min-w-[160px] md:min-w-[240px] ${(!motionController.isStarted || !themeImagesLoaded) ? 'opacity-100 bg-gray-400 border-gray-600 cursor-wait' : 'bg-kenney-green border-kenney-dark'}`}>
+                                className={`kenney-button kenney-button-handdrawn px-6 sm:px-12 md:px-24 py-2 sm:py-4 md:py-8 text-base sm:text-2xl md:text-4xl hover:scale-110 transition-transform shadow-2xl mobile-landscape-button landscape-compact-button flex items-center justify-center gap-3 md:gap-4 ${(!motionController.isStarted || !themeImagesLoaded) ? 'opacity-100 bg-gray-400 border-gray-600 cursor-wait' : 'bg-kenney-green border-kenney-dark'}`}>
                                 {(motionController.isStarted && themeImagesLoaded) ? (
                                     <>
-                                        <span className="drop-shadow-md text-2xl sm:text-4xl md:text-5xl font-black leading-none pb-1">GO!</span>
-                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-6 h-6 sm:w-8 sm:h-8 md:w-10 md:h-10 animate-pulse filter drop-shadow-md">
+                                        <span className="drop-shadow-md font-black leading-none pb-1 text-base sm:text-2xl md:text-4xl">GO!</span>
+                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-4 h-4 sm:w-5 sm:h-5 md:w-7 md:h-7 animate-pulse filter drop-shadow-md">
                                             <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
                                         </svg>
                                     </>
                                 ) : (
                                     <>
-                                        <div className="w-5 h-5 sm:w-6 sm:h-6 md:w-8 md:h-8 border-[3px] md:border-[4px] border-white/30 border-t-white rounded-full animate-spin"></div>
-                                        <span className="text-base sm:text-xl md:text-2xl font-black tracking-widest leading-none">LOADING...</span>
+                                        <div className="w-5 h-5 sm:w-6 sm:h-6 md:w-7 md:h-7 border-[3px] md:border-[4px] border-white/30 border-t-white rounded-full animate-spin"></div>
+                                        <span className="font-black tracking-widest leading-none">LOADING...</span>
                                     </>
                                 )}
                             </button>

@@ -156,27 +156,83 @@
       }
     </style>
     
-    <!-- MediaPipe Face Detection (v0.4) - Multi-CDN Fallback -->
+    <!-- MediaPipe Pose Lite (v0.5) - Multi-CDN Fallback -->
     <script>
       (function() {
         'use strict';
-        const CDNS = [
-          'https://fastly.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/',
-          'https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/',
-          '/mediapipe/face_detection/',
-          'https://cdn.maskmysheet.com/mediapipe/face_detection/'
+        const EXTERNAL_CDNS = [
+          'https://fastly.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
+          'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/'
+        ];
+        const OWN_CDNS = [
+          'https://cdn.maskmysheet.com/mediapipe/pose_lite/'
         ];
         const LOAD_TIMEOUT = 2500;
+        const ATTEMPTS_PER_GROUP = 3;
+        const TOTAL_TIMEOUT = 3 * 60 * 1000;
+        let timedOut = false;
+        let scriptLoaded = false;
+        let externalCycle = 0;
+        let ownCycle = 0;
+        let externalIndex = 0;
+        let ownIndex = 0;
+        let currentGroup = 'external';
+        let timeoutHandle = null;
         
         function log(msg, type = 'info') {
           const style = type === 'error' ? 'color: red; font-weight: bold;' : 
                        type === 'success' ? 'color: green; font-weight: bold;' : 'color: blue;';
-          console.log(`%c[MediaPipe Face] ${msg}`, style);
+          console.log(`%c[MediaPipe Pose] ${msg}`, style);
+        }
+
+        function showTimeoutMessage() {
+          if (document.getElementById('mediapipe-pose-timeout')) return;
+          const overlay = document.createElement('div');
+          overlay.id = 'mediapipe-pose-timeout';
+          overlay.style.position = 'fixed';
+          overlay.style.left = '0';
+          overlay.style.top = '0';
+          overlay.style.width = '100%';
+          overlay.style.height = '100%';
+          overlay.style.background = 'rgba(10, 10, 10, 0.78)';
+          overlay.style.color = '#fff';
+          overlay.style.display = 'flex';
+          overlay.style.alignItems = 'center';
+          overlay.style.justifyContent = 'center';
+          overlay.style.textAlign = 'center';
+          overlay.style.zIndex = '9999';
+          overlay.style.fontFamily = 'system-ui, -apple-system, Segoe UI, sans-serif';
+          overlay.style.fontSize = '18px';
+          overlay.style.padding = '24px';
+          overlay.textContent = 'AI模型加载失败，请检查网络后重试。';
+          document.body.appendChild(overlay);
+        }
+
+        function clearTimeoutMessage() {
+          const overlay = document.getElementById('mediapipe-pose-timeout');
+          if (overlay) overlay.remove();
+        }
+
+        function isLoaded() {
+          return scriptLoaded || typeof window.Pose === 'function';
+        }
+
+        function markLoaded(base) {
+          scriptLoaded = true;
+          timedOut = false;
+          if (base) {
+            window.__MEDIAPIPE_POSE_CDN__ = base;
+          }
+          if (timeoutHandle !== null) {
+            clearTimeout(timeoutHandle);
+            timeoutHandle = null;
+          }
+          clearTimeoutMessage();
         }
 
         function loadScript(url, onSuccess, onError) {
           const script = document.createElement('script');
-          script.src = url + 'face_detection.js';
+          script.src = url + 'pose.js';
           script.crossOrigin = 'anonymous';
           
           let timeoutId = setTimeout(() => {
@@ -198,24 +254,67 @@
           document.head.appendChild(script);
         }
 
-        function tryNextCDN(index) {
-          if (index >= CDNS.length) {
-            log('All CDNs failed', 'error');
-            return;
+        function nextBase() {
+          if (timedOut || isLoaded()) return null;
+          if (currentGroup === 'external') {
+            const base = EXTERNAL_CDNS[externalIndex];
+            externalIndex += 1;
+            if (externalIndex >= EXTERNAL_CDNS.length) {
+              externalIndex = 0;
+              externalCycle += 1;
+              if (externalCycle >= ATTEMPTS_PER_GROUP) {
+                currentGroup = 'own';
+                externalCycle = 0;
+              }
+            }
+            return base;
           }
-          
-          loadScript(CDNS[index], function(successUrl) {
-            window.__MEDIAPIPE_FACE_DETECTION_CDN__ = successUrl;
+          const base = OWN_CDNS[ownIndex];
+          ownIndex += 1;
+          if (ownIndex >= OWN_CDNS.length) {
+            ownIndex = 0;
+            ownCycle += 1;
+            if (ownCycle >= ATTEMPTS_PER_GROUP) {
+              currentGroup = 'external';
+              ownCycle = 0;
+            }
+          }
+          return base;
+        }
+
+        window.__MEDIAPIPE_POSE_NEXT_BASE__ = function() {
+          return nextBase();
+        };
+
+        function tryLoadLoop() {
+          if (timedOut || isLoaded()) return;
+          const base = nextBase();
+          if (!base) return;
+          loadScript(base, function(successUrl) {
+            markLoaded(successUrl);
+            log(`Using base: ${successUrl}`, 'success');
           }, function() {
-            tryNextCDN(index + 1);
+            tryLoadLoop();
           });
         }
 
-        if (document.readyState === 'loading') {
-          document.addEventListener('DOMContentLoaded', function() { tryNextCDN(0); });
-        } else {
-          tryNextCDN(0);
+        if (isLoaded()) {
+          markLoaded(window.__MEDIAPIPE_POSE_CDN__ || null);
+          return;
         }
+
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', function() { tryLoadLoop(); });
+        } else {
+          tryLoadLoop();
+        }
+
+        timeoutHandle = setTimeout(function() {
+          if (isLoaded() || timedOut) return;
+          timedOut = true;
+          log('Load timeout after 3 minutes', 'error');
+          showTimeoutMessage();
+        }, TOTAL_TIMEOUT);
       })();
     </script>
     

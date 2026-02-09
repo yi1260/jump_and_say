@@ -2,9 +2,47 @@ import { getR2ImageUrl, getR2ThemesListCdnUrl, getR2ThemesListUrl, handleR2Error
 import { Theme, ThemeList } from './types';
 
 let cachedThemes: Theme[] | null = null;
+const preloadedThemeIds = new Set<string>();
+
+const getLastResourceTiming = (url: string): PerformanceResourceTiming | null => {
+  if (typeof performance === 'undefined' || typeof performance.getEntriesByName !== 'function') return null;
+  const entries = performance.getEntriesByName(url);
+  if (!entries || entries.length === 0) return null;
+  const entry = entries[entries.length - 1];
+  if ('transferSize' in entry) {
+    return entry as PerformanceResourceTiming;
+  }
+  return null;
+};
+
+const inferCacheLabel = (timing: PerformanceResourceTiming | null, durationMs: number): string => {
+  if (timing) {
+    if (timing.transferSize === 0 && timing.decodedBodySize > 0) return 'CACHE (transferSize=0)';
+    if (timing.transferSize > 0) return 'NETWORK';
+  }
+  if (durationMs < 50) return 'CACHE (heuristic<50ms)';
+  return 'UNKNOWN';
+};
+
+const logThemeTiming = (label: string, url: string, durationMs: number) => {
+  const timing = getLastResourceTiming(url);
+  const cacheLabel = inferCacheLabel(timing, durationMs);
+  if (timing) {
+    console.log(
+      `[ThemeTiming] ${label} ${durationMs.toFixed(1)}ms [${cacheLabel}]`,
+      { url, transferSize: timing.transferSize, encodedBodySize: timing.encodedBodySize, decodedBodySize: timing.decodedBodySize }
+    );
+  } else {
+    console.log(`[ThemeTiming] ${label} ${durationMs.toFixed(1)}ms [${cacheLabel}]`, { url });
+  }
+};
 
 export function getCachedThemes(): Theme[] | null {
   return cachedThemes;
+}
+
+export function isThemePreloaded(themeId: string): boolean {
+  return preloadedThemeIds.has(themeId);
 }
 
 export async function loadThemes(): Promise<Theme[]> {
@@ -223,9 +261,9 @@ export async function preloadThemeImages(themeId: string): Promise<void> {
     
     const batchPromises = batch.map((q, batchIndex) => {
       const globalIndex = i + batchIndex;
-      const imgStartTime = performance.now();
-      const imageName = q.image.replace(/\.(png|jpg|jpeg)$/i, '.webp');
-      const imgUrl = getR2ImageUrl(imageName);
+          const imgStartTime = performance.now();
+          const imageName = q.image.replace(/\.(png|jpg|jpeg)$/i, '.webp');
+          const imgUrl = getR2ImageUrl(imageName);
 
       const loadWithRetry = (retriesLeft: number): Promise<void> => {
         return new Promise<void>((resolve) => {
@@ -256,6 +294,7 @@ export async function preloadThemeImages(themeId: string): Promise<void> {
               let sourceLabel = isFastLoad ? '📦 CACHE (Likely)' : '🌐 CDN';
               
               console.log(`[preloadThemeImages] ✅ Loaded: ${q.image} (${globalIndex + 1}/${theme.questions.length}) - ${duration}ms [${sourceLabel}]`);
+              logThemeTiming(`[preloadThemeImages] ${q.image} (${globalIndex + 1}/${theme.questions.length})`, imgUrl, parseFloat(duration));
               resolve();
             };
     
@@ -313,6 +352,10 @@ export async function preloadThemeImagesStrict(
   themeId: string,
   onStatus?: (status: string) => void
 ): Promise<void> {
+  if (preloadedThemeIds.has(themeId)) {
+    console.log(`[preloadThemeImagesStrict] Theme already preloaded, skipping: ${themeId}`);
+    return;
+  }
   if (!cachedThemes) {
     await loadThemes();
   }
@@ -323,6 +366,7 @@ export async function preloadThemeImagesStrict(
   }
 
   isHighPriorityLoading = true;
+  let completed = false;
 
   const themeUrls = new Set(theme.questions.map(q => getR2ImageUrl(q.image)));
   globalPreloadQueue = globalPreloadQueue.filter(item => !themeUrls.has(item.url));
@@ -348,6 +392,7 @@ export async function preloadThemeImagesStrict(
     while (attempt <= MAX_RETRIES) {
       attempt += 1;
       try {
+        const start = performance.now();
         await new Promise<void>((resolve, reject) => {
           const img = new Image();
           img.crossOrigin = 'anonymous';
@@ -358,6 +403,7 @@ export async function preloadThemeImagesStrict(
 
           img.onload = () => {
             clearTimeout(timeout);
+            logThemeTiming(`[preloadThemeImagesStrict] ${label}`, imgUrl, performance.now() - start);
             resolve();
           };
           img.onerror = () => {
@@ -391,8 +437,12 @@ export async function preloadThemeImagesStrict(
       });
       await Promise.all(batchPromises);
     }
+    completed = true;
   } finally {
     isHighPriorityLoading = false;
+    if (completed) {
+      preloadedThemeIds.add(themeId);
+    }
     if (globalPreloadQueue.length > 0) {
       processPreloadQueue();
     }
