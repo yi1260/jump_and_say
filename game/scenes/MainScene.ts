@@ -251,7 +251,7 @@ export class MainScene extends Phaser.Scene {
     this.LANE_X_POSITIONS = [width * 0.20, width * 0.5, width * 0.80]; 
 
     const visualPlayerSize = 180 * this.gameScale;
-    const visualBoxSize = 320 * this.gameScale;
+    const visualBoxSize = 380 * this.gameScale;
     
     this.playerHeight = visualPlayerSize;
     this.blockHeight = visualBoxSize;
@@ -259,8 +259,8 @@ export class MainScene extends Phaser.Scene {
     this.playerHeadY = -this.playerHeight;
     this.blockBottomY = this.blockHeight / 2;
 
-    const minTopMargin = 100 * this.gameScale;
-    const minBeeBlockGap = 350 * this.gameScale;
+    const minTopMargin = 60 * this.gameScale;
+    const minBeeBlockGap = 420 * this.gameScale;
 
     const availableHeight = this.floorSurfaceY - minTopMargin - minBeeBlockGap;
     const jumpRatio = height < 600 ? 0.32 : 0.40; 
@@ -419,33 +419,6 @@ export class MainScene extends Phaser.Scene {
     g.destroy();
   }
 
-  private preloadNonCriticalAssets() {
-    // 动态引入 getR2AssetUrl
-    import('@/src/config/r2Config').then(({ getR2AssetUrl }) => {
-        const kenneyBase = 'assets/kenney/Vector/';
-        const getUrl = (path: string) => getR2AssetUrl(path);
-
-        const dprScale = Math.min(this.dpr || window.devicePixelRatio || 1, 2);
-        const safeRewardSize = Math.min(512, Math.max(192, Math.round(220 * this.gameScale * dprScale)));
-        const safeIconSize = Math.min(512, Math.max(192, Math.round(200 * this.gameScale * dprScale)));
-    
-        if (!this.textures.exists('star_gold')) {
-          this.load.svg('star_gold', getUrl(`${kenneyBase}Tiles/star.svg`), { width: safeRewardSize, height: safeRewardSize });
-          this.load.svg('mushroom_red', getUrl(`${kenneyBase}Tiles/mushroom_red.svg`), { width: safeRewardSize, height: safeRewardSize });
-          this.load.svg('mushroom_brown', getUrl(`${kenneyBase}Tiles/mushroom_brown.svg`), { width: safeRewardSize, height: safeRewardSize });
-          this.load.svg('gem_blue', getUrl(`${kenneyBase}Tiles/gem_blue.svg`), { width: safeRewardSize, height: safeRewardSize });
-          this.load.svg('gem_red', getUrl(`${kenneyBase}Tiles/gem_red.svg`), { width: safeRewardSize, height: safeRewardSize });
-          this.load.svg('gem_green', getUrl(`${kenneyBase}Tiles/gem_green.svg`), { width: safeRewardSize, height: safeRewardSize });
-          this.load.svg('gem_yellow', getUrl(`${kenneyBase}Tiles/gem_yellow.svg`), { width: safeRewardSize, height: safeRewardSize });
-          this.load.svg('grass', getUrl(`${kenneyBase}Tiles/grass.svg`), { width: safeRewardSize, height: safeRewardSize });
-          this.load.svg('grass_purple', getUrl(`${kenneyBase}Tiles/grass_purple.svg`), { width: safeRewardSize, height: safeRewardSize });
-          this.load.svg('icon_retry', getUrl(`${kenneyBase}Tiles/replay_256dp.svg`), { width: safeIconSize, height: safeIconSize });
-          this.load.svg('icon_next', getUrl(`${kenneyBase}Tiles/keyboard_double_arrow_right_256dp.svg`), { width: safeIconSize, height: safeIconSize });
-          this.load.start();
-        }
-    });
-  }
-
   private async loadThemeImages(themeId?: string) {
     const targetThemeId = themeId || this.currentTheme;
     const isCurrentTheme = targetThemeId === this.currentTheme;
@@ -557,14 +530,7 @@ export class MainScene extends Phaser.Scene {
     pauseBackgroundPreloading();
 
     this.initThemeDataFromCache();
-
-    const startBgLoad = () => this.preloadNonCriticalAssets();
-    if ('requestIdleCallback' in window) {
-      (window as any).requestIdleCallback(startBgLoad);
-    } else {
-      setTimeout(startBgLoad, 0);
-    }
-
+    
     // 开始异步加载主题图片
     this.loadThemeImages();
 
@@ -776,7 +742,7 @@ export class MainScene extends Phaser.Scene {
                   b.x = this.LANE_X_POSITIONS[answerIndex];
                   b.y = this.blockCenterY;
                   
-                  const visualBoxSize = 320 * this.gameScale;
+                  const visualBoxSize = 380 * this.gameScale;
                   b.setDisplaySize(visualBoxSize, visualBoxSize);
                   
                   b.refreshBody();
@@ -790,7 +756,7 @@ export class MainScene extends Phaser.Scene {
                       const icon = visuals.list[1] as Phaser.GameObjects.Image;
                       if (bubble) bubble.setDisplaySize(visualBoxSize, visualBoxSize);
                       if (icon) {
-                          const iconSize = visualBoxSize * 0.85;
+                          const iconSize = visualBoxSize * 0.9;
                           icon.setDisplaySize(iconSize, iconSize);
                       }
                   } 
@@ -1072,7 +1038,7 @@ export class MainScene extends Phaser.Scene {
         
         const imageKey = question ? `theme_${this.currentTheme}_${question.image.replace(/\.(png|jpg|jpeg|webp)$/i, '')}` : '';
         const icon = this.add.image(0, 0, imageKey);
-        const iconSize = visualBoxSize * 0.75;
+        const iconSize = visualBoxSize * 0.9;
         icon.setDisplaySize(iconSize, iconSize);
         icon.setTint(0xffffff);
         icon.setOrigin(0.5, 0.5);

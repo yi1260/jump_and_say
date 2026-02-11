@@ -25,8 +25,8 @@ export enum GamePhase {
 }
 
 export default function App() {
-  const BGM_VOLUME_PLAYING = 0.003;
-  const BGM_VOLUME_IDLE = 0.003;
+  const BGM_VOLUME_PLAYING = 0.03;
+  const BGM_VOLUME_IDLE = 0.03;
   const [score, setScore] = useState(0);
   const [totalQuestions, setTotalQuestions] = useState(0);
   const [selectedThemes, setSelectedThemes] = useState<ThemeId[]>([]);
@@ -76,7 +76,7 @@ export default function App() {
     const audio = bgmAudioRef.current;
     if (!audio) return;
 
-    const shouldPlay = enabled && phaseRef.current === GamePhase.PLAYING;
+    const shouldPlay = enabled;
     if (shouldPlay) {
       audio.muted = false;
       audio.volume = getBgmTargetVolume(phaseRef.current);
@@ -95,7 +95,7 @@ export default function App() {
     phaseRef.current = newPhase;
     setPhaseState(newPhase);
     
-    // BGM only plays during gameplay; keep user toggle as preference
+    // Update BGM volume based on phase (e.g. might be different in MENU vs PLAYING)
     applyBgmState(isBgmEnabledRef.current);
 
     if (newPhase !== GamePhase.PLAYING) {
@@ -158,7 +158,7 @@ export default function App() {
     
     const updateVolume = (vol: number) => {
       if (bgmAudio) {
-        if (!isBgmEnabledRef.current || phaseRef.current !== GamePhase.PLAYING) {
+        if (!isBgmEnabledRef.current) {
           bgmAudio.volume = 0;
           return;
         }
@@ -179,7 +179,7 @@ export default function App() {
       bgmAudio = new Audio(bgmCdnUrl);
       bgmAudioRef.current = bgmAudio;
       bgmAudio.loop = true;
-      const shouldPlay = isBgmEnabledRef.current && phaseRef.current === GamePhase.PLAYING;
+      const shouldPlay = isBgmEnabledRef.current;
       bgmAudio.volume = shouldPlay ? getBgmTargetVolume(phaseRef.current) : 0;
       bgmAudio.muted = !shouldPlay;
       bgmAudio.preload = 'auto';
@@ -202,7 +202,7 @@ export default function App() {
         }
       });
       
-      if (isBgmEnabledRef.current && phaseRef.current === GamePhase.PLAYING) {
+      if (isBgmEnabledRef.current) {
         try {
           await bgmAudio.play();
           isBgmPlayingRef.current = true;
@@ -216,7 +216,7 @@ export default function App() {
     initBGM();
     
     const handleInteraction = () => {
-      if (!isBgmEnabledRef.current || phaseRef.current !== GamePhase.PLAYING || !bgmAudio) return;
+      if (!isBgmEnabledRef.current || !bgmAudio) return;
       if (!isBgmPlayingRef.current) {
         bgmAudio.play().then(() => {
           isBgmPlayingRef.current = true;
@@ -367,29 +367,36 @@ export default function App() {
       .menu-shell,
       .theme-shell,
       .tutorial-shell {
-        width: 100%;
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        max-height: var(--app-height, 100dvh);
+        overflow: hidden;
       }
 
       .theme-grid-wrap {
+        width: 100%;
         display: flex;
-        align-items: center;
         justify-content: center;
-        min-height: 100%;
       }
 
       .theme-start {
         position: absolute;
+        bottom: 0;
         left: 0;
         right: 0;
-        bottom: clamp(2.5rem, 6vh, 5rem);
+        width: 100%;
+        padding-bottom: max(1rem, env(safe-area-inset-bottom));
+        padding-top: 1rem;
+        z-index: 50;
+        pointer-events: none;
+      }
+      
+      .theme-start button {
+        pointer-events: auto;
       }
 
       @media (max-width: 640px) {
-        .theme-start {
-          position: static !important;
-          margin-top: 0.75rem;
-          padding-bottom: 0.5rem;
-        }
         .menu-shell {
           padding-top: 0.5rem !important;
           padding-bottom: 0.5rem !important;
@@ -783,6 +790,28 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    const updateAppHeight = () => {
+      const vh = window.innerHeight * 0.01;
+      document.documentElement.style.setProperty('--app-height', `${vh * 100}px`);
+    };
+
+    window.addEventListener('resize', updateAppHeight);
+    window.addEventListener('orientationchange', updateAppHeight);
+    
+    // Initial call
+    updateAppHeight();
+    
+    // Delayed call to handle address bar retraction on mobile load
+    setTimeout(updateAppHeight, 100);
+    setTimeout(updateAppHeight, 500);
+
+    return () => {
+      window.removeEventListener('resize', updateAppHeight);
+      window.removeEventListener('orientationchange', updateAppHeight);
+    };
+  }, []);
+
   const handleBackToMenu = useCallback(() => {
     // 强制清理
     setScore(0);
@@ -1070,7 +1099,7 @@ export default function App() {
   }, []);
 
   return (
-    <div className="relative w-full h-screen h-[100dvh] overflow-hidden bg-kenney-blue font-sans select-none text-kenney-dark">
+    <div className="relative w-full overflow-hidden bg-kenney-blue font-sans select-none text-kenney-dark" style={{ height: 'var(--app-height, 100dvh)' }}>
       <audio 
         ref={bgmRef}
         id="bgm-audio"
@@ -1300,13 +1329,13 @@ export default function App() {
 
             {/* THEME SELECTION */}
             {phase === GamePhase.THEME_SELECTION && (
-                <div className="theme-shell non-game-scale theme-selection-container text-center w-full max-w-[98vw] lg:max-w-[95vw] px-2 md:px-4 flex flex-col items-center justify-center h-full max-h-screen py-2 md:py-4 gap-2 md:gap-3 overflow-hidden relative">
-                    <h2 className="text-lg sm:text-2xl md:text-4xl lg:text-5xl font-black text-white mb-1 md:mb-2 tracking-wide uppercase drop-shadow-[0_4px_0_#333333] italic shrink-0 mobile-landscape-title">
+                <div className="theme-shell non-game-scale theme-selection-container text-center w-full max-w-[98vw] lg:max-w-[95vw] px-2 md:px-4 gap-2 md:gap-3 relative">
+                    <h2 className="text-lg sm:text-2xl md:text-4xl lg:text-5xl font-black text-white mb-1 md:mb-2 tracking-wide uppercase drop-shadow-[0_4px_0_#333333] italic shrink-0 mobile-landscape-title pt-4 md:pt-6">
                         SELECT THEME
                     </h2>
-                    <div className="w-full overflow-y-auto overflow-x-hidden pb-3 px-0.5 md:px-2 scrollbar-hide min-h-0 flex-1 will-change-transform">
+                    <div className="w-full overflow-y-auto overflow-x-hidden px-0.5 md:px-2 scrollbar-hide flex-1 min-h-0 will-change-transform">
                         <div className="theme-grid-wrap">
-                          <div className="theme-grid grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 md:gap-2.5 px-1 md:px-0 auto-rows-min pb-24 sm:pb-32">
+                          <div className="theme-grid grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 md:gap-2.5 px-1 md:px-0 auto-rows-min pb-32 md:pb-40">
                               {themes.map((theme, index) => {
                                   const isSelected = selectedThemes.includes(theme.id as ThemeId);
                                   const selectionIndex = selectedThemes.indexOf(theme.id as ThemeId);
@@ -1377,8 +1406,8 @@ export default function App() {
                         </div>
                     </div>
                     
-                    {/* START BUTTON FIXED BOTTOM - Adjusted for non-fullscreen layouts */}
-                    <div className="theme-start flex justify-center px-4 pointer-events-none z-50">
+                    {/* START BUTTON FIXED BOTTOM - Overlay */}
+                    <div className="theme-start flex justify-center px-4">
                          <button 
                             onClick={handleStartGame}
                             disabled={selectedThemes.length === 0}
@@ -1392,13 +1421,13 @@ export default function App() {
 
             {/* TUTORIAL */}
             {phase === GamePhase.TUTORIAL && (
-                <div className="tutorial-shell non-game-scale text-center w-full max-w-6xl px-8 md:px-20 lg:px-32 flex flex-col items-center h-full max-h-screen pt-[12vh] md:pt-[15vh] gap-[2vh] md:gap-[4vh] overflow-hidden">
+                <div className="tutorial-shell non-game-scale text-center w-full max-w-6xl px-4 md:px-20 lg:px-32 flex flex-col items-center justify-center h-full max-h-screen gap-[2vh] md:gap-[4vh] overflow-y-auto scrollbar-hide py-4">
                     
                     <h2 className="tutorial-title text-[4vw] sm:text-[5vw] md:text-[6vw] font-normal text-white italic tracking-tight uppercase drop-shadow-[0_4px_0_#333333] md:drop-shadow-[0_6px_0_#333333] rotate-[-1deg] shrink-0 mobile-landscape-title landscape-compact-title leading-none">
                         HOW TO PLAY
                     </h2>
                     
-                    <div className="w-full flex-1 flex flex-col items-center justify-start min-h-0 gap-[2vh] md:gap-[4vh]">
+                    <div className="w-full flex-1 flex flex-col items-center justify-center min-h-0 gap-[2vh] md:gap-[4vh]">
                         <div className="grid grid-cols-2 gap-[3vw] md:gap-[4vw] w-full max-w-3xl lg:max-w-4xl min-h-0 mobile-landscape-tutorial-grid">
                             <div className="tutorial-card kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
                                 <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-4">

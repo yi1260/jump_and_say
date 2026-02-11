@@ -257,6 +257,26 @@ export class PreloadScene extends Phaser.Scene {
     if (!this.textures.exists('bee_b')) {
         this.load.svg('bee_b', getUrl(`${kenneyBase}Enemies/bee_b.svg`), { width: targetBeeSize, height: targetBeeSize });
     }
+
+    // Reward & UI sizes
+    const safeRewardSize = Math.min(512, Math.max(192, Math.round(220 * gameScale * dprScale)));
+    const safeIconSize = Math.min(512, Math.max(192, Math.round(200 * gameScale * dprScale)));
+
+    if (!this.textures.exists('star_gold')) {
+      this.load.svg('star_gold', getUrl(`${kenneyBase}Tiles/star.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('mushroom_red', getUrl(`${kenneyBase}Tiles/mushroom_red.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('mushroom_brown', getUrl(`${kenneyBase}Tiles/mushroom_brown.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('gem_blue', getUrl(`${kenneyBase}Tiles/gem_blue.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('gem_red', getUrl(`${kenneyBase}Tiles/gem_red.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('gem_green', getUrl(`${kenneyBase}Tiles/gem_green.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('gem_yellow', getUrl(`${kenneyBase}Tiles/gem_yellow.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('grass', getUrl(`${kenneyBase}Tiles/grass.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('grass_purple', getUrl(`${kenneyBase}Tiles/grass_purple.svg`), { width: safeRewardSize, height: safeRewardSize });
+      
+      // UI Icons
+      this.load.svg('icon_retry', getUrl(`${kenneyBase}Tiles/replay_256dp.svg`), { width: safeIconSize, height: safeIconSize });
+      this.load.svg('icon_next', getUrl(`${kenneyBase}Tiles/keyboard_double_arrow_right_256dp.svg`), { width: safeIconSize, height: safeIconSize });
+    }
   }
 
   private loadThemeAssets(themesList: any) {

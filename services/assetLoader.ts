@@ -20,7 +20,19 @@ const GAME_ASSETS = [
   'assets/kenney/Vector/Enemies/bee_a.svg',
   'assets/kenney/Vector/Enemies/bee_b.svg',
   'assets/kenney/Vector/Tiles/star.svg',
-  'assets/kenney/Vector/Backgrounds/background_clouds.svg'
+  'assets/kenney/Vector/Backgrounds/background_clouds.svg',
+  
+  // Rewards & Icons (Moved from MainScene lazy load)
+  'assets/kenney/Vector/Tiles/mushroom_red.svg',
+  'assets/kenney/Vector/Tiles/mushroom_brown.svg',
+  'assets/kenney/Vector/Tiles/gem_blue.svg',
+  'assets/kenney/Vector/Tiles/gem_red.svg',
+  'assets/kenney/Vector/Tiles/gem_green.svg',
+  'assets/kenney/Vector/Tiles/gem_yellow.svg',
+  'assets/kenney/Vector/Tiles/grass.svg',
+  'assets/kenney/Vector/Tiles/grass_purple.svg',
+  'assets/kenney/Vector/Tiles/replay_256dp.svg',
+  'assets/kenney/Vector/Tiles/keyboard_double_arrow_right_256dp.svg'
 ];
 
 const PRELOAD_TIMEOUT = 15000; // 增加到 15 秒超时，允许更慢的网络拉取基础素材
