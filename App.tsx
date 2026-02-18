@@ -675,11 +675,11 @@ export default function App() {
     // Add custom animation styles directly to the document
     const style = document.createElement('style');
     const fredokaRegularLocalUrl = '/assets/fonts/Fredoka/static/Fredoka-Regular.ttf';
-    const fredokaRegularCdnUrl = getR2AssetUrl('jump-and-say-themes-pic/assets/fonts/Fredoka/static/Fredoka-Regular.ttf');
+    const fredokaRegularCdnUrl = getR2AssetUrl('assets/fonts/Fredoka/static/Fredoka-Regular.ttf');
     const fredokaBoldLocalUrl = '/assets/fonts/Fredoka/static/Fredoka-Bold.ttf';
-    const fredokaBoldCdnUrl = getR2AssetUrl('jump-and-say-themes-pic/assets/fonts/Fredoka/static/Fredoka-Bold.ttf');
+    const fredokaBoldCdnUrl = getR2AssetUrl('assets/fonts/Fredoka/static/Fredoka-Bold.ttf');
     const zcoolLocalUrl = '/assets/fonts/Zcool/zcool-kuaile-chinese-simplified-400-normal.woff2';
-    const zcoolCdnUrl = getR2AssetUrl('jump-and-say-themes-pic/assets/fonts/Zcool/zcool-kuaile-chinese-simplified-400-normal.woff2');
+    const zcoolCdnUrl = getR2AssetUrl('assets/fonts/Zcool/zcool-kuaile-chinese-simplified-400-normal.woff2');
     const uiFontStack = `'FredokaBoot', 'FredokaLatin', 'Fredoka', 'ZCOOL KuaiLe', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', system-ui, -apple-system, sans-serif`;
     const fontSet: FontFaceSet | null = 'fonts' in document ? document.fonts : null;
 
