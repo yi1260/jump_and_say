@@ -728,7 +728,7 @@ export default function App() {
     style.innerHTML = `
       @font-face {
         font-family: 'FredokaBoot';
-        src: url('${fredokaRegularLocalUrl}') format('truetype'), url('${fredokaRegularCdnUrl}') format('truetype');
+        src: url('${fredokaRegularCdnUrl}') format('truetype'), url('${fredokaRegularLocalUrl}') format('truetype');
         font-weight: 400;
         font-style: normal;
         font-display: swap;
@@ -736,7 +736,7 @@ export default function App() {
 
       @font-face {
         font-family: 'FredokaBoot';
-        src: url('${fredokaBoldLocalUrl}') format('truetype'), url('${fredokaBoldCdnUrl}') format('truetype');
+        src: url('${fredokaBoldCdnUrl}') format('truetype'), url('${fredokaBoldLocalUrl}') format('truetype');
         font-weight: 700;
         font-style: normal;
         font-display: swap;
@@ -744,7 +744,7 @@ export default function App() {
 
       @font-face {
         font-family: 'FredokaBoot';
-        src: url('${fredokaBoldLocalUrl}') format('truetype'), url('${fredokaBoldCdnUrl}') format('truetype');
+        src: url('${fredokaBoldCdnUrl}') format('truetype'), url('${fredokaBoldLocalUrl}') format('truetype');
         font-weight: 900;
         font-style: normal;
         font-display: swap;
@@ -752,7 +752,7 @@ export default function App() {
 
       @font-face {
         font-family: 'ZCOOL KuaiLe';
-        src: url('${zcoolLocalUrl}') format('woff2'), url('${zcoolCdnUrl}') format('woff2');
+        src: url('${zcoolCdnUrl}') format('woff2'), url('${zcoolLocalUrl}') format('woff2');
         font-weight: 400;
         font-style: normal;
         font-display: swap;

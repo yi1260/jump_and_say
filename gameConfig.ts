@@ -1,4 +1,4 @@
-import { getR2ImageUrl, getR2ThemesListCdnUrl, getR2ThemesListUrl, handleR2Error } from '@/src/config/r2Config';
+import { getR2ImageUrl, getThemesListFallbackUrl, getThemesListPrimaryUrl, handleR2Error } from '@/src/config/r2Config';
 import { Theme, ThemeList } from './types';
 
 let cachedThemes: Theme[] | null = null;
@@ -127,10 +127,10 @@ export async function loadThemes(): Promise<Theme[]> {
   try {
     let themeList: ThemeList | null = null;
     try {
-      themeList = await fetchThemesListWithRetry(getR2ThemesListUrl());
-    } catch (localError) {
-      console.warn('[loadThemes] Local themes-list failed, falling back to R2 CDN', localError);
-      themeList = await fetchThemesListWithRetry(getR2ThemesListCdnUrl());
+      themeList = await fetchThemesListWithRetry(getThemesListPrimaryUrl());
+    } catch (primaryError) {
+      console.warn('[loadThemes] CDN themes-list failed, falling back to local', primaryError);
+      themeList = await fetchThemesListWithRetry(getThemesListFallbackUrl());
     }
 
     // Flatten themes from levels structure

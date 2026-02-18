@@ -1,5 +1,5 @@
 import { isThemePreloaded, preloadThemeImagesStrict } from '@/gameConfig';
-import { getR2AssetUrl, getR2ThemesListCdnUrl, getR2ThemesListUrl } from '@/src/config/r2Config';
+import { getR2AssetUrl, getThemesListFallbackUrl, getThemesListPrimaryUrl } from '@/src/config/r2Config';
 import { ThemeId } from '@/types';
 import { motionController } from './motionController';
 
@@ -169,11 +169,11 @@ const preloadThemesListJson = async (): Promise<void> => {
   };
 
   try {
-    await fetchJsonWithRetry(getR2ThemesListUrl());
+    await fetchJsonWithRetry(getThemesListPrimaryUrl());
     themesListPreloaded = true;
-  } catch (localError) {
-    console.warn('Failed to preload local themes-list.json, falling back to R2', localError);
-    await fetchJsonWithRetry(getR2ThemesListCdnUrl());
+  } catch (primaryError) {
+    console.warn('Failed to preload themes-list from CDN, falling back to local', primaryError);
+    await fetchJsonWithRetry(getThemesListFallbackUrl());
     themesListPreloaded = true;
   }
 };

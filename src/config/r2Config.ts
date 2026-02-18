@@ -64,6 +64,14 @@ export const getR2ThemesListCdnUrl = (): string => {
   return `${R2_BASE_URL}/RAZ/themes-list.json?${ASSET_VERSION}`;
 };
 
+export const getThemesListPrimaryUrl = (): string => {
+  return getR2ThemesListCdnUrl();
+};
+
+export const getThemesListFallbackUrl = (): string => {
+  return getR2ThemesListUrl();
+};
+
 export const handleR2Error = (error: unknown, context: string): never => {
   console.error(`[R2 Error] ${context}:`, error);
   

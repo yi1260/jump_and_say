@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { pauseBackgroundPreloading, prioritizeThemeInQueue, resumeBackgroundPreloading } from '../../gameConfig';
 import { motionController } from '../../services/motionController';
+import { getLocalAssetUrl } from '../../src/config/r2Config';
 import { QuestionData, Theme, ThemeId, ThemeList } from '../../types';
 
 // --- CONFIGURATION ---
@@ -244,7 +245,7 @@ export class MainScene extends Phaser.Scene {
   private async loadThemeDataFallback() {
       try {
         // 动态引入避免循环依赖
-        const { getR2ThemesListUrl, getR2ThemesListCdnUrl } = await import('@/src/config/r2Config');
+        const { getThemesListFallbackUrl, getThemesListPrimaryUrl } = await import('@/src/config/r2Config');
         const fetchThemeList = async (url: string): Promise<ThemeList> => {
           const response = await fetch(url);
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -254,10 +255,10 @@ export class MainScene extends Phaser.Scene {
 
         let themeList: ThemeList;
         try {
-          themeList = await fetchThemeList(getR2ThemesListUrl());
-        } catch (localError) {
-          console.warn('[MainScene] Local themes-list failed, falling back to CDN', localError);
-          themeList = await fetchThemeList(getR2ThemesListCdnUrl());
+          themeList = await fetchThemeList(getThemesListPrimaryUrl());
+        } catch (primaryError) {
+          console.warn('[MainScene] CDN themes-list failed, falling back to local', primaryError);
+          themeList = await fetchThemeList(getThemesListFallbackUrl());
         }
         // 更新缓存供后续使用
         this.cache.json.add('themes_list', themeList);
@@ -578,16 +579,11 @@ export class MainScene extends Phaser.Scene {
     this.load.on('loaderror', (file: Phaser.Loader.File) => {
         console.warn(`[Loader] Error loading ${file.key} from ${file.url}`);
         
-        // R2 CDN -> Local Fallback Logic
+        // R2 CDN -> Same-origin fallback
         if (typeof file.url === 'string' && file.url.includes('cdn.maskmysheet.com') && file.url.includes('/assets/')) {
-             console.log(`[Loader] CDN load failed for ${file.key}, attempting local fallback...`);
-             
-             // CDN: https://cdn.maskmysheet.com/assets/kenney/... -> Local: /assets/kenney/...
-             const pathParts = file.url.split('/assets/');
-             if (pathParts.length > 1) {
-                 const newUrl = '/assets/' + pathParts[1];
-                 console.log(`[Loader] Switching to local URL: ${newUrl}`);
-                 
+             const newUrl = getLocalAssetUrl(file.url);
+             if (newUrl !== file.url) {
+                 console.log(`[Loader] CDN load failed for ${file.key}, attempting local fallback: ${newUrl}`);
                  switch (file.type) {
                      case 'image':
                          this.load.image(file.key, newUrl);
@@ -602,9 +598,9 @@ export class MainScene extends Phaser.Scene {
                      default:
                          this.load.image(file.key, newUrl);
                  }
-                 
+
                  this.load.start();
-                 return; 
+                 return;
              }
         }
     });

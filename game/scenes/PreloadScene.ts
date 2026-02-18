@@ -1,5 +1,11 @@
 import { getCachedThemes, getPreloadedThemeAudioBlobUrl } from '@/gameConfig';
-import { getR2AssetUrl, getR2ImageUrl, getR2ThemesListCdnUrl, getR2ThemesListUrl } from '@/src/config/r2Config';
+import {
+  getLocalAssetUrl,
+  getR2AssetUrl,
+  getR2ImageUrl,
+  getThemesListFallbackUrl,
+  getThemesListPrimaryUrl
+} from '@/src/config/r2Config';
 import Phaser from 'phaser';
 import { Theme, ThemeId } from '../../types';
 
@@ -115,8 +121,8 @@ export class PreloadScene extends Phaser.Scene {
 
         if (file.key === 'themes_list' && file.type === 'json' && !this.themesListFallbackTried) {
           this.themesListFallbackTried = true;
-          const fallbackUrl = getR2ThemesListCdnUrl();
-          console.warn(`[Loader] themes_list load failed, attempting CDN fallback: ${fallbackUrl}`);
+          const fallbackUrl = getThemesListFallbackUrl();
+          console.warn(`[Loader] themes_list load failed, attempting local fallback: ${fallbackUrl}`);
           this.load.json('themes_list', fallbackUrl);
           this.load.start();
           return;
@@ -126,9 +132,8 @@ export class PreloadScene extends Phaser.Scene {
           const fallbackTag = `${file.type}:${file.key}`;
           if (!this.localFallbackAttempted.has(fallbackTag)) {
             this.localFallbackAttempted.add(fallbackTag);
-            const pathParts = fileUrl.split('/assets/');
-            if (pathParts.length > 1) {
-              const newUrl = '/assets/' + pathParts[1].split('?')[0];
+            const newUrl = getLocalAssetUrl(fileUrl);
+            if (newUrl !== fileUrl) {
               console.log(`[Loader] CDN load failed for ${file.key}, attempting local fallback: ${newUrl}`);
               enqueueByType(newUrl);
               this.load.start();
@@ -193,7 +198,7 @@ export class PreloadScene extends Phaser.Scene {
 
     // Strategy 4: Fetch from Network (Fallback)
     console.log('[PreloadScene] Falling back to network fetch for themes-list');
-    this.load.json('themes_list', getR2ThemesListUrl());
+    this.load.json('themes_list', getThemesListPrimaryUrl());
     this.load.once('filecomplete-json-themes_list', () => {
       const loaded = this.cache.json.get('themes_list');
       if (loaded) this.loadThemeAssets(loaded);
