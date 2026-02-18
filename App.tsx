@@ -3031,7 +3031,7 @@ export default function App() {
                         )}
 
                         <div className="theme-grid-wrap">
-                          <div className="theme-grid grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 md:gap-2.5 px-1 md:px-0 auto-rows-min pb-32 md:pb-40">
+                          <div className="theme-grid w-full grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 md:gap-2.5 px-1 md:px-0 auto-rows-min pb-32 md:pb-40">
                               {filteredThemes.map((theme, index) => {
                                   const isSelected = selectedThemes.includes(theme.id as ThemeId);
                                   const selectionIndex = selectedThemes.indexOf(theme.id as ThemeId);
@@ -3039,7 +3039,7 @@ export default function App() {
                                   <button
                                       key={theme.id}
                                       onClick={() => theme.isAvailable !== false && handleThemeSelect(theme.id as ThemeId)}
-                                      className={`group relative overflow-hidden rounded-xl transition-all duration-200 will-change-transform ${
+                                      className={`group relative w-full min-w-0 overflow-hidden rounded-xl transition-all duration-200 will-change-transform ${
                                           theme.isAvailable === false 
                                             ? 'opacity-35 grayscale cursor-not-allowed' 
                                             : isSelected 
