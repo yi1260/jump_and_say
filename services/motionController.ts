@@ -7,6 +7,7 @@ const LOG_LEVEL = {
   ERROR: 3
 };
 const CURRENT_LOG_LEVEL = (import.meta as { prod?: boolean }).prod ? LOG_LEVEL.WARN : LOG_LEVEL.INFO;
+const DEFAULT_POSE_CDN_BASE = 'https://fastly.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/';
 
 function log(level: number, tag: string, message: string, data?: unknown) {
   if (level < CURRENT_LOG_LEVEL) return;
@@ -39,6 +40,14 @@ interface PoseLike {
   send: (input: { image: HTMLVideoElement }) => Promise<void>;
   initialize: () => Promise<void>;
   close?: () => void;
+}
+
+interface InitOptions {
+  signal?: AbortSignal;
+}
+
+interface StartOptions {
+  signal?: AbortSignal;
 }
 
 type PoseConstructor = new (options: PoseInitOptions) => PoseLike;
@@ -132,6 +141,7 @@ export class MotionController {
   private smoothedTorsoHeight: number = 0.25;
   private jumpCandidateFrames: number = 0;
   private jumpArmed: boolean = true;
+  private lastPoseLandmarksAt: number = 0;
 
   private lastJumpTime: number = 0;
   private readonly JUMP_COOLDOWN = 800;
@@ -139,7 +149,7 @@ export class MotionController {
   private async prewarmPoseAssets(base: string): Promise<void> {
     if (!('caches' in window)) return;
 
-    const cacheName = base.startsWith('/') ? 'local-mediapipe-pose-cache' : 'mediapipe-cdn-cache-v2';
+    const cacheName = 'mediapipe-cdn-cache-v2';
     const assets = [
       'pose.js',
       'pose_solution_packed_assets_loader.js',
@@ -180,8 +190,29 @@ export class MotionController {
     }
   }
 
-  async init() {
-    if (this.initPromise) return this.initPromise;
+  async init(options: InitOptions = {}) {
+    const { signal } = options;
+    if (this.initPromise) {
+      return this.withAbort(this.initPromise, signal, 'POSE_INIT_ABORTED');
+    }
+
+    const POSE_INIT_TOTAL_TIMEOUT_MS = 2 * 60 * 1000;
+    const navWithConnection = navigator as Navigator & {
+      connection?: {
+        effectiveType?: string;
+        saveData?: boolean;
+      };
+    };
+    const effectiveType = navWithConnection.connection?.effectiveType;
+    const isConstrainedNetwork =
+      navWithConnection.connection?.saveData === true ||
+      effectiveType === 'slow-2g' ||
+      effectiveType === '2g' ||
+      effectiveType === '3g';
+    const POSE_INIT_ATTEMPT_TIMEOUT_MS = isConstrainedNetwork ? 25000 : 15000;
+    const POSE_INIT_RETRY_DELAY_MS = 800;
+    const POSE_WAIT_GLOBAL_TIMEOUT_MS = isConstrainedNetwork ? 12000 : 6000;
+    const DEFAULT_POSE_BASE = window.__MEDIAPIPE_POSE_CDN__ || DEFAULT_POSE_CDN_BASE;
 
     const params = new URLSearchParams(window.location.search);
     const diagEnabled =
@@ -197,33 +228,56 @@ export class MotionController {
 
     const withTimeout = async <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
       let timeoutId: number | null = null;
+      let abortCleanup: (() => void) | null = null;
+      const abortPromise = new Promise<never>((_, reject) => {
+        if (!signal) return;
+        const onAbort = () => {
+          reject(new Error('POSE_INIT_ABORTED'));
+        };
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+        abortCleanup = () => {
+          signal.removeEventListener('abort', onAbort);
+        };
+      });
       const timeoutPromise = new Promise<never>((_, reject) => {
         timeoutId = window.setTimeout(() => reject(new Error(label)), ms);
       });
       try {
-        return await Promise.race([promise, timeoutPromise]);
+        return await Promise.race([promise, timeoutPromise, abortPromise]);
       } finally {
         if (timeoutId !== null) {
           clearTimeout(timeoutId);
         }
+        if (abortCleanup) {
+          abortCleanup();
+        }
       }
     };
 
-    const waitForPose = async (): Promise<void> => {
+    const sleep = (ms: number): Promise<void> => this.sleepWithAbort(ms, signal, 'POSE_INIT_ABORTED');
+
+    const waitForPose = async (maxWaitMs: number): Promise<void> => {
       const start = performance.now();
       let attempts = 0;
-      while (!window.Pose && attempts < 50) {
-        await new Promise((r) => setTimeout(r, 100));
+      while (!window.Pose) {
+        if (signal?.aborted) {
+          throw new Error('POSE_INIT_ABORTED');
+        }
+        if (performance.now() - start >= maxWaitMs) {
+          throw new Error('Pose library not found');
+        }
+        await sleep(100);
         attempts++;
-      }
-      if (!window.Pose) {
-        throw new Error('Pose library not found');
       }
       diagLog('Pose global ready', { ms: Math.round(performance.now() - start), attempts });
     };
 
     const createPose = async (baseOverride?: string): Promise<PoseLike> => {
-      const base = baseOverride || window.__MEDIAPIPE_POSE_CDN__ || '/assets/mediapipe/pose/';
+      const base = baseOverride || window.__MEDIAPIPE_POSE_CDN__ || DEFAULT_POSE_CDN_BASE;
       if (!window.Pose) {
         throw new Error('Pose constructor missing');
       }
@@ -271,11 +325,21 @@ export class MotionController {
         diagLog('Cache probe', { base, results });
       }
 
-      const initStart = performance.now();
-      await withTimeout(pose.initialize(), 8000, 'Pose initialize timeout');
-      diagLog('initialize done', { base, ms: Math.round(performance.now() - initStart) });
-
-      return pose;
+      try {
+        const initStart = performance.now();
+        await withTimeout(pose.initialize(), POSE_INIT_ATTEMPT_TIMEOUT_MS, 'Pose initialize timeout');
+        diagLog('initialize done', { base, ms: Math.round(performance.now() - initStart) });
+        return pose;
+      } catch (error) {
+        if (typeof pose.close === 'function') {
+          try {
+            pose.close();
+          } catch (closeError) {
+            log(2, 'INIT', 'Pose close failed after init error', closeError);
+          }
+        }
+        throw error;
+      }
     };
 
     const getNextBase = (): string | null => {
@@ -288,46 +352,72 @@ export class MotionController {
     this.initPromise = (async () => {
       log(1, 'INIT', 'Initializing Pose...');
 
-      try {
-        const totalStart = performance.now();
-        await waitForPose();
-        this.pose = await createPose();
-        this.isReady = true;
-        log(1, 'INIT', 'Pose Ready');
-        const activeBase = window.__MEDIAPIPE_POSE_CDN__ || '/assets/mediapipe/pose/';
-        diagLog('init success', { ms: Math.round(performance.now() - totalStart), base: activeBase });
-        void this.prewarmPoseAssets(activeBase);
-      } catch (e) {
-        log(2, 'INIT', 'Primary Pose init failed, retrying with alternate CDN...', e);
-        diagLog('init failed, retrying', { error: String(e) });
+      const totalStart = performance.now();
+      const deadline = totalStart + POSE_INIT_TOTAL_TIMEOUT_MS;
+      let attempts = 0;
+      let lastError: unknown = null;
 
-        let retryBase = getNextBase();
-        let attempts = 0;
-        let lastError: unknown = e;
-        while (retryBase && attempts < 12) {
-          try {
-            const retryStart = performance.now();
-            await waitForPose();
-            this.pose = await createPose(retryBase);
-            this.isReady = true;
-            window.__MEDIAPIPE_POSE_CDN__ = retryBase;
-            log(1, 'INIT', 'Pose Ready (retry)');
-            diagLog('retry success', { ms: Math.round(performance.now() - retryStart), base: retryBase });
-            void this.prewarmPoseAssets(retryBase);
-            return;
-          } catch (retryError) {
-            lastError = retryError;
-            attempts += 1;
-            retryBase = getNextBase();
-          }
+      while (performance.now() < deadline) {
+        if (signal?.aborted) {
+          throw new Error('POSE_INIT_ABORTED');
         }
+        const base = attempts === 0 ? DEFAULT_POSE_BASE : (getNextBase() || DEFAULT_POSE_BASE);
+        const remainingBeforeAttempt = Math.max(0, deadline - performance.now());
+        const poseWaitBudgetMs = Math.max(1000, Math.min(POSE_WAIT_GLOBAL_TIMEOUT_MS, remainingBeforeAttempt));
 
-        this.pose = null;
-        this.isReady = false;
-        console.error('[MotionController] Init failed', lastError);
-        diagLog('retry failed', { error: String(lastError) });
-        throw lastError;
+        try {
+          await waitForPose(poseWaitBudgetMs);
+          this.pose = await createPose(base);
+          this.isReady = true;
+          window.__MEDIAPIPE_POSE_CDN__ = base;
+
+          if (attempts === 0) {
+            log(1, 'INIT', 'Pose Ready');
+          } else {
+            log(1, 'INIT', `Pose Ready (retry #${attempts})`);
+          }
+          diagLog('init success', {
+            attempts,
+            ms: Math.round(performance.now() - totalStart),
+            base
+          });
+          void this.prewarmPoseAssets(base);
+          return;
+        } catch (error) {
+          if (signal?.aborted) {
+            this.pose = null;
+            this.isReady = false;
+            throw new Error('POSE_INIT_ABORTED');
+          }
+          lastError = error;
+          attempts += 1;
+          const remainingMs = Math.max(0, deadline - performance.now());
+          log(2, 'INIT', `Pose init attempt #${attempts} failed, retrying...`, error);
+          diagLog('init attempt failed', {
+            attempts,
+            base,
+            remainingMs: Math.round(remainingMs),
+            error: String(error)
+          });
+          if (remainingMs <= 0) {
+            break;
+          }
+          await sleep(Math.min(POSE_INIT_RETRY_DELAY_MS, remainingMs));
+        }
       }
+
+      this.pose = null;
+      this.isReady = false;
+      if (signal?.aborted) {
+        throw new Error('POSE_INIT_ABORTED');
+      }
+      const timeoutMessage = `Pose initialize timeout after ${Math.round(POSE_INIT_TOTAL_TIMEOUT_MS / 1000)}s`;
+      console.error('[MotionController] Init failed after timeout', { attempts, lastError });
+      diagLog('retry failed after timeout', { attempts, error: String(lastError) });
+      if (lastError instanceof Error && lastError.message) {
+        throw new Error(`${timeoutMessage}: ${lastError.message}`);
+      }
+      throw new Error(timeoutMessage);
     })();
 
     this.initPromise = this.initPromise.catch((error) => {
@@ -335,10 +425,14 @@ export class MotionController {
       throw error;
     });
 
-    return this.initPromise;
+    return this.withAbort(this.initPromise, signal, 'POSE_INIT_ABORTED');
   }
 
-  async start(videoElement: HTMLVideoElement) {
+  async start(videoElement: HTMLVideoElement, options: StartOptions = {}) {
+    const { signal } = options;
+    if (signal?.aborted) {
+      throw new Error('POSE_START_ABORTED');
+    }
     if (this.isRunning) {
       this.video = videoElement;
       return;
@@ -346,10 +440,13 @@ export class MotionController {
     log(1, 'START', 'Starting Motion Controller...');
 
     if (!this.pose) {
-      await this.init();
+      await this.init({ signal });
       if (!this.pose) {
         throw new Error('Pose not initialized');
       }
+    }
+    if (signal?.aborted) {
+      throw new Error('POSE_START_ABORTED');
     }
 
     this.video = videoElement;
@@ -382,6 +479,8 @@ export class MotionController {
     this.state.rawFaceWidth = 0.18;
     this.state.rawFaceHeight = 0.24;
     this.state.rawShoulderY = 0.5;
+    this.poseLandmarks = null;
+    this.lastPoseLandmarksAt = 0;
 
     log(1, 'START', 'Loop starting');
     this.processFrame();
@@ -391,6 +490,7 @@ export class MotionController {
     this.isRunning = false;
     this.isStarted = false;
     this.poseLandmarks = null;
+    this.lastPoseLandmarksAt = 0;
     if (this.requestRef !== null) {
       cancelAnimationFrame(this.requestRef);
       this.requestRef = null;
@@ -439,12 +539,14 @@ export class MotionController {
       this.missedDetections += 1;
       this.jumpCandidateFrames = 0;
       this.poseLandmarks = null;
+      this.lastPoseLandmarksAt = 0;
       this.lastResultTime = now;
       return;
     }
 
     this.missedDetections = 0;
     this.poseLandmarks = landmarks;
+    this.lastPoseLandmarksAt = now;
 
     const nose = this.toPoint(landmarks[0]);
     const leftShoulder = this.toPoint(landmarks[11]);
@@ -627,6 +729,66 @@ export class MotionController {
     if (this.isRunning) {
       this.requestRef = requestAnimationFrame(() => this.processFrame());
     }
+  }
+
+  public resetPoseObservation(): void {
+    this.poseLandmarks = null;
+    this.lastPoseLandmarksAt = 0;
+  }
+
+  public hasFreshPoseLandmarks(sinceTimestampMs: number): boolean {
+    if (this.lastPoseLandmarksAt < sinceTimestampMs) return false;
+    if (!this.poseLandmarks || this.poseLandmarks.length === 0) return false;
+    return this.poseLandmarks.some((landmark) => {
+      const visibility = typeof landmark.visibility === 'number' ? landmark.visibility : 1;
+      const presence = typeof landmark.presence === 'number' ? landmark.presence : 1;
+      return visibility > 0.35 && presence > 0.35;
+    });
+  }
+
+  private async withAbort<T>(promise: Promise<T>, signal?: AbortSignal, abortMessage = 'ABORTED'): Promise<T> {
+    if (!signal) return promise;
+    if (signal.aborted) {
+      throw new Error(abortMessage);
+    }
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => {
+        reject(new Error(abortMessage));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      promise
+        .then((value) => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(value);
+        })
+        .catch((error) => {
+          signal.removeEventListener('abort', onAbort);
+          reject(error);
+        });
+    });
+  }
+
+  private async sleepWithAbort(ms: number, signal?: AbortSignal, abortMessage = 'ABORTED'): Promise<void> {
+    if (!signal) {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timeoutId);
+        signal.removeEventListener('abort', onAbort);
+        reject(new Error(abortMessage));
+      };
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 }
 

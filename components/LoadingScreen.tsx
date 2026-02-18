@@ -10,22 +10,22 @@ interface LoadingScreenProps {
 export const LoadingScreen: React.FC<LoadingScreenProps> = ({ progress, status }) => {
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-kenney-blue/90 backdrop-blur-md p-4">
-      <div className="loading-content non-game-scale text-center w-full max-w-2xl px-4 flex flex-col items-center gap-6 md:gap-8 transition-all duration-300">
+      <div className="loading-content non-game-scale text-center w-full max-w-2xl px-4 flex flex-col items-center gap-5 md:gap-6 transition-all duration-300">
         
         {/* Animated Character */}
         <div className="relative shrink-0">
            <ImgWithFallback 
              src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')}
              className="loading-character animate-bounce drop-shadow-xl" 
-             alt="Loading..." 
+             alt="加载中" 
            />
         </div>
 
         {/* Content Container */}
-        <div className="loading-text w-full flex flex-col items-center gap-6 md:gap-8">
+        <div className="loading-text w-full flex flex-col items-center gap-4 md:gap-5">
           {/* Title */}
-          <h2 className="loading-title font-black text-white italic tracking-tight uppercase drop-shadow-[0_4px_0_#333333]">
-            LOADING ASSETS...
+          <h2 className="loading-title font-black text-white tracking-[0.03em]">
+            正在加载，请稍候...
           </h2>
 
           {/* Progress Bar Container */}
@@ -41,8 +41,8 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ progress, status }
           </div>
 
           {/* Status Text */}
-          <p className="loading-status text-white font-bold tracking-wide uppercase drop-shadow-md min-h-[1.5em] animate-pulse">
-            {status}
+          <p className="loading-status text-white font-bold tracking-[0.02em] min-h-[1.5em]">
+            {status || '正在加载中...'}
           </p>
         </div>
       </div>

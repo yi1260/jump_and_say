@@ -1,18 +1,24 @@
+import type Phaser from 'phaser';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { BugReportButton } from './components/BugReportButton';
 import CompletionOverlay from './components/CompletionOverlay';
 import GameBackground from './components/GameBackground';
 import { GameCanvas } from './components/GameCanvas';
 import { LoadingScreen } from './components/LoadingScreen';
-import { loadThemes, startBackgroundPreloading } from './gameConfig';
+import { MainScene } from './game/scenes/MainScene';
+import { isCoverFailed, isCoverPreloaded, loadThemes, markCoverFailed, markCoverPreloaded, pauseBackgroundPreloading, preloadCoverImages, startBackgroundPreloading } from './gameConfig';
 import { preloadAllGameAssets } from './services/assetLoader';
+import { loggerService } from './services/logger';
 import { motionController } from './services/motionController';
-import { getLocalAssetUrl, getR2AssetUrl } from './src/config/r2Config';
+import { getLocalAssetUrl, getR2AssetUrl, getR2ImageUrl } from './src/config/r2Config';
 import { PoseLandmark, Theme, ThemeId } from './types';
 
 declare global {
   interface Window {
     setBGMVolume?: (vol: number) => void;
     restoreBGMVolume?: () => void;
+    ensureAudioUnlocked?: () => Promise<boolean>;
+    phaserGame?: Phaser.Game;
   }
 }
 
@@ -24,34 +30,185 @@ export enum GamePhase {
   PLAYING = 'PLAYING'
 }
 
+type FullscreenCapableElement = HTMLElement & {
+  webkitRequestFullscreen?: () => Promise<void> | void;
+  mozRequestFullScreen?: () => Promise<void> | void;
+  msRequestFullscreen?: () => Promise<void> | void;
+};
+
+type FullscreenCapableDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  mozFullScreenElement?: Element | null;
+  msFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
+  mozCancelFullScreen?: () => Promise<void> | void;
+  msExitFullscreen?: () => Promise<void> | void;
+};
+
+const ThemeCardImage = ({ src, alt, index }: { src: string; alt: string; index: number }) => {
+    const [loaded, setLoaded] = useState<boolean>(() => isCoverPreloaded(src));
+    const [shouldAnimate, setShouldAnimate] = useState<boolean>(() => !isCoverPreloaded(src));
+    const [isFailed, setIsFailed] = useState<boolean>(() => isCoverFailed(src));
+    const fetchPriorityAttr: 'high' | 'auto' = index < 12 ? 'high' : 'auto';
+    const imageRef = useRef<HTMLImageElement | null>(null);
+
+    const handleImageLoad = useCallback(() => {
+      markCoverPreloaded(src);
+      setIsFailed(false);
+      setLoaded(true);
+    }, [src]);
+
+    const handleImageError = useCallback(() => {
+      markCoverFailed(src);
+      setIsFailed(true);
+      setLoaded(false);
+      setShouldAnimate(false);
+    }, [src]);
+    
+    useEffect(() => {
+        if (isCoverFailed(src)) {
+          setIsFailed(true);
+          setLoaded(false);
+          setShouldAnimate(false);
+          return;
+        }
+
+        const alreadyLoaded = isCoverPreloaded(src);
+        if (alreadyLoaded) {
+            setLoaded(true);
+            setIsFailed(false);
+            setShouldAnimate(false);
+            return;
+        }
+
+        setIsFailed(false);
+        setLoaded(false);
+        setShouldAnimate(true);
+        const imgElement = imageRef.current;
+        if (imgElement && imgElement.complete && imgElement.naturalWidth > 0) {
+          markCoverPreloaded(src);
+          setLoaded(true);
+          setShouldAnimate(false);
+        }
+    }, [src]);
+  
+    return (
+      <>
+        {/* Fallback pattern (visible until loaded) */}
+        <div 
+          className={`absolute inset-0 transition-opacity duration-500 rounded-xl ${loaded ? 'opacity-0' : 'opacity-100'}`}
+          style={{ zIndex: 1 }}
+        >
+             <div className="absolute inset-0 opacity-5 pointer-events-none rounded-xl" style={{
+                  backgroundImage: 'radial-gradient(circle, #333333 1px, transparent 1px)',
+                  backgroundSize: '12px 12px'
+              }} />
+              
+              <div className="absolute inset-1 rounded-lg opacity-15 pointer-events-none" style={{
+                   background: ['#000000', '#1a1a1a', '#2d2d2d', '#333333', '#404040'][
+                       index % 5
+                   ]
+               }} />
+        </div>
+
+        {/* Real Image (fades in) */}
+        {!isFailed && (
+          <img 
+            ref={imageRef}
+            src={src} 
+            alt={alt}
+            crossOrigin="anonymous"
+            onLoad={handleImageLoad}
+            onError={handleImageError}
+            className={`absolute inset-0 w-full h-full object-cover rounded-[inherit] ${shouldAnimate ? 'transition-opacity duration-300' : ''} ${loaded ? 'opacity-100' : 'opacity-0'}`}
+            style={{ zIndex: 2 }}
+            loading={index < 12 ? 'eager' : 'lazy'}
+            {...{ fetchpriority: fetchPriorityAttr }}
+          />
+        )}
+        
+        {/* Gradient Overlay (always visible for text contrast, but only needed when image is loaded? 
+            Actually, the fallback has its own color. Let's keep gradient on top of image only.) 
+        */}
+        <div 
+            className={`absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent rounded-[inherit] ${shouldAnimate ? 'transition-opacity duration-300' : ''} ${loaded ? 'opacity-100' : 'opacity-0'}`} 
+            style={{ zIndex: 3 }}
+        />
+      </>
+    );
+};
+
 export default function App() {
-  const BGM_VOLUME_PLAYING = 0.03;
-  const BGM_VOLUME_IDLE = 0.03;
+  const BGM_VOLUME_PLAYING = 0.015;
+  const BGM_VOLUME_IDLE = 0.015;
+  const THEME_SWITCH_REST_SECONDS = 15;
   const [score, setScore] = useState(0);
   const [totalQuestions, setTotalQuestions] = useState(0);
   const [selectedThemes, setSelectedThemes] = useState<ThemeId[]>([]);
   const [isPortrait, setIsPortrait] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const [showCompletion, setShowCompletion] = useState(false);
+  const [restCountdownSeconds, setRestCountdownSeconds] = useState<number | null>(null);
   const [isBgmEnabled, setIsBgmEnabled] = useState(true);
   const [bgIndex, setBgIndex] = useState(0);
   const [themes, setThemes] = useState<Theme[]>([]);
+  const [selectedLevel, setSelectedLevel] = useState<string>('AA');
+
+  const levels = React.useMemo(() => {
+    const allLevels = Array.from(new Set(themes.map(t => t.level).filter(Boolean))) as string[];
+    const order = ['AA', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'];
+    return allLevels.sort((a, b) => {
+      const idxA = order.indexOf(a);
+      const idxB = order.indexOf(b);
+      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+      if (idxA !== -1) return -1;
+      if (idxB !== -1) return 1;
+      return a.localeCompare(b);
+    });
+  }, [themes]);
+
+  const filteredThemes = React.useMemo(() => {
+      // If no levels found (old data structure?), show all themes
+      if (levels.length === 0) return themes;
+      return themes.filter(t => t.level === selectedLevel);
+  }, [themes, selectedLevel, levels]);
+
+  useEffect(() => {
+    if (levels.length > 0 && !levels.includes(selectedLevel)) {
+      setSelectedLevel(levels[0]);
+    }
+  }, [levels, selectedLevel]);
 
   const phaseRef = useRef<GamePhase>(GamePhase.MENU);
   const [phase, setPhaseState] = useState<GamePhase>(GamePhase.MENU);
   const [initStatus, setInitStatus] = useState<string>('');
   const [themeImagesLoaded, setThemeImagesLoaded] = useState(false);
   const [hasShownEmoji, setHasShownEmoji] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const bgmRef = useRef<HTMLAudioElement>(null);
   const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
   const isBgmEnabledRef = useRef<boolean>(isBgmEnabled);
   const isBgmPlayingRef = useRef<boolean>(false);
   const poseCanvasRef = useRef<HTMLCanvasElement>(null);
   const poseLoopRef = useRef<number | null>(null);
+  const appRootRef = useRef<HTMLDivElement>(null);
+  const scorePanelRef = useRef<HTMLDivElement>(null);
+  const fullscreenActionInFlightRef = useRef(false);
+  const lastFullscreenAttemptAtRef = useRef(0);
+  const lastFullscreenTouchAtRef = useRef(0);
+  const loadingRequestIdRef = useRef(0);
+  const completionCycleRef = useRef(0);
+  const completionAutoAdvanceHandledCycleRef = useRef<number | null>(null);
+  const restCountdownTimerRef = useRef<number | null>(null);
+  const isCompletionTransitioningRef = useRef<boolean>(false);
   
   // Loading State
   const [loadingProgress, setLoadingProgress] = useState(0);
-  const [loadingStatus, setLoadingStatus] = useState('Initializing...');
+  const [loadingStatus, setLoadingStatus] = useState('正在准备...');
+  const [cameraIssueMessage, setCameraIssueMessage] = useState('');
+  const [isPoseDetected, setIsPoseDetected] = useState(false);
+  const isPoseDetectedRef = useRef<boolean>(false);
+  const lastPoseSeenAtRef = useRef<number>(0);
+  const hasCalibratedPoseRef = useRef<boolean>(false);
 
   const POSE_CONNECTIONS: Array<[number, number]> = [
     [0, 1], [1, 2], [2, 3],
@@ -67,6 +224,33 @@ export default function App() {
     [23, 25], [25, 27], [27, 29], [29, 31],
     [24, 26], [26, 28], [28, 30], [30, 32]
   ];
+
+  const setPoseDetectedState = useCallback((nextDetected: boolean): void => {
+    if (isPoseDetectedRef.current === nextDetected) return;
+    isPoseDetectedRef.current = nextDetected;
+    setIsPoseDetected(nextDetected);
+  }, []);
+
+  const markPoseObserved = useCallback((observedAtMs: number): void => {
+    lastPoseSeenAtRef.current = observedAtMs;
+    setPoseDetectedState(true);
+    if (!hasCalibratedPoseRef.current) {
+      hasCalibratedPoseRef.current = true;
+      motionController.calibrate();
+    }
+  }, [setPoseDetectedState]);
+
+  const refreshPoseDetectedState = useCallback((nowMs: number): boolean => {
+    const hasFreshPose = motionController.hasFreshPoseLandmarks(nowMs - 1200);
+    if (hasFreshPose) {
+      markPoseObserved(nowMs);
+      return true;
+    }
+    if (isPoseDetectedRef.current && nowMs - lastPoseSeenAtRef.current > 2200) {
+      setPoseDetectedState(false);
+    }
+    return false;
+  }, [markPoseObserved, setPoseDetectedState]);
 
   const getBgmTargetVolume = (targetPhase: GamePhase): number => {
     return targetPhase === GamePhase.PLAYING ? BGM_VOLUME_PLAYING : BGM_VOLUME_IDLE;
@@ -90,52 +274,194 @@ export default function App() {
       isBgmPlayingRef.current = false;
     }
   };
+
+  const setBgmEnabled = (enabled: boolean): void => {
+    isBgmEnabledRef.current = enabled;
+    setIsBgmEnabled(enabled);
+    applyBgmState(enabled);
+  };
   
   const setPhase = (newPhase: GamePhase) => {
+    const prevPhase = phaseRef.current;
+    if (newPhase === GamePhase.PLAYING) {
+      setBgmEnabled(false);
+    } else if (prevPhase === GamePhase.PLAYING) {
+      setBgmEnabled(true);
+    }
+
     phaseRef.current = newPhase;
     setPhaseState(newPhase);
     
     // Update BGM volume based on phase (e.g. might be different in MENU vs PLAYING)
     applyBgmState(isBgmEnabledRef.current);
+  };
 
-    if (newPhase !== GamePhase.PLAYING) {
-      // Force exit fullscreen when entering MENU or THEME_SELECTION
-      if (newPhase === GamePhase.MENU || newPhase === GamePhase.THEME_SELECTION) {
-        const doc = document as any;
-        const isFull = !!(doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement);
-        if (isFull) {
-            if (document.exitFullscreen) {
-              document.exitFullscreen().catch(() => {});
-            } else if (doc.webkitExitFullscreen) {
-              doc.webkitExitFullscreen();
-            } else if (doc.mozCancelFullScreen) {
-              doc.mozCancelFullScreen();
-            } else if (doc.msExitFullscreen) {
-              doc.msExitFullscreen();
-            }
-        }
+  const clearRestCountdown = useCallback((): void => {
+    if (restCountdownTimerRef.current !== null) {
+      window.clearInterval(restCountdownTimerRef.current);
+      restCountdownTimerRef.current = null;
+    }
+    setRestCountdownSeconds(null);
+    isCompletionTransitioningRef.current = false;
+  }, []);
+
+  const waitMs = (ms: number): Promise<void> => (
+    new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    })
+  );
+
+  const isPromiseLike = (value: unknown): value is PromiseLike<unknown> => {
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return false;
+    const maybeThen = (value as { then?: unknown }).then;
+    return typeof maybeThen === 'function';
+  };
+
+  const awaitWithTimeout = async (value: PromiseLike<unknown>, timeoutMs: number): Promise<void> => {
+    let timeoutId: number | null = null;
+    try {
+      await Promise.race([
+        Promise.resolve(value).then(() => undefined),
+        new Promise<never>((_, reject) => {
+          timeoutId = window.setTimeout(() => {
+            reject(new Error('FULLSCREEN_TIMEOUT'));
+          }, timeoutMs);
+        })
+      ]);
+    } finally {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
       }
     }
   };
+
+  const getFullscreenElement = useCallback((): Element | null => {
+    const fullscreenDoc = document as FullscreenCapableDocument;
+    return (
+      document.fullscreenElement ??
+      fullscreenDoc.webkitFullscreenElement ??
+      fullscreenDoc.mozFullScreenElement ??
+      fullscreenDoc.msFullscreenElement ??
+      null
+    );
+  }, []);
+
+  const syncFullscreenState = useCallback((): void => {
+    setIsFullscreen(Boolean(getFullscreenElement()));
+  }, [getFullscreenElement]);
+
+  const requestFullscreenSafely = useCallback(async (source: 'auto' | 'manual'): Promise<boolean> => {
+    const now = Date.now();
+    if (fullscreenActionInFlightRef.current) return false;
+    if (source === 'auto' && now - lastFullscreenAttemptAtRef.current < 350) return false;
+
+    lastFullscreenAttemptAtRef.current = now;
+
+    if (getFullscreenElement()) {
+      setIsFullscreen(true);
+      return true;
+    }
+
+    if (document.visibilityState !== 'visible') {
+      return false;
+    }
+
+    fullscreenActionInFlightRef.current = true;
+    try {
+      const element = document.documentElement as FullscreenCapableElement;
+      const requestMethod = 
+        element.requestFullscreen ||
+        element.webkitRequestFullscreen ||
+        element.mozRequestFullScreen ||
+        element.msRequestFullscreen;
+
+      if (requestMethod) {
+        await requestMethod.call(element);
+        // Small wait to allow state update
+        await waitMs(100);
+        if (getFullscreenElement()) {
+          setIsFullscreen(true);
+          return true;
+        }
+      }
+      return false;
+    } catch (error) {
+      console.warn('[Fullscreen] request failed:', error);
+      return false;
+    } finally {
+      fullscreenActionInFlightRef.current = false;
+      syncFullscreenState();
+    }
+  }, [getFullscreenElement, syncFullscreenState]);
+
+  const exitFullscreenSafely = useCallback(async (source: 'manual' | 'leave_game'): Promise<boolean> => {
+    if (fullscreenActionInFlightRef.current) return false;
+    if (!getFullscreenElement()) {
+      setIsFullscreen(false);
+      return true;
+    }
+
+    fullscreenActionInFlightRef.current = true;
+    try {
+      const fullscreenDoc = document as FullscreenCapableDocument;
+      const exitMethod = 
+        document.exitFullscreen ||
+        fullscreenDoc.webkitExitFullscreen ||
+        fullscreenDoc.mozCancelFullScreen ||
+        fullscreenDoc.msExitFullscreen;
+
+      if (exitMethod) {
+        await exitMethod.call(document);
+        await waitMs(100);
+      }
+      
+      const isStillFullscreen = Boolean(getFullscreenElement());
+      if (!isStillFullscreen) {
+        setIsFullscreen(false);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.warn(`[Fullscreen] exit failed (${source}):`, error);
+      return false;
+    } finally {
+      fullscreenActionInFlightRef.current = false;
+      syncFullscreenState();
+    }
+  }, [getFullscreenElement, syncFullscreenState]);
+
+  const handleToggleFullscreen = useCallback((e?: React.MouseEvent | React.TouchEvent): void => {
+    if (e) {
+      if (e.type === 'touchstart') {
+        lastFullscreenTouchAtRef.current = Date.now();
+      }
+      // Debounce click after touch
+      if (e.type === 'click' && Date.now() - lastFullscreenTouchAtRef.current < 700) {
+        return;
+      }
+      // Do NOT preventDefault() on click as it can block fullscreen on some mobile browsers
+      // But we stop propagation to prevent parent handlers
+      e.stopPropagation();
+    }
+
+    if (isFullscreen) {
+      void exitFullscreenSafely('manual');
+      return;
+    }
+    void requestFullscreenSafely('manual');
+  }, [exitFullscreenSafely, isFullscreen, requestFullscreenSafely]);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const initializeCameraRef = useRef<() => Promise<boolean>>(async () => false);
+  const startPoseOverlayLoopRef = useRef<() => void>(() => undefined);
+  const isForegroundRecoveryInFlightRef = useRef<boolean>(false);
+  const lastForegroundRecoveryAtRef = useRef<number>(0);
 
   useEffect(() => {
-    const handleFullscreenChange = () => {
-      const doc = document as any;
-      const isFull = !!(doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement);
-      console.log('Fullscreen change detected:', isFull);
-      setIsFullscreen(isFull);
-    };
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
-    document.addEventListener('mozfullscreenchange', handleFullscreenChange);
-    document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+    loggerService.init();
     return () => {
-      document.removeEventListener('fullscreenchange', handleFullscreenChange);
-      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
-      document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
-      document.removeEventListener('MSFullscreenChange', handleFullscreenChange);
+      loggerService.destroy();
     };
   }, []);
 
@@ -153,8 +479,62 @@ export default function App() {
   }, [isBgmEnabled]);
 
   useEffect(() => {
+    const handleFullscreenChange = (): void => {
+      syncFullscreenState();
+    };
+    const handleFullscreenError = (event: Event): void => {
+      console.warn('[Fullscreen] fullscreenerror event:', event.type);
+      syncFullscreenState();
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+    document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+    document.addEventListener('fullscreenerror', handleFullscreenError);
+    document.addEventListener('webkitfullscreenerror', handleFullscreenError);
+    document.addEventListener('mozfullscreenerror', handleFullscreenError);
+    document.addEventListener('MSFullscreenError', handleFullscreenError);
+
+    syncFullscreenState();
+
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('MSFullscreenChange', handleFullscreenChange);
+      document.removeEventListener('fullscreenerror', handleFullscreenError);
+      document.removeEventListener('webkitfullscreenerror', handleFullscreenError);
+      document.removeEventListener('mozfullscreenerror', handleFullscreenError);
+      document.removeEventListener('MSFullscreenError', handleFullscreenError);
+    };
+  }, [syncFullscreenState]);
+
+  useEffect(() => {
+    if (phase !== GamePhase.PLAYING) {
+      return;
+    }
+
+    let cancelled = false;
+    const autoEnterTimer = window.setTimeout(() => {
+      if (cancelled) return;
+      void requestFullscreenSafely('auto').then((entered) => {
+        if (!entered) {
+          console.info('[Fullscreen] Auto-enter skipped or rejected. Continue windowed mode.');
+        }
+      });
+    }, 80);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(autoEnterTimer);
+    };
+  }, [phase, requestFullscreenSafely]);
+
+  useEffect(() => {
     let bgmAudio: HTMLAudioElement | null = null;
     let hasTriedFallback = false;
+    let htmlAudioUnlocked = false;
     
     const updateVolume = (vol: number) => {
       if (bgmAudio) {
@@ -170,6 +550,48 @@ export default function App() {
     window.restoreBGMVolume = () => {
       updateVolume(isBgmEnabledRef.current ? getBgmTargetVolume(phaseRef.current) : 0);
     };
+
+    const ensureAudioUnlocked = async (): Promise<boolean> => {
+      if (!bgmAudio) return false;
+      if (htmlAudioUnlocked || isBgmPlayingRef.current || !bgmAudio.paused) {
+        htmlAudioUnlocked = true;
+        return true;
+      }
+
+      const previousMuted = bgmAudio.muted;
+      try {
+        bgmAudio.muted = true;
+        bgmAudio.volume = 0;
+        await bgmAudio.play();
+        bgmAudio.pause();
+        try {
+          bgmAudio.currentTime = 0;
+        } catch {
+          // Ignore currentTime reset failures on some mobile browsers.
+        }
+        htmlAudioUnlocked = true;
+        console.log('[Audio] HTMLMedia playback unlocked by user interaction.');
+        return true;
+      } catch (error) {
+        console.warn('[Audio] HTMLMedia unlock attempt failed:', error);
+        return false;
+      } finally {
+        if (!bgmAudio) return;
+        const shouldPlayBgm = isBgmEnabledRef.current;
+        if (!shouldPlayBgm && !bgmAudio.paused) {
+          bgmAudio.pause();
+        }
+        if (!shouldPlayBgm) {
+          bgmAudio.muted = true;
+          bgmAudio.volume = 0;
+        } else {
+          bgmAudio.muted = previousMuted;
+          bgmAudio.volume = getBgmTargetVolume(phaseRef.current);
+        }
+      }
+    };
+
+    window.ensureAudioUnlocked = ensureAudioUnlocked;
     
     const initBGM = async () => {
       if (isBgmPlayingRef.current) return;
@@ -206,6 +628,7 @@ export default function App() {
         try {
           await bgmAudio.play();
           isBgmPlayingRef.current = true;
+          htmlAudioUnlocked = true;
           console.log('BGM started playing');
         } catch (e) {
           console.log('BGM play failed, waiting for user interaction:', e);
@@ -216,22 +639,25 @@ export default function App() {
     initBGM();
     
     const handleInteraction = () => {
-      if (!isBgmEnabledRef.current || !bgmAudio) return;
+      if (!bgmAudio) return;
+      void ensureAudioUnlocked();
+      if (!isBgmEnabledRef.current) return;
       if (!isBgmPlayingRef.current) {
         bgmAudio.play().then(() => {
           isBgmPlayingRef.current = true;
+          htmlAudioUnlocked = true;
         }).catch(() => {});
       }
     };
     
-    document.addEventListener('click', handleInteraction);
-    document.addEventListener('touchstart', handleInteraction);
-    document.addEventListener('keydown', handleInteraction);
+    document.addEventListener('click', handleInteraction, true);
+    document.addEventListener('touchstart', handleInteraction, true);
+    document.addEventListener('keydown', handleInteraction, true);
     
     return () => {
-      document.removeEventListener('click', handleInteraction);
-      document.removeEventListener('touchstart', handleInteraction);
-      document.removeEventListener('keydown', handleInteraction);
+      document.removeEventListener('click', handleInteraction, true);
+      document.removeEventListener('touchstart', handleInteraction, true);
+      document.removeEventListener('keydown', handleInteraction, true);
       if (bgmAudio) {
         bgmAudio.pause();
         bgmAudio.src = '';
@@ -241,98 +667,151 @@ export default function App() {
       isBgmPlayingRef.current = false;
       window.setBGMVolume = undefined;
       window.restoreBGMVolume = undefined;
+      window.ensureAudioUnlocked = undefined;
     };
   }, []);
-
-  const toggleFullscreen = async (e?: React.MouseEvent | React.TouchEvent) => {
-    // IMPORTANT: Prevent default and propagation to avoid event interference
-    if (e) {
-      // Prevent double-firing: if we handled touch, don't handle click
-      if (e.type === 'click' && (e as any).detail === 0) {
-          // This is a synthetic click from a touch event that we likely already handled
-          // However, React's event normalization makes this tricky.
-          // Best approach is to rely on e.preventDefault() in touchstart
-      }
-
-      if (typeof e.cancelable !== 'boolean' || e.cancelable) {
-        e.preventDefault();
-      }
-      e.stopPropagation();
-    }
-    
-    // Explicitly focus body to remove focus from any button
-    document.body.focus();
-    
-    try {
-      const doc = document as any;
-      const isCurrentlyFullscreen = !!(
-        doc.fullscreenElement || 
-        doc.webkitFullscreenElement || 
-        doc.mozFullScreenElement || 
-        doc.msFullscreenElement ||
-        doc.webkitIsFullScreen ||
-        doc.mozFullScreen ||
-        doc.msFullscreenElement
-      );
-
-      console.log('toggleFullscreen action:', isCurrentlyFullscreen ? 'EXITING' : 'ENTERING');
-
-      if (!isCurrentlyFullscreen) {
-        const docEl = document.documentElement as any;
-        // Check for permission policies (though usually not blocking for user gesture)
-        
-        if (docEl.requestFullscreen) {
-          await docEl.requestFullscreen();
-        } else if (docEl.webkitRequestFullscreen) {
-          await docEl.webkitRequestFullscreen();
-        } else if (docEl.mozRequestFullScreen) {
-          await docEl.mozRequestFullScreen();
-        } else if (docEl.msRequestFullscreen) {
-          await docEl.msRequestFullscreen();
-        }
-        
-        // Try to lock orientation after entering fullscreen
-        if (window.screen.orientation && (window.screen.orientation as any).lock) {
-            try {
-                await (window.screen.orientation as any).lock('landscape');
-            } catch (err) {
-                console.warn('Orientation lock failed:', err);
-            }
-        }
-      } else {
-        if (document.exitFullscreen) {
-          await document.exitFullscreen();
-        } else if (doc.webkitExitFullscreen) {
-          await doc.webkitExitFullscreen();
-        } else if (doc.mozCancelFullScreen) {
-          await doc.mozCancelFullScreen();
-        } else if (doc.msExitFullscreen) {
-          await doc.msExitFullscreen();
-        }
-      }
-    } catch (e) {
-      console.error('Fullscreen toggle failed', e);
-    }
-  };
 
   useEffect(() => {
     // Add custom animation styles directly to the document
     const style = document.createElement('style');
-    const fontCdnUrl = getR2AssetUrl('assets/Fredoka/static/Fredoka-Bold.ttf');
-    const fontLocalUrl = getLocalAssetUrl(fontCdnUrl);
+    const fredokaRegularLocalUrl = '/assets/fonts/Fredoka/static/Fredoka-Regular.ttf';
+    const fredokaRegularCdnUrl = getR2AssetUrl('jump-and-say-themes-pic/assets/fonts/Fredoka/static/Fredoka-Regular.ttf');
+    const fredokaBoldLocalUrl = '/assets/fonts/Fredoka/static/Fredoka-Bold.ttf';
+    const fredokaBoldCdnUrl = getR2AssetUrl('jump-and-say-themes-pic/assets/fonts/Fredoka/static/Fredoka-Bold.ttf');
+    const zcoolLocalUrl = '/assets/fonts/Zcool/zcool-kuaile-chinese-simplified-400-normal.woff2';
+    const zcoolCdnUrl = getR2AssetUrl('jump-and-say-themes-pic/assets/fonts/Zcool/zcool-kuaile-chinese-simplified-400-normal.woff2');
+    const uiFontStack = `'FredokaBoot', 'FredokaLatin', 'Fredoka', 'ZCOOL KuaiLe', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', system-ui, -apple-system, sans-serif`;
+    const fontSet: FontFaceSet | null = 'fonts' in document ? document.fonts : null;
+
+    const monitorFredokaFontLoad = async (): Promise<void> => {
+      if (!fontSet) {
+        console.warn('[Font] FontFaceSet API is not available; cannot verify FredokaBoot load state.');
+        return;
+      }
+
+      const fontSpecs = [
+        '400 24px "FredokaBoot"',
+        '700 24px "FredokaBoot"',
+        '900 24px "FredokaBoot"',
+        '400 24px "ZCOOL KuaiLe"'
+      ];
+
+      await Promise.race([
+        Promise.allSettled(fontSpecs.map((spec) => fontSet.load(spec))),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 2500))
+      ]);
+
+      const missingSpecs = fontSpecs.filter((spec) => !fontSet.check(spec));
+      if (missingSpecs.length > 0) {
+        await Promise.allSettled(missingSpecs.map((spec) => fontSet.load(spec)));
+      }
+
+      const stillMissingSpecs = fontSpecs.filter((spec) => !fontSet.check(spec));
+      if (stillMissingSpecs.length > 0) {
+        console.warn('[Font] FredokaBoot failed to load completely.', {
+          missingSpecs: stillMissingSpecs,
+          regularUrl: fredokaRegularCdnUrl,
+          boldUrl: fredokaBoldCdnUrl
+        });
+      } else {
+        console.info('[Font] FredokaBoot loaded successfully for UI.');
+      }
+    };
+
+    const handleFontLoadingError = (): void => {
+      console.warn('[Font] Browser reported a font loading error event while loading FredokaBoot.');
+    };
+
+    fontSet?.addEventListener('loadingerror', handleFontLoadingError);
+    void monitorFredokaFontLoad();
+
     style.innerHTML = `
       @font-face {
-        font-family: 'FredokaLocal';
-        src: url('${fontCdnUrl}') format('truetype'), url('${fontLocalUrl}') format('truetype');
-        font-weight: bold;
+        font-family: 'FredokaBoot';
+        src: url('${fredokaRegularLocalUrl}') format('truetype'), url('${fredokaRegularCdnUrl}') format('truetype');
+        font-weight: 400;
+        font-style: normal;
+        font-display: swap;
+      }
+
+      @font-face {
+        font-family: 'FredokaBoot';
+        src: url('${fredokaBoldLocalUrl}') format('truetype'), url('${fredokaBoldCdnUrl}') format('truetype');
+        font-weight: 700;
+        font-style: normal;
+        font-display: swap;
+      }
+
+      @font-face {
+        font-family: 'FredokaBoot';
+        src: url('${fredokaBoldLocalUrl}') format('truetype'), url('${fredokaBoldCdnUrl}') format('truetype');
+        font-weight: 900;
+        font-style: normal;
+        font-display: swap;
+      }
+
+      @font-face {
+        font-family: 'ZCOOL KuaiLe';
+        src: url('${zcoolLocalUrl}') format('woff2'), url('${zcoolCdnUrl}') format('woff2');
+        font-weight: 400;
         font-style: normal;
         font-display: swap;
       }
 
       body, button, div, span, h1, h2, h3 {
-        font-family: 'FredokaLocal', 'Arial Rounded MT Bold', 'Chalkboard SE', 'Comic Sans MS', cursive !important;
+        font-family: ${uiFontStack} !important;
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
+      }
+
+      .brand-title,
+      .tabular-nums,
+      .number-font {
+        font-family: ${uiFontStack} !important;
+      }
+
+      .menu-shell,
+      .menu-shell *,
+      .theme-shell,
+      .theme-shell *,
+      .tutorial-shell,
+      .tutorial-shell * {
+        font-family: ${uiFontStack} !important;
+      }
+
+      .non-game-shell[lang='zh-CN'] h2:not(.brand-title),
+      .non-game-shell[lang='zh-CN'] h3,
+      .non-game-shell[lang='zh-CN'] p,
+      .non-game-shell[lang='zh-CN'] button span,
+      .non-game-shell[lang='zh-CN'] button {
+        filter: none !important;
+        text-shadow: none !important;
+        font-family: ${uiFontStack} !important;
+        letter-spacing: 0.02em;
+      }
+
+      .non-game-shell[lang='zh-CN'] .loading-title {
+        font-size: clamp(1.35rem, 4vw, 2.4rem);
+      }
+
+      .non-game-shell[lang='zh-CN'] .loading-status {
+        font-size: clamp(0.95rem, 2.25vw, 1.2rem);
+        line-height: 1.35;
+      }
+
+      .non-game-shell[lang='zh-CN'] .theme-card-title {
+        font-size: clamp(0.78rem, 1.5vw, 1rem) !important;
+        line-height: 1.2 !important;
+      }
+
+      .non-game-shell[lang='zh-CN'] .tutorial-title {
+        letter-spacing: 0.04em;
+      }
+
+      .non-game-shell[lang='zh-CN'] .tutorial-card-title {
+        font-size: clamp(0.95rem, 2.5vw, 1.5rem) !important;
+        line-height: 1.2 !important;
+        font-weight: 400 !important;
       }
 
       @keyframes rotate-device {
@@ -698,9 +1177,25 @@ export default function App() {
           font-size: 1rem !important;
         }
       }
+
+      /* Keep PLAYING HUD size consistent with windowed mode when fullscreen is enabled */
+      .fullscreen-hud-match-windowed {
+        transform: scale(0.7) !important;
+        transform-origin: top left !important;
+        top: 1rem !important;
+        left: 1rem !important;
+      }
+      @media (max-height: 480px) {
+        .fullscreen-hud-match-windowed {
+          transform: scale(0.45) !important;
+          top: 0.2rem !important;
+          left: 0.2rem !important;
+        }
+      }
     `;
     document.head.appendChild(style);
     return () => {
+      fontSet?.removeEventListener('loadingerror', handleFontLoadingError);
       document.head.removeChild(style);
     };
   }, []);
@@ -732,22 +1227,37 @@ export default function App() {
       setThemes(loadedThemes);
     };
     initThemes();
-    
-    // Early initialize AI models
-    console.log("App: Background initializing AI models...");
-    motionController.init().catch(err => {
-      console.warn("App: Failed to background initialize AI models:", err);
-    });
   }, []);
 
-  const handleStartProcess = async () => {
-    // 1. Unlock Web Audio / Speech Synthesis for mobile (iOS/Android)
-    if ('speechSynthesis' in window) {
-      const silence = new SpeechSynthesisUtterance('');
-      silence.volume = 0;
-      window.speechSynthesis.speak(silence);
+  useEffect(() => {
+    if (filteredThemes.length === 0) {
+      return;
     }
-    
+    preloadCoverImages(filteredThemes);
+  }, [filteredThemes]);
+
+  const cleanupCameraAndMotion = useCallback((): void => {
+    pauseBackgroundPreloading();
+    motionController.stop();
+    if (poseLoopRef.current !== null) {
+      cancelAnimationFrame(poseLoopRef.current);
+      poseLoopRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.srcObject = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    hasCalibratedPoseRef.current = false;
+    lastPoseSeenAtRef.current = 0;
+    setPoseDetectedState(false);
+  }, [setPoseDetectedState]);
+
+  const handleStartProcess = async () => {
+    setCameraIssueMessage('');
     setPhase(GamePhase.THEME_SELECTION);
   };
 
@@ -759,36 +1269,16 @@ export default function App() {
       e.stopPropagation();
     }
 
-    setIsBgmEnabled(prev => {
-      const next = !prev;
-      isBgmEnabledRef.current = next;
-      applyBgmState(next);
-      return next;
-    });
+    setBgmEnabled(!isBgmEnabledRef.current);
   }, []);
 
-  const enterFullscreenAndLockOrientation = async () => {
-    try {
-      // Force Landscape Orientation if supported
-      if (window.screen.orientation && (window.screen.orientation as any).lock) {
-        await (window.screen.orientation as any).lock('landscape').catch((e: any) => {
-          console.log('Orientation lock failed', e);
-        });
+  useEffect(() => {
+    return () => {
+      if (restCountdownTimerRef.current !== null) {
+        window.clearInterval(restCountdownTimerRef.current);
       }
-
-      // Enter Fullscreen
-      const docEl = document.documentElement;
-      if (docEl.requestFullscreen) {
-        await docEl.requestFullscreen();
-      } else if ((docEl as any).webkitRequestFullscreen) {
-        await (docEl as any).webkitRequestFullscreen();
-      } else if ((docEl as any).msRequestFullscreen) {
-        await (docEl as any).msRequestFullscreen();
-      }
-    } catch (e) {
-      console.log('Fullscreen/Orientation lock failed', e);
-    }
-  };
+    };
+  }, []);
 
   useEffect(() => {
     const updateAppHeight = () => {
@@ -813,42 +1303,24 @@ export default function App() {
   }, []);
 
   const handleBackToMenu = useCallback(() => {
-    // 强制清理
+    loadingRequestIdRef.current += 1;
+    clearRestCountdown();
+    void exitFullscreenSafely('leave_game');
+    cleanupCameraAndMotion();
     setScore(0);
     setTotalQuestions(0);
     setShowCompletion(false);
+    setSelectedThemes([]); // Clear selected themes
     setPhase(GamePhase.THEME_SELECTION);
-    // Don't stop the stream, just transition phase
-  }, []);
+  }, [cleanupCameraAndMotion, clearRestCountdown, exitFullscreenSafely]);
 
   const handleExitToMenu = () => {
-    // Stop motion controller and camera stream only when completely exiting to main menu
-    if (motionController) motionController.stop();
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => t.stop());
-      streamRef.current = null;
-    }
+    loadingRequestIdRef.current += 1;
+    clearRestCountdown();
+    void exitFullscreenSafely('leave_game');
+    cleanupCameraAndMotion();
 
-    // Exit fullscreen
-    const doc = document as any;
-    const isFull = !!(doc.fullscreenElement || doc.webkitFullscreenElement || doc.mozFullScreenElement || doc.msFullscreenElement);
-    if (isFull) {
-      if (document.exitFullscreen) {
-        document.exitFullscreen().catch(() => {});
-      } else if (doc.webkitExitFullscreen) {
-        doc.webkitExitFullscreen();
-      } else if (doc.mozCancelFullScreen) {
-        doc.mozCancelFullScreen();
-      } else if (doc.msExitFullscreen) {
-        doc.msExitFullscreen();
-      }
-    }
-    
-    // Unlock orientation
-    if (window.screen.orientation && (window.screen.orientation as any).unlock) {
-      (window.screen.orientation as any).unlock();
-    }
-
+    setSelectedThemes([]); // Clear selected themes
     setPhase(GamePhase.MENU);
   };
 
@@ -862,73 +1334,916 @@ export default function App() {
     });
   };
 
-  const initializeCamera = async (): Promise<boolean> => {
-    // If we already have a stream and it's active, skip
-    if (streamRef.current && streamRef.current.active && videoRef.current) {
-        try {
-            if (!videoRef.current.srcObject) {
-                videoRef.current.srcObject = streamRef.current;
-            }
-            videoRef.current.muted = true;
-            videoRef.current.playsInline = true;
-            await videoRef.current.play();
-            
-            if (!motionController.isStarted) {
-                await motionController.start(videoRef.current);
-            }
-            motionController.calibrate();
-            
-            return true;
-        } catch (e) {
-            console.error('Failed to reuse camera:', e);
-        }
-    }
+  type CameraPermissionState = PermissionState | 'unsupported';
+  type SimulatedFailure =
+    | 'camera_api_missing'
+    | 'camera_insecure'
+    | 'camera_denied'
+    | 'camera_blocked'
+    | 'camera_not_found'
+    | 'camera_busy'
+    | 'camera_timeout'
+    | 'pose_init_timeout'
+    | 'asset_load_fail'
+    | null;
 
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        alert("Camera API required.");
-        return false;
+  const getSimulatedFailure = (): SimulatedFailure => {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get('simulateFailure');
+    if (!raw) return null;
+    const normalized = raw.trim().toLowerCase();
+    const allowed: Exclude<SimulatedFailure, null>[] = [
+      'camera_api_missing',
+      'camera_insecure',
+      'camera_denied',
+      'camera_blocked',
+      'camera_not_found',
+      'camera_busy',
+      'camera_timeout',
+      'pose_init_timeout',
+      'asset_load_fail'
+    ];
+    return allowed.includes(normalized as Exclude<SimulatedFailure, null>)
+      ? (normalized as Exclude<SimulatedFailure, null>)
+      : null;
+  };
+
+  const isSimulatedFailure = (kind: Exclude<SimulatedFailure, null>): boolean => (
+    getSimulatedFailure() === kind
+  );
+
+  const isInIframe = (): boolean => {
+    try {
+      return window.self !== window.top;
+    } catch {
+      return true;
+    }
+  };
+
+  const isLikelyInAppBrowser = (): boolean => {
+    const ua = navigator.userAgent;
+    return /MicroMessenger|QQ\/|Weibo|FBAN|FBAV|Instagram|Line|wv\)|WebView/i.test(ua);
+  };
+
+  const getCameraPermissionState = async (): Promise<CameraPermissionState> => {
+    const navWithPermissions = navigator as Navigator & {
+      permissions?: {
+        query?: (descriptor: { name: string }) => Promise<PermissionStatus>;
+      };
+    };
+    const permissions = navWithPermissions.permissions;
+    if (!permissions || typeof permissions.query !== 'function') {
+      return 'unsupported';
     }
 
     try {
-        const isIPad = /iPad|Macintosh/i.test(navigator.userAgent) && 'ontouchend' in document;
-        const videoConstraints: any = {
-            facingMode: 'user',
-            width: isIPad ? { ideal: 1280, max: 1920 } : { ideal: 640, max: 1280 },
-            height: isIPad ? { ideal: 720, max: 1080 } : { ideal: 480, max: 720 },
+      const status = await permissions.query({ name: 'camera' });
+      return status.state;
+    } catch (error) {
+      console.warn('[Camera] Permission query unsupported or failed:', error);
+      return 'unsupported';
+    }
+  };
+
+  const buildCameraGuidance = (
+    reason: 'insecure' | 'api-missing' | 'denied' | 'blocked' | 'not-found' | 'busy' | 'timeout',
+    inIframeContext: boolean,
+    inAppBrowserContext: boolean
+  ): string => {
+    const tips: string[] = [];
+    if (inAppBrowserContext) {
+      tips.push('建议点击右上角用外部浏览器打开，不要在微信/QQ内置浏览器里玩。');
+    }
+    if (inIframeContext) {
+      tips.push('当前页面可能是“嵌入页”，请单独打开游戏链接再试。');
+    }
+
+    if (reason === 'insecure') {
+      return [
+        '这个页面不是安全链接，摄像头无法使用。',
+        '请确认网址以 https:// 开头，再重新打开。',
+        ...tips
+      ].join('\n');
+    }
+    if (reason === 'api-missing') {
+      return [
+        '当前浏览器不支持摄像头功能。',
+        '请升级当前浏览器到最新版后再试。',
+        ...tips
+      ].join('\n');
+    }
+    if (reason === 'not-found') {
+      return '没有找到可用摄像头，请检查设备摄像头是否可用（前置摄像头未损坏、未被系统禁用）。';
+    }
+    if (reason === 'busy') {
+      return '摄像头正在被其他应用占用，请先关闭相机/视频通话类应用后重试。';
+    }
+
+    if (reason === 'denied') {
+      return [
+        '你之前拒绝了摄像头权限，所以这次不会自动弹窗。',
+        '请到浏览器设置里，把这个网站的“摄像头”改成“允许”，然后刷新页面。',
+        ...tips
+      ].join('\n');
+    }
+
+    if (reason === 'timeout') {
+      return [
+        '等待摄像头授权超时，可能是权限弹窗没出来。',
+        '请去浏览器设置手动允许摄像头，然后回到游戏重试。',
+        ...tips
+      ].join('\n');
+    }
+
+    return [
+      '浏览器没有给摄像头权限。',
+      '请在浏览器设置里允许摄像头后重试。',
+      ...tips
+    ].join('\n');
+  };
+
+  const initializeCamera = async (): Promise<boolean> => {
+    let shouldDiscardLateStream = false;
+
+    const waitForPoseDetection = async (timeoutMs: number, sinceTimestampMs: number): Promise<boolean> => {
+      const startedAt = performance.now();
+      while (performance.now() - startedAt < timeoutMs) {
+        const now = performance.now();
+        if (motionController.hasFreshPoseLandmarks(sinceTimestampMs)) {
+          markPoseObserved(now);
+          return true;
+        }
+        refreshPoseDetectedState(now);
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 120));
+      }
+      return false;
+    };
+
+    const resolvePlatformInfo = (): {
+      platform: 'ios' | 'android' | 'harmony' | 'desktop' | 'unknown';
+      isTablet: boolean;
+      isMobile: boolean;
+    } => {
+      const ua = navigator.userAgent;
+      const isTouchMac = /Macintosh/i.test(ua) && 'ontouchend' in document;
+      const isIOS = /iPhone|iPad|iPod/i.test(ua) || isTouchMac;
+      const isHarmony = /HarmonyOS|OpenHarmony|OHOS|HMOS|ArkWeb/i.test(ua);
+      const isAndroid = /Android/i.test(ua) && !isHarmony;
+      const isTablet = /iPad|Tablet/i.test(ua) || (isTouchMac && !/Mobile/i.test(ua));
+      const isMobile = isIOS || isAndroid || isHarmony || /Mobile/i.test(ua);
+      if (isIOS) return { platform: 'ios', isTablet, isMobile: true };
+      if (isHarmony) return { platform: 'harmony', isTablet, isMobile: true };
+      if (isAndroid) return { platform: 'android', isTablet, isMobile: true };
+      if (!isMobile) return { platform: 'desktop', isTablet: false, isMobile: false };
+      return { platform: 'unknown', isTablet, isMobile };
+    };
+
+    const buildConstraintProfiles = (): MediaTrackConstraints[] => {
+      const platformInfo = resolvePlatformInfo();
+      if (platformInfo.platform === 'ios') {
+        return [
+          {
+            facingMode: { ideal: 'user' },
+            width: { ideal: 960, max: 1280 },
+            height: { ideal: 540, max: 720 },
+            frameRate: { ideal: 24, max: 30 }
+          },
+          {
+            facingMode: { ideal: 'user' },
+            width: { ideal: 640, max: 960 },
+            height: { ideal: 480, max: 720 },
+            frameRate: { ideal: 24, max: 30 }
+          },
+          {
+            facingMode: { ideal: 'user' },
+            width: { ideal: 640, max: 1280 },
+            height: { ideal: 480, max: 720 }
+          }
+        ];
+      }
+
+      if (platformInfo.platform === 'android' || platformInfo.platform === 'harmony') {
+        return [
+          {
+            facingMode: { ideal: 'user' },
+            width: { ideal: 640, max: 1280 },
+            height: { ideal: 480, max: 720 },
+            frameRate: { ideal: 24, max: 30 }
+          },
+          {
+            facingMode: { ideal: 'user' },
+            width: { ideal: 960, max: 1280 },
+            height: { ideal: 540, max: 720 },
+            frameRate: { ideal: 20, max: 30 }
+          },
+          {
+            facingMode: { ideal: 'user' }
+          }
+        ];
+      }
+
+      if (platformInfo.platform === 'desktop') {
+        return [
+          {
+            facingMode: { ideal: 'user' },
+            width: { ideal: 1280, max: 1920 },
+            height: { ideal: 720, max: 1080 },
             frameRate: { ideal: 30, max: 30 }
+          },
+          {
+            facingMode: { ideal: 'user' },
+            width: { ideal: 960, max: 1280 },
+            height: { ideal: 540, max: 720 },
+            frameRate: { ideal: 24, max: 30 }
+          }
+        ];
+      }
+
+      return [
+        {
+          facingMode: { ideal: 'user' },
+          width: { ideal: 640, max: 1280 },
+          height: { ideal: 480, max: 720 },
+          frameRate: { ideal: 24, max: 30 }
+        },
+        {
+          facingMode: { ideal: 'user' }
+        }
+      ];
+    };
+
+    const getVideoTrackDiagnostics = (stream: MediaStream): Array<Record<string, unknown>> => {
+      return stream.getVideoTracks().map((track) => {
+        let settings: MediaTrackSettings = {};
+        try {
+          settings = track.getSettings();
+        } catch {
+          settings = {};
+        }
+        return {
+          kind: track.kind,
+          enabled: track.enabled,
+          muted: track.muted,
+          readyState: track.readyState,
+          label: track.label,
+          settings
         };
-        if (isIPad) videoConstraints.frameRate = { ideal: 30, max: 60 };
+      });
+    };
 
-        const stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints });
-        streamRef.current = stream;
+    const logVideoRenderDiagnostics = (stage: string, videoElement: HTMLVideoElement, stream: MediaStream): void => {
+      const computedStyle = window.getComputedStyle(videoElement);
+      const parentElement = videoElement.parentElement;
+      const parentStyle = parentElement ? window.getComputedStyle(parentElement) : null;
+      console.warn('[Camera] Preview diagnostics', {
+        stage,
+        paused: videoElement.paused,
+        ended: videoElement.ended,
+        muted: videoElement.muted,
+        readyState: videoElement.readyState,
+        networkState: videoElement.networkState,
+        currentTime: videoElement.currentTime,
+        videoWidth: videoElement.videoWidth,
+        videoHeight: videoElement.videoHeight,
+        clientWidth: videoElement.clientWidth,
+        clientHeight: videoElement.clientHeight,
+        isConnected: videoElement.isConnected,
+        visibilityState: document.visibilityState,
+        css: {
+          display: computedStyle.display,
+          visibility: computedStyle.visibility,
+          opacity: computedStyle.opacity
+        },
+        parentCss: parentStyle
+          ? {
+            display: parentStyle.display,
+            visibility: parentStyle.visibility,
+            opacity: parentStyle.opacity,
+            overflow: parentStyle.overflow
+          }
+          : null,
+        tracks: getVideoTrackDiagnostics(stream)
+      });
+    };
 
-        if (videoRef.current) {
-             videoRef.current.srcObject = stream;
-             videoRef.current.muted = true;
-             videoRef.current.playsInline = true;
-             
-             await new Promise<void>((resolve) => {
-                 if (videoRef.current!.readyState >= 1) {
-                     resolve();
-                 } else {
-                     videoRef.current!.onloadedmetadata = () => resolve();
-                 }
-             });
+    const waitForFrameProgress = async (
+      videoElement: HTMLVideoElement,
+      stream: MediaStream,
+      maxWaitMs: number
+    ): Promise<boolean> => {
+      type VideoElementWithFrameStats = HTMLVideoElement & {
+        webkitDecodedFrameCount?: number;
+      };
+      type VideoFrameMetadataLike = {
+        mediaTime?: number;
+        presentedFrames?: number;
+      };
 
-             await videoRef.current.play();
-             await motionController.start(videoRef.current);
-             
-             // 启动 pose overlay loop
-             startPoseOverlayLoop();
-             
-             return true;
+      const videoWithStats = videoElement as VideoElementWithFrameStats;
+      const baselineCurrentTime = Number.isFinite(videoElement.currentTime) ? videoElement.currentTime : 0;
+      const baselineDecodedFrameCount =
+        typeof videoWithStats.webkitDecodedFrameCount === 'number' ? videoWithStats.webkitDecodedFrameCount : 0;
+
+      let callbackDisposed = false;
+      let callbackHandle: number | null = null;
+      let hasFrameCallbackMediaTimeProgress = false;
+      let hasFrameCallbackPresentedFramesProgress = false;
+
+      const scheduleFrameCallback = (): void => {
+        if (typeof videoElement.requestVideoFrameCallback !== 'function') {
+          return;
+        }
+        callbackHandle = videoElement.requestVideoFrameCallback((_, metadata: VideoFrameMetadataLike) => {
+          if (callbackDisposed) return;
+          if (typeof metadata.mediaTime === 'number' && metadata.mediaTime > baselineCurrentTime + 0.015) {
+            hasFrameCallbackMediaTimeProgress = true;
+          }
+          if (typeof metadata.presentedFrames === 'number' && metadata.presentedFrames > 0) {
+            hasFrameCallbackPresentedFramesProgress = true;
+          }
+          scheduleFrameCallback();
+        });
+      };
+
+      scheduleFrameCallback();
+
+      try {
+        const startedAt = performance.now();
+        while (performance.now() - startedAt < maxWaitMs) {
+          const videoTracks = stream.getVideoTracks();
+          const hasLiveTrack = videoTracks.some((track) => track.readyState === 'live' && track.enabled);
+          const hasUnmutedLiveTrack = videoTracks.some((track) => track.readyState === 'live' && track.enabled && !track.muted);
+          const hasUsableVideoSize = videoElement.videoWidth > 0 && videoElement.videoHeight > 0;
+          const isVideoElementActive = !videoElement.paused && !videoElement.ended;
+          const currentTime = Number.isFinite(videoElement.currentTime) ? videoElement.currentTime : baselineCurrentTime;
+          const hasTimeProgressed = currentTime > baselineCurrentTime + 0.02;
+          const decodedFrameCount =
+            typeof videoWithStats.webkitDecodedFrameCount === 'number'
+              ? videoWithStats.webkitDecodedFrameCount
+              : baselineDecodedFrameCount;
+          const hasDecodedFrameCountProgress = decodedFrameCount > baselineDecodedFrameCount;
+          const hasFrameProgress =
+            hasTimeProgressed ||
+            hasDecodedFrameCountProgress ||
+            hasFrameCallbackMediaTimeProgress ||
+            hasFrameCallbackPresentedFramesProgress;
+
+          if (
+            hasLiveTrack &&
+            hasUsableVideoSize &&
+            isVideoElementActive &&
+            hasFrameProgress &&
+            (hasUnmutedLiveTrack || hasDecodedFrameCountProgress || hasFrameCallbackPresentedFramesProgress)
+          ) {
+            return true;
+          }
+
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 120));
         }
         return false;
-    } catch (err) {
-        console.error("Camera init failed:", err);
-        alert("Camera initialization failed: " + err);
-        return false;
+      } finally {
+        callbackDisposed = true;
+        if (callbackHandle !== null && typeof videoElement.cancelVideoFrameCallback === 'function') {
+          videoElement.cancelVideoFrameCallback(callbackHandle);
+        }
+      }
+    };
+
+    const ensureFrameProgressOrThrow = async (
+      stage: string,
+      videoElement: HTMLVideoElement,
+      stream: MediaStream,
+      timeoutMs: number
+    ): Promise<void> => {
+      const hasFrameProgress = await waitForFrameProgress(videoElement, stream, timeoutMs);
+      if (hasFrameProgress) return;
+      logVideoRenderDiagnostics(stage, videoElement, stream);
+      throw new Error('VIDEO_STREAM_NOT_RENDERING');
+    };
+
+    const playVideoWithTimeout = async (
+      videoElement: HTMLVideoElement,
+      stream: MediaStream,
+      timeoutMs: number
+    ): Promise<void> => {
+
+      const playPromise = videoElement.play();
+      const playOutcome = await Promise.race<'played' | 'timeout'>([
+        playPromise.then(() => 'played'),
+        new Promise<'timeout'>((resolve) => {
+          window.setTimeout(() => resolve('timeout'), timeoutMs);
+        })
+      ]).catch((playError: unknown) => {
+        const playName = playError instanceof DOMException ? playError.name : 'UnknownError';
+        const playMessage = playError instanceof Error ? playError.message : String(playError);
+        throw new Error(`VIDEO_PLAY_FAILED:${playName}:${playMessage}`);
+      });
+
+      if (playOutcome === 'timeout') {
+        const hasUsableVideoSize = videoElement.videoWidth > 0 && videoElement.videoHeight > 0;
+        const hasLiveVideoTrack = stream.getVideoTracks().some((track) => track.readyState === 'live');
+        if (!hasUsableVideoSize || !hasLiveVideoTrack) {
+          logVideoRenderDiagnostics('play-timeout-no-size-or-track', videoElement, stream);
+          throw new Error('VIDEO_STREAM_NOT_RENDERING');
+        }
+        console.warn('[Camera] video.play() timed out, probing for renderable frames...', {
+          readyState: videoElement.readyState,
+          videoWidth: videoElement.videoWidth,
+          videoHeight: videoElement.videoHeight,
+          hasLiveVideoTrack,
+          paused: videoElement.paused
+        });
+        await ensureFrameProgressOrThrow('play-timeout-recovery', videoElement, stream, 5000);
+        console.warn('[Camera] Recovered from play timeout after frame probe.', {
+          readyState: videoElement.readyState,
+          currentTime: videoElement.currentTime
+        });
+        return;
+      }
+
+      await ensureFrameProgressOrThrow('post-play', videoElement, stream, 3000);
+    };
+
+    const startMotionWithTimeout = async (
+      videoElement: HTMLVideoElement,
+      timeoutMs: number
+    ): Promise<void> => {
+      const abortController = new AbortController();
+      const timeoutId = window.setTimeout(() => {
+        abortController.abort();
+      }, timeoutMs);
+      try {
+        await motionController.start(videoElement, { signal: abortController.signal });
+      } catch (error) {
+        if (abortController.signal.aborted) {
+          throw new Error('POSE_START_TIMEOUT');
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    };
+
+    const startMotionWithRetry = async (
+      videoElement: HTMLVideoElement,
+      retryCount: number
+    ): Promise<void> => {
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+        try {
+          motionController.resetPoseObservation();
+          await startMotionWithTimeout(videoElement, 20000);
+          return;
+        } catch (error) {
+          lastError = error;
+          motionController.stop();
+          if (attempt >= retryCount) break;
+          console.warn('[Camera] Motion start failed, retrying...', {
+            attempt: attempt + 1,
+            retryCount,
+            error
+          });
+          await waitMs(350);
+        }
+      }
+      if (lastError instanceof Error) {
+        throw lastError;
+      }
+      throw new Error('POSE_START_TIMEOUT');
+    };
+
+    const requestCameraStream = async (profiles: MediaTrackConstraints[]): Promise<MediaStream> => {
+      const terminalErrors = new Set([
+        'NotAllowedError',
+        'NotReadableError',
+        'TrackStartError',
+        'SecurityError',
+        'AbortError',
+        'InvalidStateError'
+      ]);
+      let lastError: unknown = null;
+
+      for (let attempt = 0; attempt < profiles.length; attempt += 1) {
+        const constraints = profiles[attempt];
+        try {
+          return await navigator.mediaDevices.getUserMedia({ video: constraints });
+        } catch (error) {
+          lastError = error;
+          const errorName = error instanceof DOMException ? error.name : '';
+          console.warn('[Camera] getUserMedia attempt failed', {
+            attempt: attempt + 1,
+            totalAttempts: profiles.length,
+            errorName,
+            constraints
+          });
+          if (terminalErrors.has(errorName)) {
+            throw error;
+          }
+        }
+      }
+
+      try {
+        return await navigator.mediaDevices.getUserMedia({ video: true });
+      } catch (fallbackError) {
+        throw fallbackError ?? lastError;
+      }
+    };
+
+    const attachStreamToVideoElement = async (videoElement: HTMLVideoElement, stream: MediaStream): Promise<void> => {
+      videoElement.srcObject = stream;
+      videoElement.muted = true;
+      videoElement.autoplay = true;
+      videoElement.playsInline = true;
+      videoElement.setAttribute('muted', 'true');
+      videoElement.setAttribute('autoplay', 'true');
+      videoElement.setAttribute('playsinline', 'true');
+      videoElement.setAttribute('webkit-playsinline', 'true');
+      const readinessResult = await new Promise<'ready' | 'timeout' | 'error'>((resolve) => {
+        if (videoElement.readyState >= 1 || (videoElement.videoWidth > 0 && videoElement.videoHeight > 0)) {
+          resolve('ready');
+          return;
+        }
+
+        let resolved = false;
+        const timeoutId = setTimeout(() => {
+          if (resolved) return;
+          resolved = true;
+          cleanup();
+          resolve('timeout');
+        }, 8000);
+
+        const cleanup = () => {
+          clearTimeout(timeoutId);
+          videoElement.removeEventListener('loadedmetadata', onReady);
+          videoElement.removeEventListener('loadeddata', onReady);
+          videoElement.removeEventListener('canplay', onReady);
+          videoElement.removeEventListener('playing', onReady);
+          videoElement.removeEventListener('resize', onReady);
+          videoElement.removeEventListener('error', onError);
+        };
+
+        const onReady = () => {
+          if (resolved) return;
+          resolved = true;
+          cleanup();
+          resolve('ready');
+        };
+
+        const onError = () => {
+          if (resolved) return;
+          resolved = true;
+          cleanup();
+          resolve('error');
+        };
+
+        videoElement.addEventListener('loadedmetadata', onReady, { once: true });
+        videoElement.addEventListener('loadeddata', onReady, { once: true });
+        videoElement.addEventListener('canplay', onReady, { once: true });
+        videoElement.addEventListener('playing', onReady, { once: true });
+        videoElement.addEventListener('resize', onReady, { once: true });
+        videoElement.addEventListener('error', onError, { once: true });
+      });
+
+      if (readinessResult !== 'ready') {
+        console.warn('[Camera] Video readiness check did not reach ready state before play()', {
+          readinessResult,
+          readyState: videoElement.readyState,
+          videoWidth: videoElement.videoWidth,
+          videoHeight: videoElement.videoHeight
+        });
+        logVideoRenderDiagnostics(`metadata-${readinessResult}`, videoElement, stream);
+      }
+
+      await playVideoWithTimeout(videoElement, stream, 5000);
+    };
+
+    const attachStreamWithRenderRetry = async (
+      videoElement: HTMLVideoElement,
+      initialStream: MediaStream,
+      profiles: MediaTrackConstraints[],
+      maxRetries: number
+    ): Promise<MediaStream> => {
+      let activeStream = initialStream;
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        try {
+          await attachStreamToVideoElement(videoElement, activeStream);
+          return activeStream;
+        } catch (error) {
+          const isRenderError = error instanceof Error && error.message === 'VIDEO_STREAM_NOT_RENDERING';
+          if (!isRenderError || attempt >= maxRetries) {
+            throw error;
+          }
+          console.warn('[Camera] Stream not renderable, retrying with fresh stream...', {
+            attempt: attempt + 1,
+            maxRetries
+          });
+          activeStream.getTracks().forEach((track) => track.stop());
+          videoElement.pause();
+          videoElement.srcObject = null;
+          await waitMs(250);
+          activeStream = await requestCameraStream(profiles);
+          streamRef.current = activeStream;
+        }
+      }
+      return activeStream;
+    };
+
+    const warmupPoseAfterEngineStart = async (label: string): Promise<void> => {
+      setLoadingStatus('识别引擎已启动，正在等待人体进入镜头...');
+      const detectionSinceTs = performance.now();
+      const poseDetected = await waitForPoseDetection(7000, detectionSinceTs);
+      if (!poseDetected) {
+        setPoseDetectedState(false);
+        const videoElement = videoRef.current;
+        const stream = streamRef.current;
+        if (!videoElement || !stream) {
+          throw new Error('VIDEO_STREAM_NOT_RENDERING');
+        }
+        await ensureFrameProgressOrThrow(`${label}:post-motion-no-pose`, videoElement, stream, 2200);
+        console.warn(`[Camera] ${label}: pose warmup timeout, camera preview is active, continue observing.`);
+      }
+    };
+
+    const simulatedFailure = getSimulatedFailure();
+    const simulatedPrefix = '[模拟] ';
+    const inIframeContext = isInIframe();
+    const inAppBrowserContext = isLikelyInAppBrowser();
+    if (simulatedFailure === 'camera_api_missing') {
+      const message = simulatedPrefix + buildCameraGuidance('api-missing', inIframeContext, inAppBrowserContext);
+      setLoadingStatus('当前浏览器不支持摄像头。');
+      setCameraIssueMessage(message);
+      return false;
     }
+    if (simulatedFailure === 'camera_insecure') {
+      const message = simulatedPrefix + buildCameraGuidance('insecure', inIframeContext, inAppBrowserContext);
+      setLoadingStatus('当前页面不是安全链接。');
+      setCameraIssueMessage(message);
+      return false;
+    }
+    if (simulatedFailure === 'camera_denied') {
+      const message = simulatedPrefix + buildCameraGuidance('denied', inIframeContext, inAppBrowserContext);
+      setLoadingStatus('摄像头权限未开启。');
+      setCameraIssueMessage(message);
+      return false;
+    }
+    if (simulatedFailure === 'camera_blocked') {
+      const message = simulatedPrefix + buildCameraGuidance('blocked', inIframeContext, inAppBrowserContext);
+      setLoadingStatus('摄像头被浏览器拦截。');
+      setCameraIssueMessage(message);
+      return false;
+    }
+    if (simulatedFailure === 'camera_not_found') {
+      const message = simulatedPrefix + buildCameraGuidance('not-found', inIframeContext, inAppBrowserContext);
+      setLoadingStatus('未检测到摄像头。');
+      setCameraIssueMessage(message);
+      return false;
+    }
+    if (simulatedFailure === 'camera_busy') {
+      const message = simulatedPrefix + buildCameraGuidance('busy', inIframeContext, inAppBrowserContext);
+      setLoadingStatus('摄像头被其他应用占用。');
+      setCameraIssueMessage(message);
+      return false;
+    }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      const message = buildCameraGuidance('api-missing', inIframeContext, inAppBrowserContext);
+      setLoadingStatus('当前浏览器不支持摄像头。');
+      setCameraIssueMessage(message);
+      return false;
+    }
+
+    const videoProfiles = buildConstraintProfiles();
+    const renderRetryCount = resolvePlatformInfo().platform === 'ios' ? 2 : 1;
+
+    if (streamRef.current && streamRef.current.active && videoRef.current) {
+      try {
+        setLoadingStatus('正在恢复摄像头连接...');
+        const recoveredStream = await attachStreamWithRenderRetry(
+          videoRef.current,
+          streamRef.current,
+          videoProfiles,
+          renderRetryCount
+        );
+        streamRef.current = recoveredStream;
+        if (!motionController.isStarted) {
+          await startMotionWithRetry(videoRef.current, 1);
+        }
+        await warmupPoseAfterEngineStart('reuse-stream');
+        startPoseOverlayLoop();
+        setCameraIssueMessage('');
+        return true;
+      } catch (reuseError) {
+        console.error('Failed to reuse camera:', reuseError);
+        motionController.stop();
+        motionController.resetPoseObservation();
+        if (videoRef.current) {
+          videoRef.current.srcObject = null;
+        }
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+        }
+      }
+    }
+
+    try {
+      if (!window.isSecureContext) {
+        const message = buildCameraGuidance('insecure', inIframeContext, inAppBrowserContext);
+        setLoadingStatus('当前页面不是安全链接。');
+        setCameraIssueMessage(message);
+        return false;
+      }
+
+      const permissionState = await getCameraPermissionState();
+      if (permissionState === 'denied') {
+        const deniedGuidance = buildCameraGuidance('denied', inIframeContext, inAppBrowserContext);
+        setLoadingStatus('摄像头权限未开启。');
+        setCameraIssueMessage(deniedGuidance);
+        return false;
+      }
+
+      setLoadingStatus('正在请求摄像头权限...');
+
+      const cameraRequest = requestCameraStream(videoProfiles).then((candidateStream) => {
+        if (shouldDiscardLateStream) {
+          candidateStream.getTracks().forEach((track) => track.stop());
+          throw new Error('CAMERA_LATE_STREAM_DISCARDED');
+        }
+        return candidateStream;
+      });
+      void cameraRequest.catch((lateError) => {
+        if (lateError instanceof Error && lateError.message === 'CAMERA_LATE_STREAM_DISCARDED') {
+          console.info('[Camera] Late stream discarded after timeout');
+          return;
+        }
+        console.warn('[Camera] Deferred camera request failed:', lateError);
+      });
+
+      let permissionTimeoutId: ReturnType<typeof setTimeout> | null = null;
+      const timeoutPromise = new Promise<MediaStream>((_, reject) => {
+        permissionTimeoutId = setTimeout(() => {
+          reject(new Error('CAMERA_PERMISSION_TIMEOUT'));
+        }, isSimulatedFailure('camera_timeout') ? 300 : 12000);
+      });
+
+      let stream: MediaStream;
+      try {
+        stream = await Promise.race<MediaStream>([cameraRequest, timeoutPromise]);
+      } finally {
+        if (permissionTimeoutId !== null) {
+          clearTimeout(permissionTimeoutId);
+        }
+      }
+
+      streamRef.current = stream;
+      if (!videoRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+        setLoadingStatus('摄像头预览初始化失败。');
+        setCameraIssueMessage('摄像头已打开，但画面初始化失败。\n请点击“重试”。');
+        return false;
+      }
+
+      setLoadingStatus('摄像头权限已允许，正在启动画面...');
+      stream = await attachStreamWithRenderRetry(videoRef.current, stream, videoProfiles, renderRetryCount);
+      streamRef.current = stream;
+
+      setLoadingStatus('摄像头已连接，正在启动识别引擎...');
+      if (isSimulatedFailure('pose_init_timeout')) {
+        throw new Error('Pose initialize timeout (simulated)');
+      }
+      await startMotionWithRetry(videoRef.current, 1);
+      await warmupPoseAfterEngineStart('cold-start');
+
+      startPoseOverlayLoop();
+      setCameraIssueMessage('');
+      return true;
+    } catch (err) {
+      const normalizedError = err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : { kind: typeof err, value: String(err) };
+      console.error('Camera init failed:', normalizedError);
+      const errorMessage = String(err);
+      const errorName = err instanceof DOMException ? err.name : '';
+
+      if (errorName === 'NotAllowedError') {
+        console.error('[Camera] NotAllowedError context:', {
+          isSecureContext: window.isSecureContext,
+          isInIframe: inIframeContext,
+          isInAppBrowser: inAppBrowserContext,
+          visibilityState: document.visibilityState,
+          userAgent: navigator.userAgent
+        });
+
+        const guidance = buildCameraGuidance('blocked', inIframeContext, inAppBrowserContext);
+        setLoadingStatus('摄像头被浏览器拦截。');
+        setCameraIssueMessage(guidance);
+        return false;
+      }
+
+      if (errorName === 'NotFoundError') {
+        const guidance = buildCameraGuidance('not-found', inIframeContext, inAppBrowserContext);
+        setLoadingStatus('未检测到摄像头。');
+        setCameraIssueMessage(guidance);
+        return false;
+      }
+
+      if (errorName === 'NotReadableError' || errorName === 'TrackStartError') {
+        const guidance = buildCameraGuidance('busy', inIframeContext, inAppBrowserContext);
+        setLoadingStatus('摄像头被其他应用占用。');
+        setCameraIssueMessage(guidance);
+        return false;
+      }
+
+      if (errorName === 'SecurityError') {
+        const guidance = buildCameraGuidance('insecure', inIframeContext, inAppBrowserContext);
+        setLoadingStatus('当前页面不允许访问摄像头。');
+        setCameraIssueMessage(guidance);
+        return false;
+      }
+
+      if (errorName === 'AbortError' || errorName === 'InvalidStateError') {
+        const guidance = buildCameraGuidance('busy', inIframeContext, inAppBrowserContext);
+        setLoadingStatus('摄像头启动被中断。');
+        setCameraIssueMessage(`${guidance}\n请保持页面在前台后重试。`);
+        return false;
+      }
+
+      if (errorName === 'OverconstrainedError') {
+        setLoadingStatus('摄像头参数不兼容。');
+        setCameraIssueMessage('当前设备摄像头参数与浏览器不兼容。\n请点击“重试”，系统会继续尝试兼容模式。');
+        return false;
+      }
+
+      if (err instanceof Error && err.message === 'CAMERA_PERMISSION_TIMEOUT') {
+        shouldDiscardLateStream = true;
+        const guidance = buildCameraGuidance('timeout', inIframeContext, inAppBrowserContext);
+        setLoadingStatus('等待摄像头授权超时。');
+        setCameraIssueMessage(guidance);
+        return false;
+      }
+
+      if (err instanceof Error && err.message.startsWith('VIDEO_PLAY_FAILED:')) {
+        setLoadingStatus('摄像头画面播放失败。');
+        setCameraIssueMessage('摄像头已打开，但画面启动失败。\n请点击“重试”，并确认系统摄像头权限仍为允许。');
+        return false;
+      }
+
+      if (err instanceof Error && err.message === 'VIDEO_PLAY_TIMEOUT') {
+        setLoadingStatus('摄像头画面启动超时。');
+        setCameraIssueMessage('摄像头已打开，但画面启动超时。\n请点击“重试”并保持页面在前台。');
+        return false;
+      }
+
+      if (err instanceof Error && err.message === 'VIDEO_STREAM_NOT_RENDERING') {
+        setLoadingStatus('摄像头画面不可用。');
+        setCameraIssueMessage('摄像头权限已允许，但画面未正常渲染。\n请点击“重试”，并确认没有其他应用占用摄像头。');
+        return false;
+      }
+
+      if (err instanceof Error && err.message === 'POSE_START_TIMEOUT') {
+        setLoadingStatus('识别引擎启动超时。');
+        setCameraIssueMessage('识别引擎启动超时。\n请检查网络并点击“重试”。');
+        return false;
+      }
+
+      if (err instanceof Error && err.message === 'POSE_NOT_DETECTED') {
+        setLoadingStatus('没有识别到人体。');
+        setCameraIssueMessage('请站到镜头前并保持上半身完整入镜，然后点击“重试”。');
+        setPoseDetectedState(false);
+        return false;
+      }
+
+      if (err instanceof Error && (err.message === 'VIDEO_METADATA_TIMEOUT' || err.message === 'VIDEO_METADATA_ERROR')) {
+        setLoadingStatus('摄像头画面初始化失败。');
+        setCameraIssueMessage('摄像头已打开，但画面初始化超时或失败。\n请点击“重试”，并确认摄像头权限与网络正常。');
+        return false;
+      }
+
+      if (err instanceof Error && err.message === 'CAMERA_LATE_STREAM_DISCARDED') {
+        return false;
+      }
+
+      if (/pose|mediapipe|wasm|cdn|initialize timeout|pose_start_timeout|pose_start_aborted|pose_init_aborted/i.test(errorMessage)) {
+        setLoadingStatus('识别引擎加载失败。');
+        setCameraIssueMessage('识别引擎加载失败。\n请检查网络后点击“重试”。');
+        return false;
+      }
+
+      setLoadingStatus('摄像头初始化失败。');
+      setCameraIssueMessage('摄像头初始化失败，请点击“重试”。');
+      return false;
+    }
+  };
+
+  const simplifyLoadingStatus = (status: string): string => {
+    if (!status) return '正在加载中...';
+    if (/camera|permission|摄像头|授权/i.test(status)) return '正在准备摄像头...';
+    if (/ai|pose|mediapipe|识别|引擎/i.test(status)) return '正在启动识别引擎...';
+    if (/theme|题目|图片|缓存/i.test(status)) return '正在准备题目图片...';
+    if (/asset|资源|loading/i.test(status)) return '正在加载游戏资源...';
+    if (/ready|完成|就绪/i.test(status)) return '马上就好...';
+    return '正在加载中...';
   };
 
   const startPoseOverlayLoop = () => {
@@ -947,6 +2262,8 @@ export default function App() {
         const drawPoseOverlay = () => {
             const canvas = poseCanvasRef.current;
             const video = videoRef.current;
+            const now = performance.now();
+            refreshPoseDetectedState(now);
             if (!canvas || !video) {
                 poseLoopRef.current = requestAnimationFrame(drawPoseOverlay);
                 return;
@@ -1009,54 +2326,176 @@ export default function App() {
         poseLoopRef.current = requestAnimationFrame(drawPoseOverlay);
   };
 
+  useEffect(() => {
+    initializeCameraRef.current = initializeCamera;
+  });
+
+  useEffect(() => {
+    startPoseOverlayLoopRef.current = startPoseOverlayLoop;
+  });
+
+  useEffect(() => {
+    let disposed = false;
+    let resumeTimer: number | null = null;
+
+    const clearResumeTimer = (): void => {
+      if (resumeTimer !== null) {
+        window.clearTimeout(resumeTimer);
+        resumeTimer = null;
+      }
+    };
+
+    const recoverAfterForeground = async (reason: string): Promise<void> => {
+      if (disposed) return;
+      if (document.visibilityState !== 'visible') return;
+      if (phaseRef.current === GamePhase.MENU || phaseRef.current === GamePhase.THEME_SELECTION) return;
+      if (isForegroundRecoveryInFlightRef.current) return;
+      const now = Date.now();
+      if (now - lastForegroundRecoveryAtRef.current < 800) return;
+      lastForegroundRecoveryAtRef.current = now;
+      isForegroundRecoveryInFlightRef.current = true;
+
+      try {
+        const videoElement = videoRef.current;
+        const stream = streamRef.current;
+        if (!videoElement) {
+          return;
+        }
+        if (!stream) {
+          console.warn('[Lifecycle] Foreground resume found no active stream, reinitializing camera.', { reason });
+          await initializeCameraRef.current();
+          return;
+        }
+
+        const videoTracks = stream.getVideoTracks();
+        const hasLiveTrack = videoTracks.some((track) => track.readyState === 'live' && track.enabled);
+        const hasUnmutedLiveTrack = videoTracks.some(
+          (track) => track.readyState === 'live' && track.enabled && !track.muted
+        );
+
+        if (!hasLiveTrack || !hasUnmutedLiveTrack) {
+          console.warn('[Lifecycle] Foreground resume detected stale camera track, reinitializing.', {
+            reason,
+            tracks: videoTracks.map((track) => ({
+              readyState: track.readyState,
+              enabled: track.enabled,
+              muted: track.muted
+            }))
+          });
+          await initializeCameraRef.current();
+          return;
+        }
+
+        if (videoElement.srcObject !== stream) {
+          videoElement.srcObject = stream;
+        }
+
+        if (videoElement.paused || videoElement.ended) {
+          try {
+            await videoElement.play();
+          } catch (playError) {
+            console.warn('[Lifecycle] Failed to resume video playback after foreground return:', playError);
+          }
+        }
+
+        if (!motionController.isStarted) {
+          await motionController.start(videoElement);
+        }
+
+        if (poseLoopRef.current === null) {
+          startPoseOverlayLoopRef.current();
+        }
+
+        await waitMs(650);
+        const hasFreshPose = motionController.hasFreshPoseLandmarks(performance.now() - 1200);
+        if (!hasFreshPose) {
+          console.warn('[Lifecycle] No pose observed after foreground resume, reinitializing camera.');
+          await initializeCameraRef.current();
+          return;
+        }
+
+        setCameraIssueMessage('');
+      } catch (error) {
+        console.error('[Lifecycle] Foreground recovery failed:', error);
+        setPoseDetectedState(false);
+      } finally {
+        isForegroundRecoveryInFlightRef.current = false;
+      }
+    };
+
+    const scheduleRecover = (reason: string, delayMs: number): void => {
+      clearResumeTimer();
+      resumeTimer = window.setTimeout(() => {
+        void recoverAfterForeground(reason);
+      }, delayMs);
+    };
+
+    const handleVisibilityChange = (): void => {
+      if (document.visibilityState === 'visible') {
+        scheduleRecover('visibilitychange', 120);
+      }
+    };
+
+    const handlePageShow = (): void => {
+      scheduleRecover('pageshow', 120);
+    };
+
+    const handleFocus = (): void => {
+      scheduleRecover('focus', 180);
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pageshow', handlePageShow);
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      disposed = true;
+      clearResumeTimer();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pageshow', handlePageShow);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [setPoseDetectedState]);
+
   const handleStartGame = async () => {
     if (selectedThemes.length === 0) return;
+    clearRestCountdown();
+    const loadingRequestId = loadingRequestIdRef.current + 1;
+    loadingRequestIdRef.current = loadingRequestId;
+    const isCurrentLoadingRequest = (): boolean => (
+      loadingRequestIdRef.current === loadingRequestId && phaseRef.current === GamePhase.LOADING
+    );
 
+    setCameraIssueMessage('');
     setBgIndex(0);
     setThemeImagesLoaded(false); // Reset when selecting a new theme
+    hasCalibratedPoseRef.current = false;
+    lastPoseSeenAtRef.current = 0;
+    setPoseDetectedState(false);
     
     // 0. Enter Loading Phase
     setPhase(GamePhase.LOADING);
     setLoadingProgress(0);
-    setLoadingStatus('Initializing Camera & Assets...');
+    setLoadingStatus('正在准备摄像头...');
 
-    // Enter fullscreen immediately
-    await enterFullscreenAndLockOrientation();
-
-    // 1. Parallel Loading: Assets + Camera
+    // 1. Request camera first to avoid permission prompt conflicts on mobile browsers
     try {
-        // We wrap camera init in a promise that reports progress/status if we wanted
-        // For now, we just run it parallel.
-        
-        // However, we need to request camera permission ASAP to avoid user gesture timeout issues if strict?
-        // Actually, we are inside the click handler (handleStartGame), so getUserMedia should be fine.
-        // But the 'await' for setPhase might break the stack? 
-        // React state updates are async but usually microtasks.
-        // Let's try to start getUserMedia FIRST if we don't have it.
-        
-        let cameraPromise: Promise<boolean>;
-        
-        // Define a wrapper to update status
-        const initCameraWithStatus = async () => {
-             // Delay slightly to allow UI to render "Initializing Camera..."
-             await new Promise(r => setTimeout(r, 100)); 
-             const success = await initializeCamera();
-             if (!success) throw new Error("Camera failed");
-             return success;
-        };
+        const cameraSuccess = await initializeCamera();
+        if (!isCurrentLoadingRequest()) return;
+        if (!cameraSuccess) {
+          throw new Error("Camera failed");
+        }
 
-        cameraPromise = initCameraWithStatus();
+        if (isSimulatedFailure('asset_load_fail')) {
+          throw new Error('SIMULATED_ASSET_LOAD_FAIL');
+        }
 
-        // Assets Promise
-        const assetsPromise = preloadAllGameAssets(selectedThemes, (progress, status) => {
-            // We can mix the progress if we want, or just let asset loader drive the bar
-            // and camera status drive the text.
-            // For simplicity, let asset loader drive the bar 0-100.
+        await preloadAllGameAssets(selectedThemes, (progress, status) => {
+            if (!isCurrentLoadingRequest()) return;
             setLoadingProgress(progress);
-            setLoadingStatus(status); 
+            setLoadingStatus(simplifyLoadingStatus(status)); 
         });
-
-        await Promise.all([cameraPromise, assetsPromise]);
+        if (!isCurrentLoadingRequest()) return;
 
         // Start background preloading for the REST of the themes
         const firstThemeId = selectedThemes[0];
@@ -1067,11 +2506,27 @@ export default function App() {
 
         setThemeImagesLoaded(true);
         setPhase(GamePhase.TUTORIAL);
-        setInitStatus('System Ready!');
+        setInitStatus('系统就绪');
         
     } catch (e) {
-        console.error("Loading failed:", e);
-        setLoadingStatus('Theme loading failed. Please check your network and retry.');
+        if (!isCurrentLoadingRequest()) return;
+        const normalizedError = e instanceof Error
+          ? { name: e.name, message: e.message, stack: e.stack }
+          : { kind: typeof e, value: String(e) };
+        console.error("Loading failed:", normalizedError);
+        const isCameraFailure = e instanceof Error && e.message === 'Camera failed';
+        if (isCameraFailure) {
+          setLoadingStatus('摄像头启动失败，请按提示处理后重试。');
+          setLoadingProgress(0);
+          return;
+        }
+        const isSimulatedAssetFailure = e instanceof Error && e.message === 'SIMULATED_ASSET_LOAD_FAIL';
+        setLoadingStatus('资源加载失败，请检查网络后重试。');
+        setCameraIssueMessage(
+          isSimulatedAssetFailure
+            ? '[模拟] 资源加载失败。请检查错误提示与重试按钮是否正常。'
+            : '资源加载失败了。\n请检查网络后点击“重试”。'
+        );
         setLoadingProgress(0);
         setPhase(GamePhase.LOADING);
     }
@@ -1088,6 +2543,61 @@ export default function App() {
       scorePanel.classList.add('animate-bounce-short');
     }
   }, []);
+
+  const syncScoreHudTarget = useCallback((): boolean => {
+    const game = window.phaserGame;
+    if (!game) return false;
+
+    if (phaseRef.current !== GamePhase.PLAYING) {
+      game.registry.set('scoreHudTarget', null);
+      return true;
+    }
+
+    const rootRect = appRootRef.current?.getBoundingClientRect();
+    const scoreRect = scorePanelRef.current?.getBoundingClientRect();
+    if (!rootRect || !scoreRect) return false;
+
+    const centerX = scoreRect.left - rootRect.left + scoreRect.width / 2;
+    const centerY = scoreRect.top - rootRect.top + scoreRect.height / 2;
+    game.registry.set('scoreHudTarget', { x: centerX, y: centerY });
+    return true;
+  }, []);
+
+  useEffect(() => {
+    let rafId: number | null = null;
+    let retryTimerId: number | null = null;
+
+    const scheduleSync = (): void => {
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+      rafId = window.requestAnimationFrame(() => {
+        const synced = syncScoreHudTarget();
+        if (!synced && phase === GamePhase.PLAYING) {
+          retryTimerId = window.setTimeout(scheduleSync, 120);
+        }
+      });
+    };
+
+    const onWindowLayoutChange = (): void => {
+      scheduleSync();
+    };
+
+    scheduleSync();
+    window.addEventListener('resize', onWindowLayoutChange);
+    window.addEventListener('orientationchange', onWindowLayoutChange);
+    document.addEventListener('fullscreenchange', onWindowLayoutChange);
+    document.addEventListener('webkitfullscreenchange', onWindowLayoutChange);
+
+    return () => {
+      if (rafId !== null) window.cancelAnimationFrame(rafId);
+      if (retryTimerId !== null) window.clearTimeout(retryTimerId);
+      window.removeEventListener('resize', onWindowLayoutChange);
+      window.removeEventListener('orientationchange', onWindowLayoutChange);
+      document.removeEventListener('fullscreenchange', onWindowLayoutChange);
+      document.removeEventListener('webkitfullscreenchange', onWindowLayoutChange);
+    };
+  }, [isFullscreen, phase, score, totalQuestions, syncScoreHudTarget]);
   
   const handleGameOver = useCallback(() => {
     setShowCompletion(true);
@@ -1098,8 +2608,127 @@ export default function App() {
     setBgIndex(0);
   }, []);
 
+  const handleEnterPlaying = useCallback(async (): Promise<void> => {
+    setBgIndex(0);
+    setHasShownEmoji(true);
+    try {
+      await requestFullscreenSafely('manual');
+    } catch (error) {
+      console.warn('[Fullscreen] Unexpected error before entering PLAYING:', error);
+    }
+    setPhase(GamePhase.PLAYING);
+  }, [requestFullscreenSafely]);
+
+  const handleReplay = useCallback(() => {
+    clearRestCountdown();
+    setShowCompletion(false);
+    const game = window.phaserGame;
+    if (!game) {
+      console.warn('[Completion] Replay skipped: Phaser game instance missing.');
+      return;
+    }
+
+    try {
+      const mainScene = game.scene.getScene('MainScene') as MainScene;
+      mainScene.restartLevel();
+    } catch (error) {
+      console.error('[Completion] Replay failed to access MainScene:', error);
+    }
+  }, [clearRestCountdown]);
+
+  const handleNextLevel = useCallback(() => {
+    if (isCompletionTransitioningRef.current) {
+      return;
+    }
+
+    setShowCompletion(false);
+
+    const game = window.phaserGame;
+    if (!game) {
+      console.warn('[Completion] Next level skipped: Phaser game instance missing.');
+      return;
+    }
+
+    try {
+      const mainScene = game.scene.getScene('MainScene') as MainScene;
+      const hasNextTheme = mainScene.hasNextTheme();
+
+      if (!hasNextTheme) {
+        handleBackToMenu();
+        return;
+      }
+
+      isCompletionTransitioningRef.current = true;
+      let remainingSeconds = THEME_SWITCH_REST_SECONDS;
+      setRestCountdownSeconds(remainingSeconds);
+
+      if (restCountdownTimerRef.current !== null) {
+        window.clearInterval(restCountdownTimerRef.current);
+      }
+
+      restCountdownTimerRef.current = window.setInterval(() => {
+        remainingSeconds -= 1;
+        if (remainingSeconds <= 0) {
+          if (restCountdownTimerRef.current !== null) {
+            window.clearInterval(restCountdownTimerRef.current);
+            restCountdownTimerRef.current = null;
+          }
+          setRestCountdownSeconds(null);
+          isCompletionTransitioningRef.current = false;
+
+          try {
+            const currentGame = window.phaserGame;
+            const currentMainScene = currentGame?.scene?.getScene('MainScene') as MainScene | undefined;
+            if (!currentMainScene || !currentMainScene.nextLevel()) {
+              handleBackToMenu();
+            }
+          } catch (error) {
+            console.error('[Completion] Next level transition failed after rest:', error);
+            handleBackToMenu();
+          }
+          return;
+        }
+
+        setRestCountdownSeconds(remainingSeconds);
+      }, 1000);
+    } catch (error) {
+      console.error('[Completion] Next level failed to access MainScene:', error);
+      isCompletionTransitioningRef.current = false;
+      setRestCountdownSeconds(null);
+    }
+  }, [THEME_SWITCH_REST_SECONDS, handleBackToMenu]);
+
+  useEffect(() => {
+    if (!showCompletion || phase !== GamePhase.PLAYING) {
+      return;
+    }
+
+    completionCycleRef.current += 1;
+    const cycleId = completionCycleRef.current;
+    completionAutoAdvanceHandledCycleRef.current = null;
+
+    const watchdogTimerId = window.setTimeout(() => {
+      if (completionAutoAdvanceHandledCycleRef.current === cycleId) {
+        return;
+      }
+      completionAutoAdvanceHandledCycleRef.current = cycleId;
+      console.warn('[Completion] Watchdog forcing next-level transition.');
+      handleNextLevel();
+    }, 6500);
+
+    return () => {
+      window.clearTimeout(watchdogTimerId);
+    };
+  }, [showCompletion, phase, handleNextLevel]);
+
+  const isPlayingFullscreen = phase === GamePhase.PLAYING && isFullscreen;
+
   return (
-    <div className="relative w-full overflow-hidden bg-kenney-blue font-sans select-none text-kenney-dark" style={{ height: 'var(--app-height, 100dvh)' }}>
+    <div
+      ref={appRootRef}
+      className="relative w-full overflow-hidden bg-kenney-blue font-sans select-none text-kenney-dark"
+      style={{ height: 'var(--app-height, 100dvh)' }}
+    >
       <audio 
         ref={bgmRef}
         id="bgm-audio"
@@ -1131,10 +2760,10 @@ export default function App() {
                     </div>
                 </div>
                 <h2 className="text-2xl md:text-6xl font-black mb-2 uppercase italic tracking-tighter text-kenney-yellow">
-                    Rotate Screen
+                    请横屏使用
                 </h2>
                 <p className="text-lg md:text-2xl font-bold opacity-90 uppercase tracking-widest">
-                    Turn your phone!
+                    请将设备旋转为横屏
                 </p>
               </div>
           </div>
@@ -1147,9 +2776,9 @@ export default function App() {
       />
 
       {/* 1. Camera HUD */}
-      <div className={`fixed top-4 md:top-6 right-4 md:right-6 z-[60] transition-all duration-500 ease-in-out mobile-landscape-camera ${phase === GamePhase.MENU || phase === GamePhase.THEME_SELECTION ? 'translate-x-[200%] opacity-0 pointer-events-none' : 'translate-x-0 opacity-100'}`}>
-        <div className="bg-white p-1 md:p-2 border-[2px] md:border-[4px] border-kenney-dark rounded-kenney shadow-lg scale-75 md:scale-100 origin-top-right">
-           <div className="w-20 h-15 sm:w-24 sm:h-18 md:w-32 md:h-24 overflow-hidden relative bg-kenney-dark/10 rounded-lg md:rounded-xl">
+      <div className={`fixed z-[60] transition-all duration-500 ease-in-out mobile-landscape-camera ${isPlayingFullscreen ? 'top-2 md:top-3 right-2 md:right-3' : 'top-4 md:top-6 right-4 md:right-6'} ${phase === GamePhase.MENU || phase === GamePhase.THEME_SELECTION ? 'translate-x-[200%] opacity-0 pointer-events-none' : 'translate-x-0 opacity-100'}`}>
+        <div className={`bg-white border-[2px] md:border-[4px] border-kenney-dark rounded-kenney shadow-lg scale-75 md:scale-100 origin-top-right ${isPlayingFullscreen ? 'p-1 md:p-1.5' : 'p-1 md:p-2'}`}>
+           <div className={`${isPlayingFullscreen ? 'w-28 h-20 sm:w-32 sm:h-24 md:w-40 md:h-28' : 'w-20 h-15 sm:w-24 sm:h-18 md:w-32 md:h-24'} overflow-hidden relative bg-kenney-dark/10 rounded-lg md:rounded-xl`}>
                <video 
                  ref={videoRef} 
                  className="w-full h-full object-cover transform scale-x-[-1] live-view-video" 
@@ -1164,13 +2793,14 @@ export default function App() {
                   className="absolute inset-0 w-full h-full pointer-events-none"
                 />
              </div>
-           <div className="mt-0.5 text-center text-[6px] md:text-[10px] font-black tracking-widest uppercase">Live View</div>
+
         </div>
       </div>
 
-      {/* 2.5 Unified Back Button & Fullscreen Toggle */}
+      {/* 2.5 Unified Back Button */}
       {(phase !== GamePhase.MENU) && (
-          <div className="fixed top-4 md:top-6 left-4 md:left-6 z-[999] flex items-center gap-3 md:gap-4 mobile-landscape-control">
+          <div className={`fixed top-4 md:top-6 left-4 md:left-6 z-[999] flex items-center gap-2 md:gap-3 mobile-landscape-control ${isFullscreen ? 'fullscreen-hud-match-windowed' : ''}`}>
+            <div className="flex items-center gap-1 md:gap-1.5">
             <button 
               onTouchStart={(e) => {
                 e.preventDefault();
@@ -1191,50 +2821,12 @@ export default function App() {
                 }
               }}
               style={{ pointerEvents: 'auto', touchAction: 'none' }}
-              className="kenney-button-circle group scale-90 md:scale-100 flex-shrink-0">
+              className="kenney-button-circle kenney-button-red group scale-90 md:scale-100 flex-shrink-0"
+            >
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-5 h-5 md:w-8 md:h-8 group-hover:scale-110 transition-transform">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" />
               </svg>
             </button>
-
-            {/* Score Panel Integrated with Back Button for alignment */}
-             {phase === GamePhase.PLAYING && (
-               <div className="score-panel kenney-panel px-3 md:px-5 py-1 md:py-2 flex items-center gap-2 md:gap-4 transition-all bg-white/90 backdrop-blur-sm shadow-[0_4px_0_#333333] border-[3px] md:border-[4px]">
-                 <img src={getR2AssetUrl('assets/kenney/Vector/Tiles/star.svg')} className="w-6 h-6 md:w-12 md:h-12" alt="Score" />
-                 <span className="text-xl md:text-4xl font-black text-kenney-dark tabular-nums tracking-tight">
-                   {score} / {totalQuestions}
-                 </span>
-               </div>
-             )}
-
-            {/* Fullscreen Toggle - Only in PLAYING/TUTORIAL phase */}
-            {phase !== GamePhase.THEME_SELECTION && (
-                <button 
-                  onTouchStart={(e) => {
-                    // Handle touch immediately and prevent mouse events
-                    e.preventDefault(); 
-                    toggleFullscreen(e);
-                  }}
-                  onClick={(e) => {
-                      // Only handle clicks if they are NOT from touch interactions
-                      // (preventDefault in touchStart should prevent this, but just in case)
-                      toggleFullscreen(e);
-                  }}
-                  style={{ pointerEvents: 'auto', touchAction: 'none' }}
-                  className="kenney-button-circle group scale-90 md:scale-100 bg-kenney-yellow"
-                  title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
-                >
-                  {isFullscreen ? (
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-5 h-5 md:w-8 md:h-8 group-hover:scale-110 transition-transform">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 9V4.5M9 9H4.5M9 9L3 3m12 6V4.5M15 9h4.5M15 9l6-6M9 15v4.5M9 15H4.5M9 15l-6 6m12-6v4.5M15 15h4.5M15 15l6 6" />
-                    </svg>
-                  ) : (
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-5 h-5 md:w-8 md:h-8 group-hover:scale-110 transition-transform">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
-                    </svg>
-                  )}
-                </button>
-            )}
 
             {/* BGM Toggle (PLAYING only) */}
             {phase === GamePhase.PLAYING && (
@@ -1243,7 +2835,7 @@ export default function App() {
                 onClick={(e) => handleToggleBgm(e)}
                 style={{ pointerEvents: 'auto', touchAction: 'none' }}
                 className={`kenney-button-circle group scale-90 md:scale-100 ${isBgmEnabled ? 'bg-kenney-green' : 'bg-gray-400'}`}
-                title={isBgmEnabled ? 'BGM On' : 'BGM Off'}
+                title={isBgmEnabled ? '背景音乐：开' : '背景音乐：关'}
                 aria-pressed={!isBgmEnabled}
               >
                 {isBgmEnabled ? (
@@ -1257,10 +2849,41 @@ export default function App() {
                 )}
               </button>
             )}
+
+            {/* Fullscreen Toggle (PLAYING only) */}
+            {phase === GamePhase.PLAYING && (
+              <button
+                onTouchStart={(e) => handleToggleFullscreen(e)}
+                onClick={(e) => handleToggleFullscreen(e)}
+                style={{ pointerEvents: 'auto', touchAction: 'none' }}
+                className={`kenney-button-circle group scale-90 md:scale-100 ${isFullscreen ? 'bg-kenney-yellow' : 'bg-kenney-blue'}`}
+                title={isFullscreen ? '退出全屏' : '进入全屏'}
+                aria-pressed={isFullscreen}
+              >
+                {isFullscreen ? (
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3.5} stroke="currentColor" className="w-5 h-5 md:w-8 md:h-8 group-hover:scale-110 transition-transform">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 9H5V5m0 0 5 5M15 9h4V5m0 0-5 5M9 15H5v4m0 0 5-5M15 15h4v4m0 0-5-5" />
+                  </svg>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3.5} stroke="currentColor" className="w-5 h-5 md:w-8 md:h-8 group-hover:scale-110 transition-transform">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5" />
+                  </svg>
+                )}
+              </button>
+            )}
+            </div>
+
+            {/* Score Panel Integrated with Back Button for alignment */}
+             {phase === GamePhase.PLAYING && (
+               <div ref={scorePanelRef} className="score-panel kenney-panel h-11 md:h-14 px-3 md:px-4 flex items-center gap-2 md:gap-2.5 transition-all bg-white/90 backdrop-blur-sm shadow-[0_6px_0_#333333] border-[3px] md:border-[4px]">
+                 <img src={getR2AssetUrl('assets/kenney/Vector/Tiles/star.svg')} className="w-8 h-8 md:w-10 md:h-10" alt="分数" />
+                 <span className="text-lg md:text-3xl font-black leading-none text-kenney-dark tabular-nums tracking-tight">
+                   {score} / {totalQuestions}
+                 </span>
+               </div>
+             )}
           </div>
       )}
-
-      {/* Fullscreen toggle for Main Menu specifically - REMOVED per user request */}
 
       {/* 4. Score HUD - REMOVED redundant fixed panel, now integrated above */}
 
@@ -1287,15 +2910,67 @@ export default function App() {
         isVisible={showCompletion} 
         score={score} 
         total={totalQuestions} 
+        onRestart={handleReplay}
+        onNextLevel={handleNextLevel}
       />
+
+      {phase === GamePhase.PLAYING && restCountdownSeconds !== null && (
+        <div className="fixed inset-0 z-[980] pointer-events-none flex items-center justify-center bg-black/45 backdrop-blur-sm">
+          <div className="kenney-panel bg-white/95 px-8 md:px-12 py-6 md:py-8 text-center shadow-2xl">
+            <p className="text-xl md:text-3xl font-black text-kenney-dark mb-3 md:mb-4">
+              休息一下，准备下一个绘本
+            </p>
+            <div className="text-5xl md:text-7xl font-black text-kenney-yellow drop-shadow-[0_4px_0_#333333] tabular-nums">
+              {restCountdownSeconds}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 5. Menus & Overlays */}
       {phase !== GamePhase.PLAYING && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-kenney-blue/60 backdrop-blur-sm p-4 non-game-shell">
+        <div lang="zh-CN" className="absolute inset-0 z-50 flex items-center justify-center bg-kenney-blue/60 backdrop-blur-sm p-4 non-game-shell">
             
             {/* LOADING SCREEN */}
             {phase === GamePhase.LOADING && (
-                <LoadingScreen progress={loadingProgress} status={loadingStatus} />
+                <>
+                  <LoadingScreen progress={loadingProgress} status={loadingStatus} />
+                  {cameraIssueMessage && (
+                    <div className="absolute inset-0 z-[90] bg-black/35 backdrop-blur-md flex items-center justify-center p-4">
+                      <div className="kenney-panel bg-white/95 max-w-2xl w-full px-5 md:px-8 py-5 md:py-7 shadow-2xl">
+                        <h3 className="text-xl md:text-3xl font-black text-kenney-dark mb-3 md:mb-4 uppercase">
+                          出了点问题
+                        </h3>
+                        <p className="text-sm md:text-lg font-bold text-kenney-dark whitespace-pre-line leading-relaxed mb-4 md:mb-6">
+                          {cameraIssueMessage}
+                        </p>
+                        <div className="flex flex-wrap items-center gap-3 md:gap-4">
+                          <button
+                            onClick={() => {
+                              setCameraIssueMessage('');
+                              void handleStartGame();
+                            }}
+                            className="kenney-button kenney-button-handdrawn px-4 md:px-6 py-2 md:py-3 text-sm md:text-lg"
+                          >
+                            重试
+                          </button>
+                          <button
+                            onClick={() => {
+                              loadingRequestIdRef.current += 1;
+                              setCameraIssueMessage('');
+                              setLoadingProgress(0);
+                              setLoadingStatus('请选择主题后重新开始');
+                              setPhase(GamePhase.THEME_SELECTION);
+                            }}
+                            className="kenney-button kenney-button-handdrawn px-4 md:px-6 py-2 md:py-3 text-sm md:text-lg bg-gray-300 border-gray-500"
+                          >
+                            返回主题页
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </>
             )}
             
             {/* MAIN MENU */}
@@ -1306,13 +2981,13 @@ export default function App() {
                       <img 
                         src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')}
                         className="w-16 h-16 sm:w-20 sm:h-20 md:w-48 md:h-48 lg:w-56 lg:h-56 animate-bounce drop-shadow-xl mobile-landscape-character" 
-                        alt="Character" 
+                        alt="角色" 
                       />
                     </div>
                     
                     {/* Middle: Title (Single Line) */}
                     <div className="flex flex-col items-center px-4 md:px-10 w-full overflow-hidden shrink-0">
-                        <h1 className="text-3xl sm:text-5xl md:text-8xl lg:text-9xl font-normal text-white drop-shadow-[0_4px_0_#333333] md:drop-shadow-[0_6px_0_#333333] tracking-normal uppercase italic leading-none rotate-[-1deg] whitespace-nowrap py-2 md:py-4 mobile-landscape-title">
+                        <h1 className="brand-title text-3xl sm:text-5xl md:text-8xl lg:text-9xl font-bold text-white drop-shadow-[0_4px_0_#333333] md:drop-shadow-[0_6px_0_#333333] tracking-normal uppercase italic leading-none rotate-[-1deg] whitespace-nowrap py-2 md:py-4 mobile-landscape-title">
                             JUMP <span className="text-kenney-yellow">&</span> SAY
                         </h1>
                     </div>
@@ -1321,7 +2996,7 @@ export default function App() {
                     <div className="py-2 md:py-0 shrink-0">
                         <button onClick={handleStartProcess} 
                             className="kenney-button kenney-button-handdrawn px-6 sm:px-12 md:px-24 py-2 sm:py-4 md:py-8 text-base sm:text-2xl md:text-4xl hover:scale-110 transition-transform mobile-landscape-button">
-                            START GAME
+                            开始游戏
                         </button>
                     </div>
                 </div>
@@ -1330,13 +3005,34 @@ export default function App() {
             {/* THEME SELECTION */}
             {phase === GamePhase.THEME_SELECTION && (
                 <div className="theme-shell non-game-scale theme-selection-container text-center w-full max-w-[98vw] lg:max-w-[95vw] px-2 md:px-4 gap-2 md:gap-3 relative">
-                    <h2 className="text-lg sm:text-2xl md:text-4xl lg:text-5xl font-black text-white mb-1 md:mb-2 tracking-wide uppercase drop-shadow-[0_4px_0_#333333] italic shrink-0 mobile-landscape-title pt-4 md:pt-6">
-                        SELECT THEME
+                    <h2 className="text-lg sm:text-2xl md:text-4xl lg:text-5xl font-black text-white mb-1 md:mb-2 tracking-[0.04em] shrink-0 mobile-landscape-title pt-4 md:pt-6">
+                        选择绘本
                     </h2>
                     <div className="w-full overflow-y-auto overflow-x-hidden px-0.5 md:px-2 scrollbar-hide flex-1 min-h-0 will-change-transform">
+                        {/* Level Selection Bar */}
+                        {levels.length > 0 && (
+                          <div className="w-full flex justify-center pb-2 md:pb-4 shrink-0 overflow-x-auto scrollbar-hide px-2">
+                            <div className="flex gap-2 md:gap-3 p-1">
+                              {levels.map((lvl) => (
+                                <button
+                                  key={lvl}
+                                  onClick={() => setSelectedLevel(lvl)}
+                                  className={`px-3 py-1.5 md:px-5 md:py-2.5 rounded-full text-sm md:text-lg font-black transition-all shadow-md whitespace-nowrap ${
+                                    selectedLevel === lvl
+                                      ? 'bg-kenney-yellow text-kenney-dark scale-105 ring-2 ring-white'
+                                      : 'bg-black/20 text-white/90 hover:bg-black/30 backdrop-blur-sm'
+                                  }`}
+                                >
+                                  Level {lvl}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
                         <div className="theme-grid-wrap">
                           <div className="theme-grid grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 md:gap-2.5 px-1 md:px-0 auto-rows-min pb-32 md:pb-40">
-                              {themes.map((theme, index) => {
+                              {filteredThemes.map((theme, index) => {
                                   const isSelected = selectedThemes.includes(theme.id as ThemeId);
                                   const selectionIndex = selectedThemes.indexOf(theme.id as ThemeId);
                                   return (
@@ -1357,24 +3053,35 @@ export default function App() {
                                           backfaceVisibility: 'hidden'
                                       }}
                                   >
-                                      {/* Theme Card with soft color - shorter */}
-                                      <div className={`theme-card relative w-full h-16 sm:h-20 md:h-24 lg:h-28 bg-white p-1.5 md:p-2 flex flex-col items-center justify-center border-2 md:border-3 border-kenney-dark rounded-xl shadow-lg transition-all will-change-transform ${isSelected ? 'bg-gray-100' : 'group-hover:shadow-2xl'}`}>
-                                          {/* Cute dots pattern background */}
-                                          <div className="absolute inset-0 opacity-5 pointer-events-none rounded-xl" style={{
-                                              backgroundImage: 'radial-gradient(circle, #333333 1px, transparent 1px)',
-                                              backgroundSize: '12px 12px'
-                                          }} />
+                                      {/* Theme Card */}
+                                      <div className={`theme-card relative w-full h-24 sm:h-32 md:h-40 lg:h-48 bg-white p-0 flex flex-col items-center justify-center border-2 md:border-3 border-kenney-dark rounded-xl shadow-lg transition-all will-change-transform ${isSelected ? 'bg-gray-100' : 'group-hover:shadow-2xl'}`}>
                                           
-                                          {/* Soft colored background circle */}
-                                          <div className="absolute inset-1 rounded-lg opacity-15 pointer-events-none" style={{
-                                              background: ['#4c99ff', '#77b039', '#ff5c5c', '#ffcc00', '#a67c52'][
-                                                  index % 5
-                                              ]
-                                          }} />
+                                          {theme.cover ? (
+                                              <ThemeCardImage 
+                                                src={getR2ImageUrl(theme.cover)} 
+                                                alt={theme.name} 
+                                                index={index} 
+                                              />
+                                          ) : (
+                                            <>
+                                              {/* Fallback pattern */}
+                                              <div className="absolute inset-0 opacity-5 pointer-events-none rounded-xl" style={{
+                                                  backgroundImage: 'radial-gradient(circle, #333333 1px, transparent 1px)',
+                                                  backgroundSize: '12px 12px'
+                                              }} />
+                                              
+                                              {/* Fallback color */}
+                                              <div className="absolute inset-1 rounded-lg opacity-15 pointer-events-none" style={{
+                                                  background: ['#000000', '#1a1a1a', '#2d2d2d', '#333333', '#404040'][
+                                                      index % 5
+                                                  ]
+                                              }} />
+                                            </>
+                                          )}
                                           
                                           {/* Selection Order Number Overlay */}
                                           {isSelected && (
-                                              <div className="absolute inset-0 flex items-center justify-center z-20 bg-kenney-green/20 backdrop-blur-[1px] rounded-xl">
+                                              <div className="absolute inset-0 flex items-center justify-center z-50 bg-kenney-green/40 backdrop-blur-[1px] rounded-xl">
                                                   <div className="w-8 h-8 md:w-12 md:h-12 bg-kenney-green border-2 md:border-4 border-white rounded-full flex items-center justify-center shadow-lg animate-bounce-short">
                                                       <span className="text-lg md:text-2xl font-black text-white leading-none">
                                                           {selectionIndex + 1}
@@ -1383,10 +3090,10 @@ export default function App() {
                                               </div>
                                           )}
                                           
-                                          {/* Content - centered */}
-                                          <div className="relative z-10 w-full h-full flex flex-col items-center justify-center px-0.5">
-                                              {/* Theme Name - properly sized */}
-                                              <h3 className="theme-card-title text-[10px] sm:text-xs md:text-sm lg:text-base font-black text-kenney-dark text-center leading-tight line-clamp-3 break-words">
+                                          {/* Content */}
+                                          <div className="relative z-10 w-full h-full flex flex-col items-center justify-end pb-2 px-1 pointer-events-none">
+                                              {/* Theme Name */}
+                                              <h3 className={`theme-card-title text-[10px] sm:text-xs md:text-sm lg:text-base font-black text-center leading-tight line-clamp-2 break-words text-white drop-shadow-[0_2px_0_rgba(0,0,0,0.8)]`} style={{ zIndex: 10 }}>
                                                   {theme.name}
                                               </h3>
                                           </div>
@@ -1394,7 +3101,7 @@ export default function App() {
                                       
                                       {/* Word count badge - cute corner */}
                                       {theme.questions?.length ? (
-                                          <div className="theme-badge absolute -top-1 -right-1 bg-kenney-yellow border-2 border-kenney-dark rounded-full w-6 h-6 md:w-8 md:h-8 shadow-lg flex items-center justify-center transform group-hover:scale-125 transition-transform">
+                                          <div className="theme-badge absolute top-1 right-1 bg-kenney-yellow border-2 border-kenney-dark rounded-full w-6 h-6 md:w-8 md:h-8 shadow-lg flex items-center justify-center transform group-hover:scale-125 transition-transform z-30">
                                               <span className="text-[8px] md:text-[10px] font-black text-kenney-dark leading-none">
                                                   {theme.questions.length}
                                               </span>
@@ -1413,7 +3120,7 @@ export default function App() {
                             disabled={selectedThemes.length === 0}
                             className={`pointer-events-auto kenney-button kenney-button-handdrawn mobile-landscape-button px-8 py-3 text-xl md:text-2xl shadow-2xl transition-all transform duration-300 ${selectedThemes.length > 0 ? 'scale-100 opacity-100 translate-y-0' : 'scale-50 opacity-0 translate-y-10'}`}
                         >
-                            START GAME ({selectedThemes.length})
+                            开始游戏（{selectedThemes.length}）
                         </button>
                     </div>
                 </div>
@@ -1423,8 +3130,8 @@ export default function App() {
             {phase === GamePhase.TUTORIAL && (
                 <div className="tutorial-shell non-game-scale text-center w-full max-w-6xl px-4 md:px-20 lg:px-32 flex flex-col items-center justify-center h-full max-h-screen gap-[2vh] md:gap-[4vh] overflow-y-auto scrollbar-hide py-4">
                     
-                    <h2 className="tutorial-title text-[4vw] sm:text-[5vw] md:text-[6vw] font-normal text-white italic tracking-tight uppercase drop-shadow-[0_4px_0_#333333] md:drop-shadow-[0_6px_0_#333333] rotate-[-1deg] shrink-0 mobile-landscape-title landscape-compact-title leading-none">
-                        HOW TO PLAY
+                    <h2 className="tutorial-title text-[4vw] sm:text-[5vw] md:text-[6vw] font-bold text-white tracking-[0.03em] rotate-[-1deg] shrink-0 mobile-landscape-title landscape-compact-title leading-none">
+                        游戏说明
                     </h2>
                     
                     <div className="w-full flex-1 flex flex-col items-center justify-center min-h-0 gap-[2vh] md:gap-[4vh]">
@@ -1434,8 +3141,8 @@ export default function App() {
                                     <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_walk_a.svg')} className="tutorial-card-img w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce-horizontal-large mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
                                 </div>
                                 <div className="shrink-0 flex flex-col items-center gap-1">
-                                    <h3 className="tutorial-card-title text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark uppercase tracking-tighter italic mobile-landscape-card-text drop-shadow-sm">MOVE</h3>
-                                    <p className="tutorial-card-subtitle hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">Tilt your body</p>
+                                    <h3 className="tutorial-card-title text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark tracking-[0.02em] mobile-landscape-card-text">左右移动</h3>
+                                    <p className="tutorial-card-subtitle hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">身体左右移动</p>
                                 </div>
                             </div>
 
@@ -1444,8 +3151,8 @@ export default function App() {
                                     <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')} className="tutorial-card-img w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
                                 </div>
                                 <div className="shrink-0 flex flex-col items-center gap-1">
-                                    <h3 className="tutorial-card-title text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark uppercase tracking-tighter italic mobile-landscape-card-text drop-shadow-sm">JUMP</h3>
-                                    <p className="tutorial-card-subtitle hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">Jump to hit blocks</p>
+                                    <h3 className="tutorial-card-title text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark tracking-[0.02em] mobile-landscape-card-text">向上跳</h3>
+                                    <p className="tutorial-card-subtitle hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">跳起来撞击方块</p>
                                 </div>
                             </div>
                         </div>
@@ -1453,17 +3160,13 @@ export default function App() {
                         <div className="flex flex-col items-center gap-2">
                             <button 
                                 onClick={() => {
-                                    setBgIndex(0);
-                                    setHasShownEmoji(true);
-                                    // Force fullscreen again when entering gameplay
-                                    enterFullscreenAndLockOrientation();
-                                    setPhase(GamePhase.PLAYING);
+                                    void handleEnterPlaying();
                                 }}
                                 disabled={!motionController.isStarted || !themeImagesLoaded}
                                 className={`kenney-button kenney-button-handdrawn px-6 sm:px-12 md:px-24 py-2 sm:py-4 md:py-8 text-base sm:text-2xl md:text-4xl hover:scale-110 transition-transform shadow-2xl mobile-landscape-button landscape-compact-button flex items-center justify-center gap-3 md:gap-4 ${(!motionController.isStarted || !themeImagesLoaded) ? 'opacity-100 bg-gray-400 border-gray-600 cursor-wait' : 'bg-kenney-green border-kenney-dark'}`}>
                                 {(motionController.isStarted && themeImagesLoaded) ? (
                                     <>
-                                        <span className="drop-shadow-md font-black leading-none pb-1 text-base sm:text-2xl md:text-4xl">GO!</span>
+                                        <span className="font-black leading-none pb-1 text-base sm:text-2xl md:text-4xl">开始！</span>
                                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-4 h-4 sm:w-5 sm:h-5 md:w-7 md:h-7 animate-pulse filter drop-shadow-md">
                                             <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
                                         </svg>
@@ -1471,7 +3174,7 @@ export default function App() {
                                 ) : (
                                     <>
                                         <div className="w-5 h-5 sm:w-6 sm:h-6 md:w-7 md:h-7 border-[3px] md:border-[4px] border-white/30 border-t-white rounded-full animate-spin"></div>
-                                        <span className="font-black tracking-widest leading-none">LOADING...</span>
+                                        <span className="font-black tracking-widest leading-none">加载中...</span>
                                     </>
                                 )}
                             </button>
@@ -1483,6 +3186,8 @@ export default function App() {
 
         </div>
       )}
+
+      <BugReportButton />
     </div>
   );
 }

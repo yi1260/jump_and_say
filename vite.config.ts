@@ -39,7 +39,7 @@ export default defineConfig(({ mode }) => {
           },
           workbox: {
             cleanupOutdatedCaches: true,
-            globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest,json,wasm,data,tflite}'],
+            globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest,json,wasm,data,tflite,woff,woff2,ttf}'],
             maximumFileSizeToCacheInBytes: 10 * 1024 * 1024, // 10MB
             globIgnores: [
               '**/node_modules/**/*',
@@ -47,7 +47,7 @@ export default defineConfig(({ mode }) => {
               'workbox-*.js',
               '**/assets/kenney/**/*',
               '**/assets/Fredoka/**/*',
-              '**/assets/mediapipe/pose/**/*',
+              '**/mediapipe/pose/**/*',
               '**/themes.backup*/**/*',
               '**/assets/kenney/Sprites/**/*',
               '**/assets/kenney/Vector/backup/**/*'
@@ -84,20 +84,6 @@ export default defineConfig(({ mode }) => {
                   }
                 }
               },
-              {
-                urlPattern: ({ url }) => url.origin === self.location.origin && url.pathname.startsWith('/assets/mediapipe/pose/'),
-                handler: 'CacheFirst',
-                options: {
-                  cacheName: 'local-mediapipe-pose-cache',
-                  expiration: {
-                    maxEntries: 30,
-                    maxAgeSeconds: 60 * 60 * 24 * 365
-                  },
-                  cacheableResponse: {
-                    statuses: [0, 200]
-                  }
-                }
-              },
               // 1. MediaPipe CDN Caching (CDN First, Long-term Cache)
               // Matches jsdelivr, unpkg, and your own CDN for mediapipe files
               {
@@ -114,12 +100,12 @@ export default defineConfig(({ mode }) => {
                   }
                 }
               },
-              // 2. Theme Images (raz_aa) - Existing rule
+              // 2. Theme Images (RAZ) - Updated rule for uppercase path structure
               {
-                urlPattern: /^https:\/\/cdn\.maskmysheet\.com\/raz_aa\/.*/i,
+                urlPattern: /^https:\/\/cdn\.maskmysheet\.com\/RAZ\/.*/i,
                 handler: 'CacheFirst',
                 options: {
-                  cacheName: 'raz-aa-cdn-cache-v2',
+                  cacheName: 'raz-cdn-cache-v4',
                   expiration: {
                     maxEntries: 1000,
                     maxAgeSeconds: 60 * 60 * 24 * 365 // 1 year
@@ -129,13 +115,13 @@ export default defineConfig(({ mode }) => {
                   }
                 }
               },
-              // 3. General Game Assets (assets/) - R2 CDN
-              // Matches https://cdn.maskmysheet.com/assets/...
+              // 3. General Game Assets (assets/ and jump-and-say-themes-pic/) - R2 CDN
+              // Matches https://cdn.maskmysheet.com/assets/... or .../jump-and-say-themes-pic/...
               {
-                urlPattern: /^https:\/\/cdn\.maskmysheet\.com\/assets\/.*/i,
+                urlPattern: /^https:\/\/cdn\.maskmysheet\.com\/(assets|jump-and-say-themes-pic)\/.*/i,
                 handler: 'CacheFirst',
                 options: {
-                  cacheName: 'game-assets-cdn-cache-v2',
+                  cacheName: 'game-assets-cdn-cache-v3',
                   expiration: {
                     maxEntries: 500,
                     maxAgeSeconds: 60 * 60 * 24 * 365 // 1 year

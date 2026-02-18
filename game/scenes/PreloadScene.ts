@@ -1,10 +1,17 @@
-import { getCachedThemes } from '@/gameConfig';
+import { getCachedThemes, getPreloadedThemeAudioBlobUrl } from '@/gameConfig';
 import { getR2AssetUrl, getR2ImageUrl, getR2ThemesListCdnUrl, getR2ThemesListUrl } from '@/src/config/r2Config';
 import Phaser from 'phaser';
 import { Theme, ThemeId } from '../../types';
 
+const REWARD_VOICE_WORDS = ['perfect', 'super', 'great', 'amazing', 'awesome', 'excellent'] as const;
+
 export class PreloadScene extends Phaser.Scene {
   private currentTheme: ThemeId = '';
+  private retryAttempts = new Map<string, number>();
+  private localFallbackAttempted = new Set<string>();
+  private themesListFallbackTried = false;
+  private themeAudioFallbackUrls = new Map<string, string>();
+  private readonly MAX_FILE_RETRIES = 3;
 
   constructor() {
     super({ key: 'PreloadScene' });
@@ -19,6 +26,10 @@ export class PreloadScene extends Phaser.Scene {
     const initialThemes = this.registry.get('initialThemes');
     const initialTheme = this.registry.get('initialTheme');
     this.currentTheme = data.theme || initialTheme || (initialThemes && initialThemes.length > 0 ? initialThemes[0] : '') || '';
+    this.retryAttempts.clear();
+    this.localFallbackAttempted.clear();
+    this.themesListFallbackTried = false;
+    this.themeAudioFallbackUrls.clear();
   }
 
   preload() {
@@ -34,6 +45,9 @@ export class PreloadScene extends Phaser.Scene {
     // Phaser 3 emits 'load' event on the LoaderPlugin for each file.
     // Signature: (file: Phaser.Loader.File)
     this.load.on('load', (file: Phaser.Loader.File) => {
+        const fileUrl = typeof file.url === 'string' ? file.url : String(file.url ?? '');
+        const successRetryKey = `${file.type}:${file.key}:${fileUrl}`;
+        this.retryAttempts.delete(successRetryKey);
         let cacheStatus = 'UNKNOWN';
         let duration = '';
         
@@ -66,93 +80,77 @@ export class PreloadScene extends Phaser.Scene {
 
     // Add retry logic for failed assets
     this.load.on('loaderror', (file: Phaser.Loader.File) => {
-        console.warn(`[Loader] Error loading ${file.key} from ${file.url}`);
+        const fileUrl = typeof file.url === 'string' ? file.url : String(file.url ?? '');
+        const retryKey = `${file.type}:${file.key}:${fileUrl}`;
+        console.warn(`[Loader] Error loading ${file.key} from ${fileUrl}`);
 
-        if (file.key === 'themes_list' && file.type === 'json') {
-          const themesListFallbackTried = (file as any).themesListFallbackTried === true;
-          if (!themesListFallbackTried) {
-            (file as any).themesListFallbackTried = true;
-            const fallbackUrl = getR2ThemesListCdnUrl();
-            console.warn(`[Loader] themes_list load failed, attempting CDN fallback: ${fallbackUrl}`);
-            this.load.json('themes_list', fallbackUrl);
+        if (file.type === 'audio' && typeof file.url === 'string' && file.url.startsWith('blob:')) {
+          const fallbackUrl = this.themeAudioFallbackUrls.get(file.key);
+          if (fallbackUrl) {
+            console.warn(`[Loader] Blob audio load failed for ${file.key}, fallback to CDN URL: ${fallbackUrl}`);
+            this.load.audio(file.key, fallbackUrl);
             this.load.start();
             return;
           }
         }
-        
-        // R2 CDN -> Local Fallback Logic
-        // 如果是 CDN 资源加载失败，尝试降级到本地资源
-        if (typeof file.url === 'string' && file.url.includes('cdn.maskmysheet.com') && file.url.includes('/assets/')) {
-             console.log(`[Loader] CDN load failed for ${file.key}, attempting local fallback...`);
-             
-             // 构造本地 URL: 将 CDN 路径替换为本地路径
-             // CDN: https://cdn.maskmysheet.com/assets/kenney/... -> Local: /assets/kenney/...
-             const pathParts = file.url.split('/assets/');
-             if (pathParts.length > 1) {
-                 const newUrl = '/assets/' + pathParts[1];
-                 console.log(`[Loader] Switching to local URL: ${newUrl}`);
-                 
-                 // 根据文件类型重新加载
-                 switch (file.type) {
-                     case 'image':
-                         this.load.image(file.key, newUrl);
-                         break;
-                     case 'svg':
-                         // SVG 需要保留宽高设置，但这里无法获取原始宽高，通常 SVG 重新加载可能需要 metadata
-                         // 幸好 loadGameAssets 里是硬编码的，但在 error handler 里很难拿到。
-                         // 不过 Phaser 的 file 对象里可能有 config?
-                         // 简单起见，尝试直接加载，或者忽略 SVG 的尺寸设置（可能会有显示问题，但在 fallback 情况下可接受）
-                         // 其实 file.width 和 file.height 应该在 file 对象上有（如果是 SVGFile）
-                         // 让我们尝试读取 file.config
-                         this.load.svg(file.key, newUrl, (file as any).config); 
-                         break;
-                     case 'audio':
-                         this.load.audio(file.key, newUrl);
-                         break;
-                     default:
-                         this.load.image(file.key, newUrl);
-                 }
-                 
-                 this.load.start();
-                 return; // 跳过标准重试逻辑
-             }
+
+        const enqueueByType = (url: string): void => {
+          switch (file.type) {
+            case 'image':
+              this.load.image(file.key, url);
+              return;
+            case 'svg':
+              this.load.svg(file.key, url, (file as { config?: unknown }).config);
+              return;
+            case 'audio':
+              this.load.audio(file.key, url);
+              return;
+            case 'json':
+              this.load.json(file.key, url);
+              return;
+            default:
+              this.load.image(file.key, url);
+          }
+        };
+
+        if (file.key === 'themes_list' && file.type === 'json' && !this.themesListFallbackTried) {
+          this.themesListFallbackTried = true;
+          const fallbackUrl = getR2ThemesListCdnUrl();
+          console.warn(`[Loader] themes_list load failed, attempting CDN fallback: ${fallbackUrl}`);
+          this.load.json('themes_list', fallbackUrl);
+          this.load.start();
+          return;
         }
 
-        // Custom retry logic
-        // We add a 'retries' property to the file object to track attempts
-        const retries = (file as any).retries || 0;
-        if (retries < 3) {
-            console.log(`[Loader] Retrying ${file.key} (Attempt ${retries + 1}/3)...`);
-            (file as any).retries = retries + 1;
-            
-            // Re-add the file to the loader queue
-            // We need to use a slightly different URL to avoid browser cache issues if it was a network error?
-            // Actually, for CDN errors, we usually want to retry the SAME url unless we have a fallback.
-            // But Phaser 3 doesn't easily support "retry this file".
-            // We have to manually load it again.
-            
-            // Small delay before retry
-            setTimeout(() => {
-                if (typeof file.url === 'string') {
-                    switch (file.type) {
-                        case 'image':
-                            this.load.image(file.key, file.url);
-                            break;
-                        case 'svg':
-                            this.load.svg(file.key, file.url, (file as any).config);
-                            break;
-                        case 'audio':
-                            this.load.audio(file.key, file.url);
-                            break;
-                        default:
-                            this.load.image(file.key, file.url);
-                    }
-                    this.load.start(); // Restart loader if it stopped
-                }
-            }, 1000 * (retries + 1));
-        } else {
-            console.error(`[Loader] Failed to load ${file.key} after 3 attempts.`);
+        if (fileUrl.includes('cdn.maskmysheet.com') && fileUrl.includes('/assets/')) {
+          const fallbackTag = `${file.type}:${file.key}`;
+          if (!this.localFallbackAttempted.has(fallbackTag)) {
+            this.localFallbackAttempted.add(fallbackTag);
+            const pathParts = fileUrl.split('/assets/');
+            if (pathParts.length > 1) {
+              const newUrl = '/assets/' + pathParts[1].split('?')[0];
+              console.log(`[Loader] CDN load failed for ${file.key}, attempting local fallback: ${newUrl}`);
+              enqueueByType(newUrl);
+              this.load.start();
+              return;
+            }
+          }
         }
+
+        const retries = this.retryAttempts.get(retryKey) ?? 0;
+        if (retries >= this.MAX_FILE_RETRIES) {
+          console.error(`[Loader] Failed to load ${file.key} after ${this.MAX_FILE_RETRIES} attempts.`, { fileUrl });
+          return;
+        }
+
+        this.retryAttempts.set(retryKey, retries + 1);
+        const delayMs = 1000 * (retries + 1);
+        console.log(`[Loader] Retrying ${file.key} (Attempt ${retries + 1}/${this.MAX_FILE_RETRIES}) in ${delayMs}ms...`);
+        window.setTimeout(() => {
+          if (!fileUrl) return;
+          enqueueByType(fileUrl);
+          this.load.start();
+        }, delayMs);
     });
 
     // --- Load Theme Assets ---
@@ -231,6 +229,13 @@ export class PreloadScene extends Phaser.Scene {
         getUrl(`${soundBase}sfx_bump.mp3`),
         getUrl(`${soundBase}sfx_bump.ogg`)
     ]);
+
+    REWARD_VOICE_WORDS.forEach((word) => {
+      const voiceKey = `voice_${word}`;
+      const voiceUrl = getUrl(`${soundBase}${word}.mp3`);
+      console.log(`[PreloadScene] Loading voice audio: ${voiceKey} from ${voiceUrl}`);
+      this.load.audio(voiceKey, voiceUrl);
+    });
     
     const { height } = this.scale;
     const gameScale = height / 1080;
@@ -288,9 +293,10 @@ export class PreloadScene extends Phaser.Scene {
         return;
     }
 
-    console.log(`[PreloadScene] Queueing ${targetTheme.questions.length} images for ${this.currentTheme}`);
+    const audioCount = targetTheme.questions.filter((q: Theme['questions'][number]) => Boolean(q.audio)).length;
+    console.log(`[PreloadScene] Queueing ${targetTheme.questions.length} images + ${audioCount} audios for ${this.currentTheme}`);
     
-    targetTheme.questions.forEach((q: any) => {
+    targetTheme.questions.forEach((q: Theme['questions'][number]) => {
         // Force .webp extension
         const imageName = q.image.replace(/\.(png|jpg|jpeg)$/i, '.webp');
         const imagePath = getR2ImageUrl(imageName);
@@ -300,6 +306,17 @@ export class PreloadScene extends Phaser.Scene {
         // Only load if not already in texture manager
         if (!this.textures.exists(key)) {
             this.load.image(key, imagePath);
+        }
+
+        if (q.audio) {
+            const audioPath = getR2ImageUrl(q.audio);
+            const audioKey = `theme_audio_${this.currentTheme}_${q.audio.replace(/\.(mp3|wav|ogg|m4a)$/i, '')}`;
+            this.themeAudioFallbackUrls.set(audioKey, audioPath);
+            const blobAudioUrl = getPreloadedThemeAudioBlobUrl(audioPath);
+            const loadUrl = blobAudioUrl || audioPath;
+            if (!this.cache.audio.exists(audioKey)) {
+                this.load.audio(audioKey, loadUrl);
+            }
         }
     });
   }

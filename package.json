@@ -7,9 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "postinstall": "mkdir -p public/assets/mediapipe/pose && cp -r node_modules/@mediapipe/pose/* public/assets/mediapipe/pose/ && cp node_modules/@mediapipe/camera_utils/camera_utils.js public/assets/mediapipe/"
+    "postinstall": "echo \"No local MediaPipe copy required\""
   },
   "dependencies": {
+    "@fontsource/zcool-kuaile": "^5.2.7",
     "@mediapipe/camera_utils": "^0.3.1675466862",
     "@mediapipe/pose": "^0.5.1675469404",
     "framer-motion": "^12.23.26",

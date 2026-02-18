@@ -9,7 +9,16 @@ const C_GOLD = 0xFFD700;
 const C_AMBER = 0xFFA500;
 const C_WHITE = 0xFFFFFF;
 
-const FONT_STACK = '"FredokaLocal", "Arial Rounded MT Bold", "Chalkboard SE", "Comic Sans MS", cursive';
+const FONT_STACK = '"FredokaBoot", "FredokaLatin", "Fredoka", "ZCOOL KuaiLe", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, -apple-system, sans-serif';
+
+interface AnswerCardLayout {
+  centerX: number;
+  cardWidth: number;
+  cardHeight: number;
+  iconWidth: number;
+  iconHeight: number;
+  imageRatio: number;
+}
 
 export class MainScene extends Phaser.Scene {
   private player!: Phaser.Physics.Arcade.Sprite;
@@ -101,6 +110,24 @@ export class MainScene extends Phaser.Scene {
   private imagesLoaded: boolean = false;
   private hasPreloadedNext: boolean = false;
   private loadingPromise: Promise<void> | null = null;
+  private currentAnswerRatios: number[] = [];
+  private currentAnswerKeys: string[] = [];
+  private activeCardLayouts: AnswerCardLayout[] = [];
+  private currentThemeUsesPortraitFrames: boolean = true;
+  private pronunciationSound: Phaser.Sound.BaseSound | null = null;
+  private readonly isIPadDevice: boolean = /iPad|Macintosh/i.test(navigator.userAgent) && 'ontouchend' in document;
+  private resizeStabilizeTimers: Phaser.Time.TimerEvent[] = [];
+
+  private readonly CARD_ORIENTATION_THRESHOLD = 1.0;
+  private readonly CARD_FRAME_ASPECT_RATIO_LANDSCAPE = 1.2;
+  private readonly CARD_FRAME_ASPECT_RATIO_PORTRAIT = 0.78;
+  private readonly CARD_SIDE_PADDING_RATIO = 0.04;
+  private readonly CARD_GAP_RATIO = 0.018;
+  private readonly CARD_IMAGE_INSET_BASE = 4;
+  private readonly JUMP_SFX_VOLUME = 0.16;
+  private readonly SUCCESS_SFX_VOLUME = 0.2;
+  private readonly FAILURE_SFX_VOLUME = 0.14;
+  private readonly PRONUNCIATION_VOLUME = 1.0;
 
   declare add: Phaser.GameObjects.GameObjectFactory;
   declare make: Phaser.GameObjects.GameObjectCreator;
@@ -112,6 +139,15 @@ export class MainScene extends Phaser.Scene {
 
   constructor() {
     super({ key: 'MainScene' });
+  }
+
+  private clearResizeStabilizers(): void {
+    this.resizeStabilizeTimers.forEach((timer) => {
+      if (timer && !timer.hasDispatched) {
+        timer.remove(false);
+      }
+    });
+    this.resizeStabilizeTimers = [];
   }
 
   init(data: {
@@ -156,6 +192,12 @@ export class MainScene extends Phaser.Scene {
     this.themeWordPool = [];
     this.questionCounter = 0;
     this.totalQuestions = 0;
+    this.currentAnswerRatios = [];
+    this.currentAnswerKeys = [];
+    this.activeCardLayouts = [];
+    this.currentThemeUsesPortraitFrames = true;
+    this.pronunciationSound = null;
+    this.clearResizeStabilizers();
     // Randomize background for each level/restart
     this.currentBgIndex = Phaser.Math.Between(0, 6);
     this.wrongAttempts = 0;
@@ -186,9 +228,8 @@ export class MainScene extends Phaser.Scene {
 
   private setupThemeData(theme: Theme) {
     this.themeData = theme;
-    this.themeWordPool = this.themeData.questions.map(q =>
-      q.question.replace(/^[Tt]he\s+/i, '').replace(/\s+/g, '_').toUpperCase()
-    );
+    // Store raw question strings to preserve "The"
+    this.themeWordPool = this.themeData.questions.map(q => q.question);
     this.totalQuestions = this.themeWordPool.length;
     Phaser.Utils.Array.Shuffle(this.themeWordPool);
 
@@ -221,7 +262,9 @@ export class MainScene extends Phaser.Scene {
         // 更新缓存供后续使用
         this.cache.json.add('themes_list', themeList);
         
-        const theme = themeList.themes.find((t: Theme) => t.id === this.currentTheme);
+        // Flatten themes from all levels to find the target theme
+        const allThemes = Object.values(themeList.levels).flatMap(l => l.themes);
+        const theme = allThemes.find((t: Theme) => t.id === this.currentTheme);
         if (theme) {
             console.log(`[MainScene] Fallback load successful for ${this.currentTheme}`);
             this.setupThemeData(theme);
@@ -233,7 +276,245 @@ export class MainScene extends Phaser.Scene {
       }
   }
 
+  private getScoreHudTarget(): { x: number; y: number } {
+    const fallbackTarget = {
+      x: 140 * this.gameScale,
+      y: 50 * this.gameScale
+    };
+    const rawTarget = this.registry.get('scoreHudTarget');
+    if (!rawTarget || typeof rawTarget !== 'object') {
+      return fallbackTarget;
+    }
+
+    const target = rawTarget as { x?: unknown; y?: unknown };
+    if (
+      typeof target.x !== 'number' ||
+      !Number.isFinite(target.x) ||
+      typeof target.y !== 'number' ||
+      !Number.isFinite(target.y)
+    ) {
+      return fallbackTarget;
+    }
+
+    return { x: target.x, y: target.y };
+  }
+
   private dpr: number = 1;
+
+  private toQuestionKey(questionText: string): string {
+    return questionText.replace(/^[Tt]he\s+/i, '').replace(/\s+/g, '_').toUpperCase();
+  }
+
+  private getQuestionByAnswerKey(answerKey: string): Theme['questions'][number] | undefined {
+    return this.themeData?.questions.find((questionItem: Theme['questions'][number]) => {
+      return this.toQuestionKey(questionItem.question) === answerKey;
+    });
+  }
+
+  private getImageTextureKeyByAnswer(answerKey: string): string {
+    const questionItem = this.getQuestionByAnswerKey(answerKey);
+    if (!questionItem) return '';
+    return this.getImageTextureKey(questionItem, this.currentTheme);
+  }
+
+  private getImageTextureKey(questionItem: Theme['questions'][number], themeId: string): string {
+    return `theme_${themeId}_${questionItem.image.replace(/\.(png|jpg|jpeg|webp)$/i, '')}`;
+  }
+
+  private getAudioCacheKey(questionItem: Theme['questions'][number], themeId: string): string {
+    if (!questionItem.audio) return '';
+    return `theme_audio_${themeId}_${questionItem.audio.replace(/\.(mp3|wav|ogg|m4a)$/i, '')}`;
+  }
+
+  private getQuestionByText(questionText: string): Theme['questions'][number] | undefined {
+    const normalizedText = this.toQuestionKey(questionText);
+    return this.themeData?.questions.find((questionItem: Theme['questions'][number]) => (
+      this.toQuestionKey(questionItem.question) === normalizedText
+    ));
+  }
+
+  private stopPronunciationSound(restoreBgmVolume = true): void {
+    const activeSound = this.pronunciationSound;
+    this.pronunciationSound = null;
+    if (activeSound) {
+      activeSound.removeAllListeners();
+      if (activeSound.isPlaying) {
+        activeSound.stop();
+      }
+      activeSound.destroy();
+    }
+    if (restoreBgmVolume) {
+      window.restoreBGMVolume?.();
+    }
+  }
+
+  private getTextureAspectRatio(textureKey: string): number {
+    if (!textureKey || !this.textures.exists(textureKey)) {
+      return 1;
+    }
+
+    const texture = this.textures.get(textureKey);
+    const sourceImage = texture.getSourceImage() as
+      | {
+          naturalWidth?: number;
+          naturalHeight?: number;
+          width?: number;
+          height?: number;
+        }
+      | undefined;
+
+    const width = sourceImage?.naturalWidth ?? sourceImage?.width ?? texture.source[0]?.width ?? 0;
+    const height = sourceImage?.naturalHeight ?? sourceImage?.height ?? texture.source[0]?.height ?? 0;
+
+    if (width <= 0 || height <= 0) {
+      return 1;
+    }
+
+    return width / height;
+  }
+
+  private getCardHeightByAspect(cardWidth: number, frameAspectRatio: number, sceneHeight: number): number {
+    const maxHeightByWidth = cardWidth / frameAspectRatio;
+    const maxHeightByViewport = Math.min(sceneHeight * 0.5, 560 * this.gameScale);
+    const minHeight = Math.max(150 * this.gameScale, sceneHeight * 0.18);
+    return Math.round(Phaser.Math.Clamp(maxHeightByWidth, minHeight, maxHeightByViewport));
+  }
+
+  private refreshThemeFrameMode(): void {
+    if (!this.themeData || !Array.isArray(this.themeData.questions) || this.themeData.questions.length === 0) {
+      this.currentThemeUsesPortraitFrames = true;
+      return;
+    }
+
+    const hasPortraitImage = this.themeData.questions.some((questionItem: Theme['questions'][number]) => {
+      const textureKey = this.getImageTextureKey(questionItem, this.currentTheme);
+      const ratio = this.getTextureAspectRatio(textureKey);
+      return ratio > 0 && ratio < this.CARD_ORIENTATION_THRESHOLD;
+    });
+
+    this.currentThemeUsesPortraitFrames = hasPortraitImage;
+  }
+
+  private computeAnswerCardLayouts(answerRatios: number[], sceneWidth: number, sceneHeight: number): AnswerCardLayout[] {
+    const fallbackRatios = answerRatios.length === 3 ? answerRatios : [1, 1, 1];
+    const frameAspectRatio = this.currentThemeUsesPortraitFrames
+      ? this.CARD_FRAME_ASPECT_RATIO_PORTRAIT
+      : this.CARD_FRAME_ASPECT_RATIO_LANDSCAPE;
+
+    const sidePadding = Math.max(sceneWidth * this.CARD_SIDE_PADDING_RATIO, 36 * this.gameScale);
+    const gap = Math.max(sceneWidth * this.CARD_GAP_RATIO, 20 * this.gameScale);
+    const availableWidth = Math.max(sceneWidth - sidePadding * 2 - gap * 2, sceneWidth * 0.42);
+    const cardWidth = Math.round(availableWidth / 3);
+    const imageInset = Math.max(2, Math.round(this.CARD_IMAGE_INSET_BASE * this.gameScale));
+    const totalWidth = cardWidth * 3 + gap * 2;
+    let cursorX = (sceneWidth - totalWidth) / 2;
+
+    return fallbackRatios.map((ratio: number, index: number) => {
+      const rawRatio = Math.max(0.01, answerRatios[index] ?? ratio);
+      const cardHeight = this.getCardHeightByAspect(cardWidth, frameAspectRatio, sceneHeight);
+      const centerX = Math.round(cursorX + cardWidth / 2);
+      cursorX += cardWidth + gap;
+
+      return {
+        centerX,
+        cardWidth: Math.round(cardWidth),
+        cardHeight,
+        iconWidth: Math.max(1, Math.round(cardWidth - imageInset * 2)),
+        iconHeight: Math.max(1, Math.round(cardHeight - imageInset * 2)),
+        imageRatio: rawRatio
+      };
+    });
+  }
+
+  private constrainCardLayout(layout: AnswerCardLayout, sceneWidth: number, sceneHeight: number): AnswerCardLayout {
+    const sidePadding = Math.max(sceneWidth * this.CARD_SIDE_PADDING_RATIO, 36 * this.gameScale);
+    const gap = Math.max(sceneWidth * this.CARD_GAP_RATIO, 20 * this.gameScale);
+    const availableWidth = Math.max(sceneWidth - sidePadding * 2 - gap * 2, sceneWidth * 0.42);
+    const maxCardWidth = Math.round(availableWidth / 3);
+    const frameAspectRatio = this.currentThemeUsesPortraitFrames
+      ? this.CARD_FRAME_ASPECT_RATIO_PORTRAIT
+      : this.CARD_FRAME_ASPECT_RATIO_LANDSCAPE;
+    const maxCardHeight = this.getCardHeightByAspect(maxCardWidth, frameAspectRatio, sceneHeight);
+    const imageInset = Math.max(2, Math.round(this.CARD_IMAGE_INSET_BASE * this.gameScale));
+
+    const safeCardWidth = Math.max(1, Math.min(Math.round(layout.cardWidth), maxCardWidth));
+    const safeCardHeight = Math.max(1, Math.min(Math.round(layout.cardHeight), maxCardHeight));
+
+    return {
+      ...layout,
+      cardWidth: safeCardWidth,
+      cardHeight: safeCardHeight,
+      iconWidth: Math.max(1, Math.round(safeCardWidth - imageInset * 2)),
+      iconHeight: Math.max(1, Math.round(safeCardHeight - imageInset * 2))
+    };
+  }
+
+  private getMaxCardHeight(layouts: AnswerCardLayout[]): number {
+    if (layouts.length === 0) return this.blockHeight;
+    return layouts.reduce((maxHeight, layout) => Math.max(maxHeight, layout.cardHeight), 0);
+  }
+
+  private updateJumpVelocityByCardHeight(cardHeight: number): void {
+    this.blockHeight = cardHeight;
+    this.blockBottomY = this.blockHeight / 2;
+    const distanceToBlock = this.floorSurfaceY - this.blockCenterY;
+    const requiredJumpHeight = distanceToBlock + this.blockBottomY + Math.abs(this.playerHeadY) + this.JUMP_OVERSHOOT;
+    this.jumpVelocity = Math.sqrt(2 * this.GRAVITY_Y * requiredJumpHeight);
+  }
+
+  private applyBlockVisualLayout(
+    block: Phaser.Physics.Arcade.Sprite,
+    visuals: Phaser.GameObjects.Container | undefined,
+    layout: AnswerCardLayout
+  ): void {
+    const constrainedLayout = this.constrainCardLayout(layout, this.cameras.main.width, this.cameras.main.height);
+    const snappedX = Math.round(constrainedLayout.centerX);
+    const snappedY = Math.round(this.blockCenterY);
+    const snappedCardWidth = Math.round(constrainedLayout.cardWidth);
+    const snappedCardHeight = Math.round(constrainedLayout.cardHeight);
+    const snappedIconWidth = Math.round(constrainedLayout.iconWidth);
+    const snappedIconHeight = Math.round(constrainedLayout.iconHeight);
+
+    block.x = snappedX;
+    block.y = snappedY;
+    block.setDisplaySize(snappedCardWidth, snappedCardHeight);
+    block.refreshBody();
+
+    if (!visuals) return;
+    visuals.x = snappedX;
+    visuals.y = snappedY;
+
+    const borderThickness = Math.max(4, Math.round(6 * this.gameScale));
+    const innerBorderThickness = Math.max(2, Math.round(3 * this.gameScale));
+    const shadowOffsetY = Math.max(4, 8 * this.gameScale);
+    const frameShadow = block.getData('answerFrameShadow') as Phaser.GameObjects.Rectangle | undefined;
+    const frame = block.getData('answerFrame') as Phaser.GameObjects.Rectangle | undefined;
+    const innerFrame = block.getData('answerInnerFrame') as Phaser.GameObjects.Rectangle | undefined;
+    const icon = block.getData('answerIcon') as Phaser.GameObjects.Image | undefined;
+
+    if (frameShadow) {
+      frameShadow.y = shadowOffsetY;
+      frameShadow.setSize(
+        snappedCardWidth + borderThickness * 1.4,
+        snappedCardHeight + borderThickness * 1.6
+      );
+    }
+    if (frame) {
+      frame.setSize(snappedCardWidth, snappedCardHeight);
+      frame.setStrokeStyle(borderThickness, 0x2f3442, 1);
+    }
+    if (innerFrame) {
+      innerFrame.setSize(
+        Math.max(1, snappedCardWidth - borderThickness * 1.2),
+        Math.max(1, snappedCardHeight - borderThickness * 1.2)
+      );
+      innerFrame.setStrokeStyle(innerBorderThickness, 0xd9e2f2, 0.9);
+    }
+    if (icon) {
+      icon.setDisplaySize(snappedIconWidth, snappedIconHeight);
+      icon.setOrigin(0.5, 0.5);
+    }
+  }
 
   /** 
    * 核心布局计算 
@@ -251,7 +532,7 @@ export class MainScene extends Phaser.Scene {
     this.LANE_X_POSITIONS = [width * 0.20, width * 0.5, width * 0.80]; 
 
     const visualPlayerSize = 180 * this.gameScale;
-    const visualBoxSize = 380 * this.gameScale;
+    const visualBoxSize = Math.min(380 * this.gameScale, height * 0.38);
     
     this.playerHeight = visualPlayerSize;
     this.blockHeight = visualBoxSize;
@@ -262,7 +543,6 @@ export class MainScene extends Phaser.Scene {
     const minTopMargin = 60 * this.gameScale;
     const minBeeBlockGap = 420 * this.gameScale;
 
-    const availableHeight = this.floorSurfaceY - minTopMargin - minBeeBlockGap;
     const jumpRatio = height < 600 ? 0.32 : 0.40; 
     const idealJumpHeight = Phaser.Math.Clamp(height * jumpRatio, 200 * this.gameScale, 480 * this.gameScale); 
     
@@ -275,10 +555,7 @@ export class MainScene extends Phaser.Scene {
         this.blockCenterY = this.beeCenterY + minBeeBlockGap;
     }
 
-    const distanceToBlock = this.floorSurfaceY - this.blockCenterY;
-    const requiredJumpHeight = distanceToBlock + this.blockBottomY + Math.abs(this.playerHeadY) + this.JUMP_OVERSHOOT;
-    
-    this.jumpVelocity = Math.sqrt(2 * this.GRAVITY_Y * requiredJumpHeight);
+    this.updateJumpVelocityByCardHeight(this.blockHeight);
   }
 
   preload() {
@@ -451,19 +728,25 @@ export class MainScene extends Phaser.Scene {
     // NO-OP: All theme assets are now guaranteed to be loaded by PreloadScene
     // We just check if they are missing as a safety net, but we don't block
     
-    // Check if all textures are already in Phaser's cache
-    const missingQuestions = targetTheme.questions.filter((q: any) => {
-        const key = `theme_${targetThemeId}_${q.image.replace(/\.(png|jpg|jpeg|webp)$/i, '')}`;
+    const missingImageQuestions = targetTheme.questions.filter((questionItem: Theme['questions'][number]) => {
+        const key = this.getImageTextureKey(questionItem, targetThemeId);
         return !this.textures.exists(key);
     });
+    const missingAudioQuestions = targetTheme.questions.filter((questionItem: Theme['questions'][number]) => {
+        if (!questionItem.audio) return false;
+        const key = this.getAudioCacheKey(questionItem, targetThemeId);
+        return !this.cache.audio.exists(key);
+    });
 
-    if (missingQuestions.length > 0) {
-        console.warn(`[MainScene] Missing ${missingQuestions.length} textures for ${targetThemeId}, loading fallback...`);
+    if (missingImageQuestions.length > 0) {
+        console.warn(
+          `[MainScene] Missing ${missingImageQuestions.length} textures for ${targetThemeId}, loading fallback...`
+        );
         const { getR2ImageUrl } = await import('@/src/config/r2Config');
-        missingQuestions.forEach((q: any) => {
-            const imageName = q.image.replace(/\.(png|jpg|jpeg)$/i, '.webp');
+        missingImageQuestions.forEach((questionItem: Theme['questions'][number]) => {
+            const imageName = questionItem.image.replace(/\.(png|jpg|jpeg)$/i, '.webp');
             const imagePath = getR2ImageUrl(imageName);
-            const key = `theme_${targetThemeId}_${q.image.replace(/\.(png|jpg|jpeg|webp)$/i, '')}`;
+            const key = this.getImageTextureKey(questionItem, targetThemeId);
             if (!this.textures.exists(key)) {
                 this.load.image(key, imagePath);
             }
@@ -473,7 +756,7 @@ export class MainScene extends Phaser.Scene {
           this.imagesLoading = true;
         }
 
-        return new Promise<void>((resolve) => {
+        const loadPromise = new Promise<void>((resolve) => {
             this.load.once('complete', () => {
                 if (isCurrentTheme) {
                   this.imagesLoading = false;
@@ -484,6 +767,13 @@ export class MainScene extends Phaser.Scene {
             });
             this.load.start();
         });
+        if (isCurrentTheme) {
+          this.loadingPromise = loadPromise;
+        }
+        if (missingAudioQuestions.length > 0) {
+          this.preloadThemeAudiosInBackground(targetThemeId, missingAudioQuestions);
+        }
+        return loadPromise;
     }
 
     if (isCurrentTheme) {
@@ -491,7 +781,36 @@ export class MainScene extends Phaser.Scene {
       this.imagesLoaded = true;
       this.loadingPromise = null;
     }
+    if (missingAudioQuestions.length > 0) {
+      this.preloadThemeAudiosInBackground(targetThemeId, missingAudioQuestions);
+    }
     return Promise.resolve();
+  }
+
+  private preloadThemeAudiosInBackground(
+    themeId: string,
+    audioQuestions: Array<Theme['questions'][number]>
+  ): void {
+    if (!audioQuestions || audioQuestions.length === 0) return;
+    void (async () => {
+      const { getR2ImageUrl } = await import('@/src/config/r2Config');
+      let queuedAudioCount = 0;
+      audioQuestions.forEach((questionItem: Theme['questions'][number]) => {
+        if (!questionItem.audio) return;
+        const audioKey = this.getAudioCacheKey(questionItem, themeId);
+        if (!audioKey || this.cache.audio.exists(audioKey)) return;
+        const audioPath = getR2ImageUrl(questionItem.audio);
+        this.load.audio(audioKey, audioPath);
+        queuedAudioCount += 1;
+      });
+      if (queuedAudioCount === 0) return;
+      console.log(`[MainScene] Background loading ${queuedAudioCount} theme audios for ${themeId}`);
+      if (!this.load.isLoading()) {
+        this.load.start();
+      }
+    })().catch((error: unknown) => {
+      console.warn('[MainScene] Failed to queue background audio preload', error);
+    });
   }
 
   /**
@@ -502,15 +821,18 @@ export class MainScene extends Phaser.Scene {
       let nextThemeId = '';
       
       if (this.currentThemes.length > 0) {
-        const nextIndex = (this.currentThemeIndex + 1) % this.currentThemes.length;
+        if (this.currentThemeIndex >= this.currentThemes.length - 1) {
+          return;
+        }
+        const nextIndex = this.currentThemeIndex + 1;
         nextThemeId = this.currentThemes[nextIndex];
       } else {
          const themesList = this.cache.json.get('themes_list');
          if (!themesList) return;
          const themes = themesList.themes || [];
          const currentIndex = themes.findIndex((t: Theme) => t.id === this.currentTheme);
-         if (currentIndex === -1) return;
-         const nextIndex = (currentIndex + 1) % themes.length;
+         if (currentIndex === -1 || currentIndex >= themes.length - 1) return;
+         const nextIndex = currentIndex + 1;
          nextThemeId = themes[nextIndex].id;
       }
       
@@ -539,8 +861,8 @@ export class MainScene extends Phaser.Scene {
         this.textures.get(key).setFilter(Phaser.Textures.FilterMode.LINEAR);
     });
 
-    // 启用 FXAA 后处理管线，显著减少边缘锯齿
-    if (this.renderer instanceof Phaser.Renderer.WebGL.WebGLRenderer) {
+    // iPad 上禁用 FXAA，避免图片边缘在白色背景处出现闪烁和发虚
+    if (!this.isIPadDevice && this.renderer instanceof Phaser.Renderer.WebGL.WebGLRenderer) {
         // @ts-ignore - FXAAPipeline is available in Phaser 3.80+ but might be missing in types
         this.cameras.main.setPostPipeline(Phaser.Renderer.WebGL.Pipelines.FXAAPipeline);
     }
@@ -550,10 +872,10 @@ export class MainScene extends Phaser.Scene {
 
     // 初始化音效 (增加安全检查，防止加载失败导致后续代码崩溃)
     try {
-        this.jumpSound = this.sound.add('sfx_jump');
-        this.successSound = this.sound.add('sfx_success');
-        this.failureSound = this.sound.add('sfx_failure');
-        this.bumpSound = this.sound.add('sfx_bump');
+        this.jumpSound = this.sound.add('sfx_jump', { volume: this.JUMP_SFX_VOLUME });
+        this.successSound = this.sound.add('sfx_success', { volume: this.SUCCESS_SFX_VOLUME });
+        this.failureSound = this.sound.add('sfx_failure', { volume: this.FAILURE_SFX_VOLUME });
+        this.bumpSound = this.sound.add('sfx_bump', { volume: this.FAILURE_SFX_VOLUME });
     } catch (e) {
         console.warn('Audio initialization failed, continuing without sound.');
         // 创建空对象模拟播放器，防止 play() 报错
@@ -608,6 +930,16 @@ export class MainScene extends Phaser.Scene {
     this.player.play('p1_walk');
 
     this.scale.on('resize', this.handleResize, this);
+    this.events.once('shutdown', () => {
+      this.clearResizeStabilizers();
+      this.scale.off('resize', this.handleResize, this);
+      this.stopPronunciationSound(true);
+    });
+    this.events.once('destroy', () => {
+      this.clearResizeStabilizers();
+      this.scale.off('resize', this.handleResize, this);
+      this.stopPronunciationSound(true);
+    });
 
     this.physics.add.collider(this.player, platforms);
     this.physics.add.overlap(this.player, this.blocks, this.hitBlock, undefined, this);
@@ -701,8 +1033,7 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
-  handleResize(gameSize: Phaser.Structs.Size) { 
-      const { width, height } = gameSize; 
+  private applyResponsiveLayout(width: number, height: number): void {
       this.recalcLayout(width, height); 
 
       // 1. 更新地面位置 
@@ -733,33 +1064,49 @@ export class MainScene extends Phaser.Scene {
           } 
       } 
 
+      if (this.currentAnswerRatios.length === 3) {
+          this.activeCardLayouts = this.computeAnswerCardLayouts(this.currentAnswerRatios, width, height);
+          this.LANE_X_POSITIONS = this.activeCardLayouts.map((layout) => layout.centerX);
+          if (this.activeCardLayouts.length > 0) {
+              this.updateJumpVelocityByCardHeight(this.getMaxCardHeight(this.activeCardLayouts));
+          }
+      } else {
+          this.activeCardLayouts = [];
+      }
+
       if (this.blocks) { 
           this.blocks.children.iterate((b: any) => { 
               if (!b || !b.active) return true; 
               
               const answerIndex = b.getData('answerIndex');
-              if (answerIndex !== undefined) {
-                  b.x = this.LANE_X_POSITIONS[answerIndex];
+              const visuals = b.getData('visuals') as Phaser.GameObjects.Container | undefined;
+
+              if (typeof answerIndex === 'number' && this.activeCardLayouts[answerIndex]) {
+                  const layout = this.activeCardLayouts[answerIndex];
+                  this.applyBlockVisualLayout(b, visuals, layout);
+                  return true;
+              }
+
+              const optionId = b.getData('optionId') as string | undefined;
+              if (optionId) {
+                  const optionX = optionId === 'retry' ? this.LANE_X_POSITIONS[0] : this.LANE_X_POSITIONS[2];
+                  const optionSize = 240 * this.gameScale;
+                  b.x = optionX;
                   b.y = this.blockCenterY;
-                  
-                  const visualBoxSize = 380 * this.gameScale;
-                  b.setDisplaySize(visualBoxSize, visualBoxSize);
-                  
+                  b.setDisplaySize(optionSize, optionSize);
                   b.refreshBody();
-                  
-                  const visuals = b.getData('visuals') as Phaser.GameObjects.Container | undefined; 
-                  if (visuals) { 
-                      visuals.x = b.x;
-                      visuals.y = b.y;
-                      visuals.setScale(1);
-                      const bubble = visuals.list[0] as Phaser.GameObjects.Image;
-                      const icon = visuals.list[1] as Phaser.GameObjects.Image;
-                      if (bubble) bubble.setDisplaySize(visualBoxSize, visualBoxSize);
+
+                  if (visuals) {
+                      visuals.x = optionX;
+                      visuals.y = this.blockCenterY;
+                      const bubble = visuals.list[0] as Phaser.GameObjects.Image | undefined;
+                      const icon = visuals.list[1] as Phaser.GameObjects.Image | undefined;
+                      if (bubble) bubble.setDisplaySize(optionSize, optionSize);
                       if (icon) {
-                          const iconSize = visualBoxSize * 0.9;
+                          const iconSize = optionSize * 0.5;
                           icon.setDisplaySize(iconSize, iconSize);
                       }
-                  } 
+                  }
               }
               return true; 
           }); 
@@ -770,9 +1117,10 @@ export class MainScene extends Phaser.Scene {
           this.beeContainer.x = width / 2;
           this.beeContainer.y = this.beeCenterY;
           
-          const visualBeeSize = 100 * this.gameScale;
-          const fontSize = Math.round(52 * this.gameScale);
-          const textOffsetY = 70 * this.gameScale;
+          // 调整：保持与 updateBeeWord 一致的尺寸
+          const visualBeeSize = 80 * this.gameScale;
+          const fontSize = Math.round(36 * this.gameScale);
+          const textOffsetY = 60 * this.gameScale;
           
           if (this.beeSprite) {
               this.beeSprite.setDisplaySize(visualBeeSize, visualBeeSize);
@@ -783,6 +1131,26 @@ export class MainScene extends Phaser.Scene {
               // this.beeWordText.setStroke('#000000', Math.max(2, 4 * this.gameScale));
           }
       }
+  }
+
+  handleResize(gameSize: Phaser.Structs.Size) {
+      const immediateWidth = Math.round(gameSize.width);
+      const immediateHeight = Math.round(gameSize.height);
+      this.applyResponsiveLayout(immediateWidth, immediateHeight);
+
+      // iPad/Safari 在退出全屏时会先抛出一次过渡尺寸，随后才稳定。
+      // 追加两次短延迟重排，读取最新 scale 尺寸，避免偶发布局错位。
+      this.clearResizeStabilizers();
+      const settleDelays = [80, 220];
+      settleDelays.forEach((delayMs) => {
+          const timer = this.time.delayedCall(delayMs, () => {
+              if (!this.scene.isActive()) return;
+              const stableWidth = Math.round(this.scale.width);
+              const stableHeight = Math.round(this.scale.height);
+              this.applyResponsiveLayout(stableWidth, stableHeight);
+          });
+          this.resizeStabilizeTimers.push(timer);
+      });
   }
   
   private getHysteresisLane(bodyX: number, currentLaneIndex: number): number {
@@ -877,41 +1245,48 @@ export class MainScene extends Phaser.Scene {
   }
 
   speak(text: string) {
-      if ('speechSynthesis' in window) {
-          // Cancel any pending speech immediately to ensure the new one plays
-          window.speechSynthesis.cancel();
-          if (window.setBGMVolume) {
-            window.setBGMVolume(0);
+      const questionItem = this.getQuestionByText(text);
+      const audioKey = questionItem ? this.getAudioCacheKey(questionItem, this.currentTheme) : '';
+      if (!audioKey) {
+          console.warn(`[MainScene] Missing audio mapping for question: ${text}`);
+          return;
+      }
+      if (!this.cache.audio.exists(audioKey)) {
+          console.warn(`[MainScene] Audio cache missing: ${audioKey}`);
+          return;
+      }
+
+      if (window.setBGMVolume) {
+          window.setBGMVolume(0);
+      }
+      this.stopPronunciationSound(false);
+
+      try {
+          const sound = this.sound.add(audioKey);
+          this.pronunciationSound = sound;
+
+          sound.once('complete', () => {
+              if (this.pronunciationSound === sound) {
+                  this.pronunciationSound = null;
+              }
+              sound.destroy();
+              window.restoreBGMVolume?.();
+          });
+          sound.once('destroy', () => {
+              if (this.pronunciationSound === sound) {
+                  this.pronunciationSound = null;
+              }
+          });
+
+          const played = sound.play({ volume: this.PRONUNCIATION_VOLUME });
+          if (!played) {
+              sound.destroy();
+              this.pronunciationSound = null;
+              window.restoreBGMVolume?.();
           }
-          
-          const u = new SpeechSynthesisUtterance(text);
-          u.lang = 'en-US';
-          u.pitch = 1.0;
-          u.rate = 0.9;
-          u.volume = 1.0;
-          u.onend = () => window.restoreBGMVolume?.();
-          u.onerror = () => window.restoreBGMVolume?.();
-          
-          let voices = window.speechSynthesis.getVoices();
-          
-          const findVoice = () => {
-            return voices.find(v => 
-              v.lang.startsWith('en-US') && (
-                v.name.includes('Premium') || 
-                v.name.includes('Natural') || 
-                v.name.includes('Google US English') || 
-                v.name.includes('Samantha')
-              )
-            ) || voices.find(v => v.lang.startsWith('en-US')) || voices.find(v => v.lang.startsWith('en'));
-          };
-
-          let preferred = findVoice();
-          if (preferred) u.voice = preferred;
-
-          // Some browsers need a small delay after cancel() to work reliably
-          setTimeout(() => {
-              window.speechSynthesis.speak(u);
-          }, 50);
+      } catch (error) {
+          console.warn('[MainScene] Failed to play question audio', error);
+          this.stopPronunciationSound(true);
       }
   }
 
@@ -920,7 +1295,7 @@ export class MainScene extends Phaser.Scene {
         return null;
     }
 
-    const themeWords = this.themeData ? this.themeData.questions.map(q => q.question.replace(/^[Tt]he\s+/i, '').replace(/\s+/g, '_').toUpperCase()) : [];
+    const themeWords = this.themeData ? this.themeData.questions.map(q => this.toQuestionKey(q.question)) : [];
 
     // 从池子中选一个和上次不一样的单词
     let selectedIndex = -1;
@@ -934,22 +1309,24 @@ export class MainScene extends Phaser.Scene {
     // 如果没找到不一样的（极端情况，池子里剩下的都是一样的），就选第一个
     if (selectedIndex === -1) selectedIndex = 0;
 
-    const correctWord = this.themeWordPool.splice(selectedIndex, 1)[0];
-    this.lastQuestionWord = correctWord;
+    const correctRawWord = this.themeWordPool.splice(selectedIndex, 1)[0];
+    this.lastQuestionWord = correctRawWord;
+
+    const correctKey = this.toQuestionKey(correctRawWord);
 
     // 干扰项从该主题的所有单词中选
-    let distractors = themeWords.filter(w => w !== correctWord);
+    let distractors = themeWords.filter(w => w !== correctKey);
     distractors = Phaser.Utils.Array.Shuffle(distractors).slice(0, 2);
     
-    const answers = [correctWord, ...distractors]
+    const answers = [correctKey, ...distractors]
         .map(value => ({ value, sort: Math.random() }))
         .sort((a, b) => a.sort - b.sort)
         .map(({ value }) => value);
 
     return { 
-        question: `${correctWord.replace(/_/g, ' ').toLowerCase()}`, 
+        question: correctRawWord, 
         answers, 
-        correctIndex: answers.indexOf(correctWord)
+        correctIndex: answers.indexOf(correctKey)
     };
   }
 
@@ -1010,52 +1387,105 @@ export class MainScene extends Phaser.Scene {
 
     const { width, height } = this.cameras.main;
     this.recalcLayout(width, height);
-    const bubbleScale = this.bubbleScale;
     const blockY = this.blockCenterY;
 
-    this.LANE_X_POSITIONS.forEach((x, i) => {
-        const answerKey = this.currentQuestion!.answers[i];
-        
-        const visualBoxSize = this.blockHeight;
-        const block = this.blocks.create(x, blockY, 'block_hitbox'); 
-         block.setOrigin(0.5);
-         block.setDisplaySize(visualBoxSize, visualBoxSize);
-         block.refreshBody();
-         block.setVisible(false); 
-         block.setAlpha(0);
+    this.currentAnswerKeys = [...this.currentQuestion.answers];
+    this.currentAnswerRatios = this.currentAnswerKeys.map((answerKey) => {
+        const imageKey = this.getImageTextureKeyByAnswer(answerKey);
+        return this.getTextureAspectRatio(imageKey);
+    });
+    this.refreshThemeFrameMode();
+    this.activeCardLayouts = this.computeAnswerCardLayouts(this.currentAnswerRatios, width, height);
+    this.LANE_X_POSITIONS = this.activeCardLayouts.map((layout) => layout.centerX);
+    this.targetLaneIndex = Phaser.Math.Clamp(this.targetLaneIndex, 0, this.LANE_X_POSITIONS.length - 1);
+    if (this.activeCardLayouts.length > 0) {
+        this.updateJumpVelocityByCardHeight(this.getMaxCardHeight(this.activeCardLayouts));
+    }
+
+    this.currentQuestion.answers.forEach((answerKey, i) => {
+        const rawLayout = this.activeCardLayouts[i];
+        const layout = rawLayout ? this.constrainCardLayout(rawLayout, width, height) : undefined;
+        const x = Math.round(layout?.centerX ?? this.LANE_X_POSITIONS[i] ?? this.LANE_X_POSITIONS[1]);
+        const cardWidth = Math.round(layout?.cardWidth ?? this.blockHeight);
+        const cardHeight = Math.round(layout?.cardHeight ?? this.blockHeight);
+        const imageKey = this.getImageTextureKeyByAnswer(answerKey);
+        const textureKey = imageKey && this.textures.exists(imageKey) ? imageKey : 'tile_box';
+        const borderThickness = Math.max(4, Math.round(6 * this.gameScale));
+        const innerBorderThickness = Math.max(2, Math.round(3 * this.gameScale));
+        const shadowOffsetY = Math.max(4, 8 * this.gameScale);
+
+        const block = this.blocks.create(x, blockY, 'block_hitbox');
+        block.setOrigin(0.5);
+        block.setDisplaySize(cardWidth, cardHeight);
+        block.refreshBody();
+        block.setVisible(false);
+        block.setAlpha(0);
         block.setData('answerIndex', i);
         block.setData('answerKey', answerKey);
+        block.setData('imageKey', textureKey);
 
         const container = this.add.container(x, blockY);
-        
-        const bubble = this.add.image(0, 0, 'tile_box');
-        bubble.setDisplaySize(visualBoxSize, visualBoxSize);
-        
-        const question = this.themeData?.questions.find(q => {
-          const word = q.question.replace(/^[Tt]he\s+/i, '').replace(/\s+/g, '_').toUpperCase();
-          return word === answerKey;
-        });
-        
-        const imageKey = question ? `theme_${this.currentTheme}_${question.image.replace(/\.(png|jpg|jpeg|webp)$/i, '')}` : '';
-        const icon = this.add.image(0, 0, imageKey);
-        const iconSize = visualBoxSize * 0.9;
-        icon.setDisplaySize(iconSize, iconSize);
+        const frameShadow = this.add
+            .rectangle(
+                0,
+                shadowOffsetY,
+                cardWidth + borderThickness * 1.4,
+                cardHeight + borderThickness * 1.6,
+                0x202432,
+                0.28
+            )
+            .setOrigin(0.5);
+        const frame = this.add
+            .rectangle(0, 0, cardWidth, cardHeight, 0xffffff, 0.98)
+            .setOrigin(0.5)
+            .setStrokeStyle(borderThickness, 0x2f3442, 1);
+        const innerFrame = this.add
+            .rectangle(
+                0,
+                0,
+                Math.max(1, cardWidth - borderThickness * 1.2),
+                Math.max(1, cardHeight - borderThickness * 1.2),
+                0xffffff,
+                0
+            )
+            .setOrigin(0.5)
+            .setStrokeStyle(innerBorderThickness, 0xd9e2f2, 0.9);
+        const icon = this.add.image(0, 0, textureKey);
+
+        if (layout) {
+            icon.setDisplaySize(layout.iconWidth, layout.iconHeight);
+        } else {
+            const fallbackInset = Math.max(2, Math.round(this.CARD_IMAGE_INSET_BASE * this.gameScale));
+            icon.setDisplaySize(
+                Math.max(1, cardWidth - fallbackInset * 2),
+                Math.max(1, cardHeight - fallbackInset * 2)
+            );
+        }
+
         icon.setTint(0xffffff);
         icon.setOrigin(0.5, 0.5);
 
-        container.add([bubble, icon]);
+        container.add([frameShadow, frame, innerFrame, icon]);
         block.setData('visuals', container);
+        block.setData('answerFrameShadow', frameShadow);
+        block.setData('answerFrame', frame);
+        block.setData('answerInnerFrame', innerFrame);
+        block.setData('answerIcon', icon);
 
-        // Float Animation
-        this.tweens.add({
-            targets: container,
-            y: container.y - 15,
-            duration: 1500,
-            yoyo: true,
-            repeat: -1,
-            ease: 'Sine.easeInOut',
-            delay: i * 200
-        });
+        // iPad 上禁用答案卡片浮动，避免图片边缘在白色背景上持续闪烁
+        if (!this.isIPadDevice) {
+            this.tweens.add({
+                targets: container,
+                y: Math.round(container.y - 15),
+                duration: 1500,
+                yoyo: true,
+                repeat: -1,
+                ease: 'Sine.easeInOut',
+                delay: i * 200
+            });
+        } else {
+            container.y = Math.round(container.y);
+        }
 
         // Entrance
         container.setScale(0);
@@ -1104,102 +1534,123 @@ export class MainScene extends Phaser.Scene {
             this.createBlockExplosion(block.x, block.y);
         }
 
-        const rewards = [
-            { key: 'star_gold', score: 1, scale: 1, surprise: false, label: '星星' },
-            { key: 'mushroom_red', score: 1, scale: 1, surprise: true, label: '红蘑菇' },
-            { key: 'mushroom_brown', score: 1, scale: 1, surprise: true, label: '小蘑菇' },
-            { key: 'gem_blue', score: 1, scale: 1, surprise: true, label: '蓝宝石' },
-            { key: 'gem_red', score: 1, scale: 1, surprise: true, label: '红宝石' },
-            { key: 'gem_green', score: 1, scale: 1, surprise: true, label: '绿宝石' },
-            { key: 'gem_yellow', score: 1, scale: 1, surprise: true, label: '黄宝石' },
-            { key: 'grass', score: 1, scale: 1, surprise: true, label: '小草' },
-            { key: 'grass_purple', score: 1, scale: 1, surprise: true, label: '紫色小草' },
-        ];
+        const shouldAwardStar = this.wrongAttempts < 2;
+        let scoreSettleDelayMs = 0;
+        if (shouldAwardStar) {
+            const rewards = [
+                { key: 'star_gold', score: 1, scale: 1, surprise: false, label: '星星' },
+                { key: 'mushroom_red', score: 1, scale: 1, surprise: true, label: '红蘑菇' },
+                { key: 'mushroom_brown', score: 1, scale: 1, surprise: true, label: '小蘑菇' },
+                { key: 'gem_blue', score: 1, scale: 1, surprise: true, label: '蓝宝石' },
+                { key: 'gem_red', score: 1, scale: 1, surprise: true, label: '红宝石' },
+                { key: 'gem_green', score: 1, scale: 1, surprise: true, label: '绿宝石' },
+                { key: 'gem_yellow', score: 1, scale: 1, surprise: true, label: '黄宝石' },
+                { key: 'grass', score: 1, scale: 1, surprise: true, label: '小草' },
+                { key: 'grass_purple', score: 1, scale: 1, surprise: true, label: '紫色小草' },
+            ];
 
-        const random = Math.random();
-        let reward: { key: string, score: number, scale: number, surprise: boolean, label: string };
-        if (random < 0.6) {
-            reward = rewards[0];
-        } else {
-            reward = rewards[Phaser.Math.Between(1, rewards.length - 1)];
-        }
+            const random = Math.random();
+            const reward = random < 0.6
+                ? rewards[0]
+                : rewards[Phaser.Math.Between(1, rewards.length - 1)];
 
-        const rewardItem = this.add.image(block.x, block.y, reward.key);
-        rewardItem.setDepth(100);
-        rewardItem.setScale(0); 
-        
-        const baseScale = (reward.scale * this.gameScale) / 4; 
-        
-        const trailTint = reward.surprise ? [0x00FFFF, 0xFF00FF, 0xFFFF00] : [C_GOLD, C_AMBER, 0xFF4500];
-        
-        // Use pooled reward trail emitter
-        if (this.rewardTrailEmitter) {
-            this.rewardTrailEmitter.setParticleTint(trailTint[0]); // Simplified tint for performance
-            this.rewardTrailEmitter.startFollow(rewardItem);
-            this.rewardTrailEmitter.start();
-            this.rewardTrailEmitter.setFrequency(reward.surprise ? 20 : 40);
-        }
+            const rewardItem = this.add.image(block.x, block.y, reward.key);
+            rewardItem.setDepth(100);
+            rewardItem.setScale(0);
 
-        const rewardTextStr = `+${reward.score}`;
-        const rewardText = this.add.text(block.x, block.y - 50 * this.gameScale, rewardTextStr, {
-            fontSize: `${(reward.surprise ? 64 : 48) * this.gameScale}px`,
-            fontFamily: FONT_STACK,
-            fontStyle: 'bold',
-            color: reward.surprise ? '#FFD700' : '#FFFFFF',
-            stroke: '#000',
-            strokeThickness: 8 * this.gameScale
-        }).setOrigin(0.5).setDepth(110);
+            const baseScale = (reward.scale * this.gameScale) / 4;
+            const trailTint = reward.surprise ? [0x00FFFF, 0xFF00FF, 0xFFFF00] : [C_GOLD, C_AMBER, 0xFF4500];
 
-        this.tweens.add({
-            targets: rewardText,
-            y: rewardText.y - 150 * this.gameScale,
-            alpha: 0,
-            scale: reward.surprise ? 1.5 : 1.2,
-            duration: 2500,
-            ease: 'Cubic.easeOut',
-            onComplete: () => rewardText.destroy()
-        });
-
-        if (reward.surprise) {
-            this.cameras.main.shake(200, 0.01);
-        }
-
-        const targetX = 140 * this.gameScale;
-        const targetY = 50 * this.gameScale;
-        const waitTime = reward.key === 'star_gold' ? 100 : 100;
-
-        this.tweens.add({
-            targets: rewardItem,
-            y: block.y - 80 * this.gameScale,
-            scaleX: baseScale * (reward.surprise ? 2.2 : 1.6),
-            scaleY: baseScale * (reward.surprise ? 2.2 : 1.6),
-            duration: 600,
-            ease: 'Back.easeOut',
-            onComplete: () => {
-                this.time.delayedCall(waitTime, () => {
-                    this.tweens.add({
-                        targets: rewardItem,
-                        x: targetX,
-                        y: targetY,
-                        scaleX: baseScale * 0.4,
-                        scaleY: baseScale * 0.4,
-                        alpha: 0.5,
-                        duration: 800, 
-                        ease: 'Expo.easeIn',
-                        onComplete: () => {
-                            rewardItem.destroy();
-                            if (this.rewardTrailEmitter) {
-                                this.rewardTrailEmitter.stop();
-                                this.rewardTrailEmitter.stopFollow();
-                            }
-                            this.score += reward.score;
-                            this.themeScore += reward.score;
-                            if (this.onScoreUpdate) this.onScoreUpdate(this.score, this.totalQuestions);
-                        }
-                    });
-                });
+            if (this.rewardTrailEmitter) {
+                this.rewardTrailEmitter.setParticleTint(trailTint[0]);
+                this.rewardTrailEmitter.startFollow(rewardItem);
+                this.rewardTrailEmitter.start();
+                this.rewardTrailEmitter.setFrequency(reward.surprise ? 16 : 26);
             }
-        });
+
+            const rewardText = this.add.text(block.x, block.y - 50 * this.gameScale, `+${reward.score}`, {
+                fontSize: `${(reward.surprise ? 64 : 48) * this.gameScale}px`,
+                fontFamily: FONT_STACK,
+                fontStyle: 'bold',
+                color: reward.surprise ? '#FFD700' : '#FFFFFF',
+                stroke: '#000',
+                strokeThickness: 8 * this.gameScale
+            }).setOrigin(0.5).setDepth(110);
+
+            this.tweens.add({
+                targets: rewardText,
+                y: rewardText.y - 150 * this.gameScale,
+                alpha: 0,
+                scale: reward.surprise ? 1.5 : 1.2,
+                duration: 2500,
+                ease: 'Cubic.easeOut',
+                onComplete: () => rewardText.destroy()
+            });
+
+            if (reward.surprise) {
+                this.cameras.main.shake(200, 0.01);
+            }
+
+            const waitTime = reward.surprise ? 260 : 220;
+            const flightDuration = reward.surprise ? 1450 : 1250;
+            const launchScaleFactor = reward.surprise ? 2.2 : 1.6;
+            const launchHeight = reward.surprise ? 95 : 80;
+            scoreSettleDelayMs = 700 + waitTime + flightDuration;
+
+            this.tweens.add({
+                targets: rewardItem,
+                y: block.y - launchHeight * this.gameScale,
+                scaleX: baseScale * launchScaleFactor,
+                scaleY: baseScale * launchScaleFactor,
+                duration: 700,
+                ease: 'Back.easeOut',
+                onComplete: () => {
+                    this.time.delayedCall(waitTime, () => {
+                        const { x: targetX, y: targetY } = this.getScoreHudTarget();
+                        const startX = rewardItem.x;
+                        const startY = rewardItem.y;
+                        const controlXOffset = Phaser.Math.Clamp((startX - targetX) * 0.22, -220 * this.gameScale, 220 * this.gameScale);
+                        const controlX = (startX + targetX) / 2 + controlXOffset;
+                        const controlY = Math.min(startY, targetY) - (reward.surprise ? 230 : 190) * this.gameScale;
+                        const flightCurve = new Phaser.Curves.QuadraticBezier(
+                            new Phaser.Math.Vector2(startX, startY),
+                            new Phaser.Math.Vector2(controlX, controlY),
+                            new Phaser.Math.Vector2(targetX, targetY)
+                        );
+
+                        this.tweens.addCounter({
+                            from: 0,
+                            to: 1,
+                            duration: flightDuration,
+                            ease: 'Sine.easeInOut',
+                            onStart: () => {
+                                if (this.rewardTrailEmitter) {
+                                    this.rewardTrailEmitter.setFrequency(reward.surprise ? 10 : 14);
+                                }
+                            },
+                            onUpdate: (tween) => {
+                                const progress = tween.getValue();
+                                const point = flightCurve.getPoint(progress);
+                                rewardItem.setPosition(point.x, point.y);
+                                rewardItem.setScale(baseScale * Phaser.Math.Linear(launchScaleFactor, 0.38, progress));
+                                rewardItem.setAlpha(Phaser.Math.Linear(1, 0.45, progress));
+                                rewardItem.setAngle(Phaser.Math.Linear(0, reward.surprise ? 540 : 360, progress));
+                            },
+                            onComplete: () => {
+                                rewardItem.destroy();
+                                if (this.rewardTrailEmitter) {
+                                    this.rewardTrailEmitter.stop();
+                                    this.rewardTrailEmitter.stopFollow();
+                                }
+                                this.score += reward.score;
+                                this.themeScore += reward.score;
+                                if (this.onScoreUpdate) this.onScoreUpdate(this.score, this.totalQuestions);
+                            }
+                        });
+                    });
+                }
+            });
+        }
 
         if (visuals) {
             this.tweens.add({
@@ -1212,10 +1663,7 @@ export class MainScene extends Phaser.Scene {
             });
         }
 
-        const successMsgs = ["Great!", "Good job!", "Well done!"];
-        const msg = successMsgs[Phaser.Math.Between(0, successMsgs.length - 1)];
-        
-        this.handleWin();
+        this.handleWin(scoreSettleDelayMs);
 
     } else {
         this.failureSound.play();
@@ -1248,11 +1696,12 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
-  handleWin() {
-    // 计分逻辑已移至金币动画完成回调中
-    // 增加延迟时间，让幼儿有更多时间反应和观察得分动画
+  handleWin(scoreSettleDelayMs: number = 0) {
+    // 当存在奖励飞行动画时，等待计分真正入账后再生成下一题，
+    // 避免最后一题结算页先打开导致文案/语音判断使用旧分数。
     this.time.delayedCall(500, () => this.cleanupBlocks());
-    this.time.delayedCall(1500, () => this.spawnQuestion());
+    const nextQuestionDelayMs = Math.max(1500, scoreSettleDelayMs + 60);
+    this.time.delayedCall(nextQuestionDelayMs, () => this.spawnQuestion());
   }
 
   /**
@@ -1261,6 +1710,10 @@ export class MainScene extends Phaser.Scene {
   private async showThemeCompletion() {
     if (this.isGameOver) return;
     this.isGameOver = true;
+    this.currentAnswerRatios = [];
+    this.currentAnswerKeys = [];
+    this.activeCardLayouts = [];
+    this.recalcLayout(this.scale.width, this.scale.height);
 
     // RESUME background preloading during the completion screen
     // This gives us ~8 seconds to load the next theme while user watches animations
@@ -1272,149 +1725,72 @@ export class MainScene extends Phaser.Scene {
     
     // 2. 触发 React 层 UI 开启 (三明治上层)
     if (this.onGameOver) this.onGameOver();
-    
-    // 3. 延迟生成交互选项，等待结算动画播放完毕
-    // 根据题目数量计算：每题需要约1秒的延迟，至少8秒以确保所有星星动画完成
-    const totalDelay = Math.max(8000, this.totalQuestions * 1000);
-    console.log(`[showThemeCompletion] Waiting ${totalDelay}ms (${this.totalQuestions} questions) before hiding overlay`);
-    this.time.delayedCall(totalDelay, () => {
-        console.log('[showThemeCompletion] Delay completed, showing interactive options');
-        // 在指示牌掉落前，隐藏 React 结算层
-        if (this.onGameRestart) this.onGameRestart();
-        this.createInteractiveOptions();
-    });
   }
 
-  /**
-   * 生成交互选项：重试 (RETRY) 和 下一关 (NEXT)
-   * 使用木箱+icon的方式，复用游戏中方块的碰撞逻辑和特效
-   */
-  private createInteractiveOptions() {
-    const { width, height } = this.scale;
-    const dropStartY = -100;
-    const blockY = this.blockCenterY;
-    const visualBoxSize = 240 * this.gameScale;
-    const entranceDuration = 300;
-
-    const options = [
-        { id: 'retry', x: this.LANE_X_POSITIONS[0], texture: 'icon_retry' },
-        { id: 'next', x: this.LANE_X_POSITIONS[2], texture: 'icon_next' }
-    ];
-
-    options.forEach((opt, i) => {
-        const block = this.blocks.create(opt.x, blockY, 'block_hitbox');
-        block.setOrigin(0.5);
-        block.setDisplaySize(visualBoxSize, visualBoxSize);
-        block.refreshBody();
-        block.setVisible(false);
-        block.setAlpha(0);
-        block.setData('optionId', opt.id);
-        block.setData('canHit', false);
-
-        const container = this.add.container(opt.x, blockY);
-        
-        const bubble = this.add.image(0, 0, 'tile_box');
-        bubble.setDisplaySize(visualBoxSize, visualBoxSize);
-        
-        const icon = this.add.image(0, 0, opt.texture);
-        const iconSize = visualBoxSize * 0.5;
-        icon.setDisplaySize(iconSize, iconSize);
-        icon.setTint(0xdddddd);
-
-        container.add([bubble, icon]);
-        block.setData('visuals', container);
-
-        this.tweens.add({
-            targets: container,
-            y: container.y - 15,
-            duration: 1500,
-            yoyo: true,
-            repeat: -1,
-            ease: 'Sine.easeInOut',
-            delay: i * 200
-        });
-
-        container.setScale(0);
-        this.tweens.add({
-            targets: container,
-            scaleX: 1,
-            scaleY: 1,
-            duration: entranceDuration,
-            ease: 'Back.easeOut',
-            delay: i * 200
-        });
-
-        this.physics.add.overlap(this.player, block, () => {
-            if (this.isInteractionActive && block.getData('canHit') && this.player.body!.velocity.y < 0) {
-                // Add recoil logic to prevent passing through
-                const recoilForce = 400;
-                this.player.setVelocityY(recoilForce);
-                // Correct position
-                if (this.player.body) {
-                   this.player.y = block.y + (block.body.height / 2) + this.player.body.height;
-                }
-
-                this.handleOptionInteraction(opt.id, block, container);
-            }
-        });
-    });
-
-    this.time.delayedCall(1500, () => {
-        this.blocks.getChildren().forEach((block: any) => {
-            block.setData('canHit', true);
-        });
-        this.isInteractionActive = true;
-    });
+  public restartLevel() {
+    this.transitionToTheme(this.currentTheme);
   }
 
-  private handleOptionInteraction(id: string, block: Phaser.Physics.Arcade.Sprite, container: Phaser.GameObjects.Container) {
-    block.setData('canHit', false);
-    block.setActive(false);
-    this.isInteractionActive = false;
-
-    const visuals = block.getData('visuals') as Phaser.GameObjects.Container;
-    
-    block.disableBody(true, false);
-    this.successSound.play();
-    
-    if (visuals) {
-        this.tweens.add({
-            targets: visuals,
-            scaleX: 1.5,
-            scaleY: 1.5,
-            alpha: 0,
-            duration: 200,
-            onComplete: () => {
-                visuals.destroy();
-                this.createBlockExplosion(block.x, block.y);
-            }
-        });
-    } else {
-        this.createBlockExplosion(block.x, block.y);
+  public hasNextTheme(): boolean {
+    if (this.currentThemes.length > 0) {
+      return this.currentThemeIndex < this.currentThemes.length - 1;
     }
-    
-    this.cameras.main.shake(200, 0.01);
 
-    this.time.delayedCall(500, () => {
-        this.cameras.main.fadeOut(500, 0, 0, 0);
-        this.cameras.main.once('camerafadeoutcomplete', async () => {
-            let nextTheme = this.currentTheme;
-            if (id === 'next') {
-                if (this.currentThemes.length > 0) {
-                    const nextIndex = (this.currentThemeIndex + 1) % this.currentThemes.length;
-                    nextTheme = this.currentThemes[nextIndex];
-                } else {
-                    const themeList = this.cache.json.get('themes_list');
-                    const themes = themeList?.themes || [];
-                    const currentIndex = themes.findIndex((t: Theme) => t.id === this.currentTheme);
-                    const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % themes.length : 0;
-                    nextTheme = themes[nextIndex]?.id || this.currentTheme;
-                }
-            }
+    const themeList = this.cache.json.get('themes_list');
+    const themes = themeList?.themes || [];
+    const currentIndex = themes.findIndex((t: Theme) => t.id === this.currentTheme);
+    return currentIndex >= 0 && currentIndex < themes.length - 1;
+  }
 
-            this.scene.start('PreloadScene', { theme: nextTheme });
-        });
-    });
+  public nextLevel(): boolean {
+    if (!this.hasNextTheme()) {
+      return false;
+    }
+
+    let nextTheme = this.currentTheme;
+    if (this.currentThemes.length > 0) {
+      const nextIndex = this.currentThemeIndex + 1;
+      nextTheme = this.currentThemes[nextIndex];
+    } else {
+      const themeList = this.cache.json.get('themes_list');
+      const themes = themeList?.themes || [];
+      const currentIndex = themes.findIndex((t: Theme) => t.id === this.currentTheme);
+      const nextIndex = currentIndex >= 0 ? currentIndex + 1 : 0;
+      nextTheme = themes[nextIndex]?.id || this.currentTheme;
+    }
+    this.transitionToTheme(nextTheme);
+    return true;
+  }
+
+  private transitionToTheme(theme: ThemeId): void {
+    let started = false;
+
+    const startPreloadScene = (): void => {
+      if (started) return;
+      started = true;
+      try {
+        this.scene.start('PreloadScene', { theme });
+      } catch (error) {
+        console.error('[Scene] Failed to start PreloadScene during completion transition:', error);
+      }
+    };
+
+    const fallbackTimer = window.setTimeout(() => {
+      console.warn('[Scene] Fade-out completion event timeout, forcing scene transition.');
+      startPreloadScene();
+    }, 900);
+
+    try {
+      this.cameras.main.once('camerafadeoutcomplete', () => {
+        window.clearTimeout(fallbackTimer);
+        startPreloadScene();
+      });
+      this.cameras.main.fadeOut(500, 0, 0, 0);
+    } catch (error) {
+      window.clearTimeout(fallbackTimer);
+      console.warn('[Scene] Camera fade transition failed, forcing immediate transition:', error);
+      startPreloadScene();
+    }
   }
 
   private createBlockExplosion(x: number, y: number) {
@@ -1493,9 +1869,10 @@ export class MainScene extends Phaser.Scene {
     }
 
     // 无论新建还是更新，都刷新尺寸和偏移 (适配不同分辨率切换)
-    const visualBeeSize = 100 * this.gameScale;
-    const fontSize = Math.round(54 * this.gameScale);
-    const textOffsetY = 75 * this.gameScale; // 稍微增加文字与蜜蜂的垂直距离
+    // 调整：蜜蜂和文字大小调小，适配长句子
+    const visualBeeSize = 80 * this.gameScale;
+    const fontSize = Math.round(36 * this.gameScale);
+    const textOffsetY = 60 * this.gameScale; // 稍微增加文字与蜜蜂的垂直距离
     
     if (this.beeSprite) {
         this.beeSprite.setDisplaySize(visualBeeSize, visualBeeSize);

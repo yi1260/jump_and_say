@@ -18,12 +18,6 @@
     </script>
     <link rel="manifest" href="/manifest.json" />
     
-    <!-- Fonts: 'Fredoka' for that friendly, rounded look -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="preconnect" href="https://fastly.jsdelivr.net" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&display=swap" rel="stylesheet">
-
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -31,8 +25,8 @@
         theme: {
           extend: {
             fontFamily: {
-              sans: ['"Fredoka"', 'sans-serif'],
-              display: ['"Fredoka"', 'sans-serif'],
+              sans: ['"FredokaBoot"', '"ZCOOL KuaiLe"', '"PingFang SC"', '"Hiragino Sans GB"', '"Microsoft YaHei"', '"Noto Sans CJK SC"', 'system-ui', '-apple-system', 'sans-serif'],
+              display: ['"FredokaBoot"', '"ZCOOL KuaiLe"', '"PingFang SC"', '"Hiragino Sans GB"', '"Microsoft YaHei"', '"Noto Sans CJK SC"', 'system-ui', '-apple-system', 'sans-serif'],
             },
             colors: {
               kenney: {
@@ -59,14 +53,54 @@
         }
       }
     </script>
+    <link
+      rel="preload"
+      href="/assets/fonts/Zcool/zcool-kuaile-chinese-simplified-400-normal.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
     <style>
+      @font-face {
+        font-family: 'FredokaBoot';
+        src: url('/assets/fonts/Fredoka/static/Fredoka-Regular.ttf') format('truetype'),
+             url('https://cdn.maskmysheet.com/jump-and-say-themes-pic/assets/fonts/Fredoka/static/Fredoka-Regular.ttf') format('truetype');
+        font-weight: 400;
+        font-style: normal;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: 'FredokaBoot';
+        src: url('/assets/fonts/Fredoka/static/Fredoka-Bold.ttf') format('truetype'),
+             url('https://cdn.maskmysheet.com/jump-and-say-themes-pic/assets/fonts/Fredoka/static/Fredoka-Bold.ttf') format('truetype');
+        font-weight: 700;
+        font-style: normal;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: 'FredokaBoot';
+        src: url('/assets/fonts/Fredoka/static/Fredoka-Bold.ttf') format('truetype'),
+             url('https://cdn.maskmysheet.com/jump-and-say-themes-pic/assets/fonts/Fredoka/static/Fredoka-Bold.ttf') format('truetype');
+        font-weight: 900;
+        font-style: normal;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: 'ZCOOL KuaiLe';
+        src: url('/assets/fonts/Zcool/zcool-kuaile-chinese-simplified-400-normal.woff2') format('woff2'),
+             url('https://cdn.maskmysheet.com/jump-and-say-themes-pic/assets/fonts/Zcool/zcool-kuaile-chinese-simplified-400-normal.woff2') format('woff2');
+        font-weight: 400;
+        font-style: normal;
+        font-display: swap;
+      }
+
       body {
         overscroll-behavior: none;
         user-select: none;
         -webkit-user-select: none;
         background-color: #4c99ff;
         color: #333333;
-        font-family: 'Fredoka', sans-serif;
+        font-family: 'FredokaBoot', 'ZCOOL KuaiLe', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', system-ui, -apple-system, sans-serif;
       }
       
       .kenney-panel {
@@ -155,28 +189,70 @@
         scrollbar-width: none;  /* Firefox */
       }
     </style>
+    <script>
+      (function () {
+        if (!('fonts' in document)) {
+          console.warn('[Font] FontFaceSet API is not available in this browser.');
+          return;
+        }
+
+        var fontSet = document.fonts;
+        var fontSpecs = [
+          '400 24px "FredokaBoot"',
+          '700 24px "FredokaBoot"',
+          '900 24px "FredokaBoot"'
+        ];
+
+        var getMissingSpecs = function () {
+          return fontSpecs.filter(function (spec) {
+            return !fontSet.check(spec);
+          });
+        };
+
+        var checkFredoka = function (source) {
+          var missingSpecs = getMissingSpecs();
+          if (missingSpecs.length > 0) {
+            console.warn('[Font] FredokaBoot not fully loaded (' + source + '). Missing:', missingSpecs);
+          } else {
+            console.info('[Font] FredokaBoot is ready (' + source + ').');
+          }
+        };
+
+        fontSet.addEventListener('loadingerror', function () {
+          console.warn('[Font] Browser reported a font loading error event while loading FredokaBoot.');
+        });
+
+        Promise.race([
+          Promise.allSettled(fontSpecs.map(function (spec) { return fontSet.load(spec); })),
+          new Promise(function (resolve) { setTimeout(resolve, 2500); })
+        ]).then(function () {
+          var firstMissingSpecs = getMissingSpecs();
+          if (firstMissingSpecs.length === 0) {
+            checkFredoka('index-bootstrap');
+            return;
+          }
+
+          Promise.allSettled(firstMissingSpecs.map(function (spec) { return fontSet.load(spec); })).then(function () {
+            checkFredoka('index-bootstrap');
+          });
+        });
+      })();
+    </script>
     
     <!-- MediaPipe Pose Lite (v0.5) - Multi-CDN Fallback -->
     <script>
       (function() {
         'use strict';
-        const EXTERNAL_CDNS = [
+        const CANDIDATE_BASES = [
           'https://fastly.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
-          'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/'
-        ];
-        const OWN_CDNS = [
+          'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/',
           'https://cdn.maskmysheet.com/mediapipe/pose_lite/'
         ];
-        const LOAD_TIMEOUT = 2500;
-        const ATTEMPTS_PER_GROUP = 3;
-        const TOTAL_TIMEOUT = 3 * 60 * 1000;
+        const LOAD_TIMEOUT = 8000;
+        const TOTAL_TIMEOUT = 2 * 60 * 1000;
         let timedOut = false;
         let scriptLoaded = false;
-        let externalCycle = 0;
-        let ownCycle = 0;
-        let externalIndex = 0;
-        let ownIndex = 0;
-        let currentGroup = 'external';
+        let baseCursor = 0;
         let timeoutHandle = null;
         
         function log(msg, type = 'info') {
@@ -201,7 +277,7 @@
           overlay.style.justifyContent = 'center';
           overlay.style.textAlign = 'center';
           overlay.style.zIndex = '9999';
-          overlay.style.fontFamily = 'system-ui, -apple-system, Segoe UI, sans-serif';
+          overlay.style.fontFamily = '"FredokaBoot", "ZCOOL KuaiLe", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, -apple-system, sans-serif';
           overlay.style.fontSize = '18px';
           overlay.style.padding = '24px';
           overlay.textContent = 'AI模型加载失败，请检查网络后重试。';
@@ -242,6 +318,12 @@
 
           script.onload = function() {
             clearTimeout(timeoutId);
+            if (typeof window.Pose !== 'function') {
+              log(`Loaded but Pose global missing from: ${url}`, 'error');
+              script.remove();
+              onError();
+              return;
+            }
             log(`Successfully loaded from: ${url}`, 'success');
             onSuccess(url);
           };
@@ -255,30 +337,9 @@
         }
 
         function nextBase() {
-          if (timedOut || isLoaded()) return null;
-          if (currentGroup === 'external') {
-            const base = EXTERNAL_CDNS[externalIndex];
-            externalIndex += 1;
-            if (externalIndex >= EXTERNAL_CDNS.length) {
-              externalIndex = 0;
-              externalCycle += 1;
-              if (externalCycle >= ATTEMPTS_PER_GROUP) {
-                currentGroup = 'own';
-                externalCycle = 0;
-              }
-            }
-            return base;
-          }
-          const base = OWN_CDNS[ownIndex];
-          ownIndex += 1;
-          if (ownIndex >= OWN_CDNS.length) {
-            ownIndex = 0;
-            ownCycle += 1;
-            if (ownCycle >= ATTEMPTS_PER_GROUP) {
-              currentGroup = 'external';
-              ownCycle = 0;
-            }
-          }
+          if (timedOut) return null;
+          const base = CANDIDATE_BASES[baseCursor];
+          baseCursor = (baseCursor + 1) % CANDIDATE_BASES.length;
           return base;
         }
 
@@ -312,7 +373,7 @@
         timeoutHandle = setTimeout(function() {
           if (isLoaded() || timedOut) return;
           timedOut = true;
-          log('Load timeout after 3 minutes', 'error');
+          log('Load timeout after 2 minutes', 'error');
           showTimeoutMessage();
         }, TOTAL_TIMEOUT);
       })();
@@ -326,7 +387,8 @@
         WARN: 2,
         ERROR: 3
       };
-      const CURRENT_LOG_LEVEL = import.meta?.PROD ? LOG_LEVEL.WARN : LOG_LEVEL.INFO;
+      const isLocalDevHost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+      const CURRENT_LOG_LEVEL = isLocalDevHost ? LOG_LEVEL.INFO : LOG_LEVEL.WARN;
 
       function log(level, tag, message, data) {
         if (level < CURRENT_LOG_LEVEL) return;

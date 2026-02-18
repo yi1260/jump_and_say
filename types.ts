@@ -42,18 +42,25 @@ export type ThemeId = string;
 export interface ThemeQuestion {
   question: string;
   image: string;
+  audio?: string;
 }
 
 export interface Theme {
   id: string;
   name: string;
   icon: string;
+  cover?: string;
+  level?: string;
   questions: ThemeQuestion[];
   isAvailable?: boolean;
 }
 
 export interface ThemeList {
-  themes: Theme[];
+  levels: {
+    [key: string]: {
+      themes: Theme[];
+    };
+  };
 }
 
 export interface GameScore {

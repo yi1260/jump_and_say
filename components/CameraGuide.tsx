@@ -7,7 +7,7 @@ interface CameraGuideProps {
 
 export default function CameraGuide({ isActive, onPositionValid }: CameraGuideProps) {
   const [positionStatus, setPositionStatus] = useState<'checking' | 'good' | 'adjust'>('checking');
-  const [guidanceText, setGuidanceText] = useState('Checking your position...');
+  const [guidanceText, setGuidanceText] = useState('正在检测站位...');
   const [showCheckmark, setShowCheckmark] = useState(false);
 
   useEffect(() => {
@@ -17,18 +17,18 @@ export default function CameraGuide({ isActive, onPositionValid }: CameraGuidePr
       const randomCheck = Math.random();
       if (randomCheck > 0.6) {
         setPositionStatus('good');
-        setGuidanceText('Perfect! Your face is in the right position');
+        setGuidanceText('太棒了！你的位置很标准');
         setShowCheckmark(true);
         onPositionValid?.(true);
       } else {
         setPositionStatus('adjust');
         const messages = [
-          'Move closer to the screen',
-          'Step back a little bit',
-          'Tilt your head up slightly',
-          'Make sure your nose is visible',
-          'Center your face in the box',
-          'Keep your face in the green box'
+          '再靠近屏幕一点',
+          '请稍微后退一点',
+          '头稍微抬高一点',
+          '请确保鼻子在画面里',
+          '把脸放到框的正中间',
+          '请把脸保持在绿色框内'
         ];
         setGuidanceText(messages[Math.floor(Math.random() * messages.length)]);
         setShowCheckmark(false);
@@ -69,7 +69,7 @@ export default function CameraGuide({ isActive, onPositionValid }: CameraGuidePr
               
               <div className="text-center">
                 <div className="text-6xl mb-2">👤</div>
-                <p className="text-sm font-bold opacity-70">Your face here</p>
+                <p className="text-sm font-bold opacity-70">请把脸放在这里</p>
               </div>
             </div>
           </div>
@@ -84,13 +84,13 @@ export default function CameraGuide({ isActive, onPositionValid }: CameraGuidePr
         </p>
         <div className="flex justify-center gap-2 flex-wrap">
           <span className="inline-block px-3 py-1 bg-kenney-light rounded-full text-sm font-bold text-kenney-dark">
-            📱 Keep your phone steady
+            📱 手机保持稳定
           </span>
           <span className="inline-block px-3 py-1 bg-kenney-light rounded-full text-sm font-bold text-kenney-dark">
-            👃 Show your nose
+            👃 鼻子不要挡住
           </span>
           <span className="inline-block px-3 py-1 bg-kenney-light rounded-full text-sm font-bold text-kenney-dark">
-            👀 Look at the screen
+            👀 眼睛看向屏幕
           </span>
         </div>
       </div>

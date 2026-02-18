@@ -2,14 +2,14 @@ export const R2_BASE_URL = 'https://cdn.maskmysheet.com';
 
 // Add a cache buster version to force refresh of cached assets
 // This is especially important when cache-control is set to immutable
-const ASSET_VERSION = 'v=20240206_fix1';
+const ASSET_VERSION = 'v=20260218_fix3';
 
 export const getR2ImageUrl = (imagePath: string): string => {
-  // Theme images are likely in the root or a specific folder, assuming current behavior matches requirements
-  // If theme images are also moved, this might need adjustment. 
-  // Based on user input, only 'assets' and 'mediapipe' were mentioned.
-  // Assuming 'raz_aa' prefix is removed from the bucket structure based on S3 paths provided.
-  const url = `${R2_BASE_URL}/raz_aa/${imagePath}`;
+  // Theme images are located in the raz folder with level structure
+  // imagePath from JSON includes the level (e.g., "AA/ThemeName/image.webp")
+  // The CDN URL requires the level to be uppercase (e.g., "RAZ/AA/...")
+
+  const url = `${R2_BASE_URL}/RAZ/${imagePath}`;
   return `${url}?${ASSET_VERSION}`;
 };
 
@@ -61,7 +61,7 @@ export const getR2ThemesListUrl = (): string => {
 };
 
 export const getR2ThemesListCdnUrl = (): string => {
-  return `${R2_BASE_URL}/raz_aa/themes-list.json?${ASSET_VERSION}`;
+  return `${R2_BASE_URL}/RAZ/themes-list.json?${ASSET_VERSION}`;
 };
 
 export const handleR2Error = (error: unknown, context: string): never => {
