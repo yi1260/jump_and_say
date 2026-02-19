@@ -125,6 +125,10 @@ export class MotionController {
   public onMotionDetected: ((type: 'jump' | 'move') => void) | null = null;
   public poseLandmarks: PoseLandmark[] | null = null;
 
+  public isActuallyRunning(): boolean {
+    return this.isRunning && this.requestRef !== null;
+  }
+
   private initPromise: Promise<void> | null = null;
 
   private currentBodyX: number = 0.5;

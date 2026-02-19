@@ -1883,6 +1883,16 @@ export default function App() {
     };
 
     const attachStreamToVideoElement = async (videoElement: HTMLVideoElement, stream: MediaStream): Promise<void> => {
+      // Clean up previous state before attaching new stream
+      try {
+        videoElement.pause();
+      } catch {
+        // Ignore pause errors
+      }
+      videoElement.srcObject = null;
+      videoElement.removeAttribute('src');
+      videoElement.load();
+
       videoElement.srcObject = stream;
       videoElement.muted = true;
       videoElement.autoplay = true;
@@ -1959,7 +1969,35 @@ export default function App() {
       let activeStream = initialStream;
       for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
         try {
+          // Check if track is muted and wait for unmute
+          const videoTracks = activeStream.getVideoTracks();
+          const hasMutedTrack = videoTracks.some((track) => track.muted);
+          if (hasMutedTrack && attempt < maxRetries) {
+            console.warn('[Camera] Track is muted, waiting for unmute...', { attempt: attempt + 1 });
+            await new Promise<void>((resolve) => {
+              const timeoutId = setTimeout(resolve, 1500);
+              const checkUnmute = () => {
+                const stillMuted = activeStream.getVideoTracks().some((track) => track.muted);
+                if (!stillMuted) {
+                  clearTimeout(timeoutId);
+                  resolve();
+                }
+              };
+              videoTracks.forEach((track) => {
+                track.addEventListener('unmute', checkUnmute, { once: true });
+              });
+            });
+          }
+
           await attachStreamToVideoElement(videoElement, activeStream);
+
+          // Verify the stream is actually rendering
+          const finalTracks = activeStream.getVideoTracks();
+          const stillMuted = finalTracks.some((track) => track.muted);
+          if (stillMuted && attempt < maxRetries) {
+            throw new Error('VIDEO_STREAM_NOT_RENDERING');
+          }
+
           return activeStream;
         } catch (error) {
           const isRenderError = error instanceof Error && error.message === 'VIDEO_STREAM_NOT_RENDERING';
@@ -1968,12 +2006,27 @@ export default function App() {
           }
           console.warn('[Camera] Stream not renderable, retrying with fresh stream...', {
             attempt: attempt + 1,
-            maxRetries
+            maxRetries,
+            trackStates: activeStream.getVideoTracks().map((t) => ({
+              readyState: t.readyState,
+              muted: t.muted,
+              enabled: t.enabled
+            }))
           });
+
+          // Thorough cleanup
           activeStream.getTracks().forEach((track) => track.stop());
-          videoElement.pause();
+          try {
+            videoElement.pause();
+          } catch {
+            // Ignore
+          }
           videoElement.srcObject = null;
-          await waitMs(250);
+          videoElement.removeAttribute('src');
+          videoElement.load();
+
+          // Longer wait before retry to let browser fully release resources
+          await waitMs(500);
           activeStream = await requestCameraStream(profiles);
           streamRef.current = activeStream;
         }
@@ -2001,6 +2054,34 @@ export default function App() {
     const simulatedPrefix = '[模拟] ';
     const inIframeContext = isInIframe();
     const inAppBrowserContext = isLikelyInAppBrowser();
+
+    // Thorough cleanup before any camera initialization attempt
+    // This ensures we start from a clean state, especially important after errors
+    const cleanupBeforeInit = () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+      if (videoRef.current) {
+        try {
+          videoRef.current.pause();
+        } catch {
+          // Ignore
+        }
+        videoRef.current.srcObject = null;
+        videoRef.current.removeAttribute('src');
+        videoRef.current.load();
+      }
+      motionController.stop();
+      if (poseLoopRef.current !== null) {
+        cancelAnimationFrame(poseLoopRef.current);
+        poseLoopRef.current = null;
+      }
+    };
+
+    // Always cleanup first - this fixes the "retry doesn't work" issue
+    cleanupBeforeInit();
+
     if (simulatedFailure === 'camera_api_missing') {
       const message = simulatedPrefix + buildCameraGuidance('api-missing', inIframeContext, inAppBrowserContext);
       setLoadingStatus('当前浏览器不支持摄像头。');
@@ -2229,8 +2310,25 @@ export default function App() {
       }
 
       if (err instanceof Error && err.message === 'VIDEO_STREAM_NOT_RENDERING') {
+        // Clean up the invalid stream completely
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+        }
+        if (videoRef.current) {
+          try {
+            videoRef.current.pause();
+          } catch {
+            // Ignore
+          }
+          videoRef.current.srcObject = null;
+          videoRef.current.removeAttribute('src');
+          videoRef.current.load();
+        }
+        motionController.stop();
+
         setLoadingStatus('摄像头画面不可用。');
-        setCameraIssueMessage('摄像头权限已允许，但画面未正常渲染。\n请点击“重试”，并确认没有其他应用占用摄像头。');
+        setCameraIssueMessage('摄像头权限已允许，但画面未正常渲染。\n请点击"重试"，并确认没有其他应用占用摄像头。');
         return false;
       }
 
@@ -2406,8 +2504,8 @@ export default function App() {
           (track) => track.readyState === 'live' && track.enabled && !track.muted
         );
 
-        if (!hasLiveTrack || !hasUnmutedLiveTrack) {
-          console.warn('[Lifecycle] Foreground resume detected stale camera track, reinitializing.', {
+        if (!hasLiveTrack) {
+          console.warn('[Lifecycle] Foreground resume detected no live track, reinitializing.', {
             reason,
             tracks: videoTracks.map((track) => ({
               readyState: track.readyState,
@@ -2417,6 +2515,39 @@ export default function App() {
           });
           await initializeCameraRef.current();
           return;
+        }
+
+        // If track is muted, wait for unmute before proceeding
+        if (!hasUnmutedLiveTrack) {
+          console.warn('[Lifecycle] Foreground resume detected muted track, waiting for unmute...', {
+            reason,
+            tracks: videoTracks.map((track) => ({
+              readyState: track.readyState,
+              enabled: track.enabled,
+              muted: track.muted
+            }))
+          });
+
+          const unmuteResult = await new Promise<boolean>((resolve) => {
+            const timeoutId = setTimeout(() => resolve(false), 2000);
+            const checkUnmute = () => {
+              const currentTracks = stream.getVideoTracks();
+              const hasUnmuted = currentTracks.some((t) => t.readyState === 'live' && t.enabled && !t.muted);
+              if (hasUnmuted) {
+                clearTimeout(timeoutId);
+                resolve(true);
+              }
+            };
+            videoTracks.forEach((track) => {
+              track.addEventListener('unmute', checkUnmute, { once: true });
+            });
+          });
+
+          if (!unmuteResult) {
+            console.warn('[Lifecycle] Track still muted after waiting, reinitializing camera.');
+            await initializeCameraRef.current();
+            return;
+          }
         }
 
         if (videoElement.srcObject !== stream) {
@@ -2431,7 +2562,10 @@ export default function App() {
           }
         }
 
-        if (!motionController.isStarted) {
+        if (!motionController.isStarted || !motionController.isActuallyRunning()) {
+          if (motionController.isStarted) {
+            motionController.stop();
+          }
           await motionController.start(videoElement);
         }
 
@@ -2489,6 +2623,14 @@ export default function App() {
       window.removeEventListener('focus', handleFocus);
     };
   }, [setPoseDetectedState]);
+
+  useEffect(() => {
+    const handleAppInstalled = () => {
+      console.log('[PWA] App installed, visibility state:', document.visibilityState);
+    };
+    window.addEventListener('appinstalled', handleAppInstalled);
+    return () => window.removeEventListener('appinstalled', handleAppInstalled);
+  }, []);
 
   const handleStartGame = async () => {
     if (selectedThemes.length === 0) return;
