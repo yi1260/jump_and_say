@@ -650,14 +650,37 @@ export default function App() {
       }
     };
     
+    // Handle page visibility change (browser minimized/tab hidden)
+    const handleVisibilityChange = () => {
+      if (!bgmAudio) return;
+      
+      if (document.hidden) {
+        // Page is hidden (browser minimized or tab switched)
+        if (!bgmAudio.paused) {
+          bgmAudio.pause();
+          console.log('[BGM] Paused due to page visibility change');
+        }
+      } else {
+        // Page is visible again
+        if (isBgmEnabledRef.current && bgmAudio.paused) {
+          bgmAudio.play().then(() => {
+            isBgmPlayingRef.current = true;
+            console.log('[BGM] Resumed after page visibility change');
+          }).catch(() => {});
+        }
+      }
+    };
+    
     document.addEventListener('click', handleInteraction, true);
     document.addEventListener('touchstart', handleInteraction, true);
     document.addEventListener('keydown', handleInteraction, true);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     
     return () => {
       document.removeEventListener('click', handleInteraction, true);
       document.removeEventListener('touchstart', handleInteraction, true);
       document.removeEventListener('keydown', handleInteraction, true);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (bgmAudio) {
         bgmAudio.pause();
         bgmAudio.src = '';
@@ -678,9 +701,11 @@ export default function App() {
     const fredokaRegularCdnUrl = getR2AssetUrl('assets/fonts/Fredoka/static/Fredoka-Regular.ttf');
     const fredokaBoldLocalUrl = '/assets/fonts/Fredoka/static/Fredoka-Bold.ttf';
     const fredokaBoldCdnUrl = getR2AssetUrl('assets/fonts/Fredoka/static/Fredoka-Bold.ttf');
+    const zcoolUiSubsetLocalUrl = '/assets/fonts/Zcool/zcool-kuaile-ui-subset.woff2';
+    const zcoolUiSubsetCdnUrl = getR2AssetUrl('assets/fonts/Zcool/zcool-kuaile-ui-subset.woff2');
     const zcoolLocalUrl = '/assets/fonts/Zcool/zcool-kuaile-chinese-simplified-400-normal.woff2';
     const zcoolCdnUrl = getR2AssetUrl('assets/fonts/Zcool/zcool-kuaile-chinese-simplified-400-normal.woff2');
-    const uiFontStack = `'FredokaBoot', 'FredokaLatin', 'Fredoka', 'ZCOOL KuaiLe', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', system-ui, -apple-system, sans-serif`;
+    const uiFontStack = `'FredokaBoot', 'FredokaLatin', 'Fredoka', 'ZCOOL KuaiLe UI', 'ZCOOL KuaiLe', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', system-ui, -apple-system, sans-serif`;
     const fontSet: FontFaceSet | null = 'fonts' in document ? document.fonts : null;
 
     const monitorFredokaFontLoad = async (): Promise<void> => {
@@ -693,7 +718,7 @@ export default function App() {
         '400 24px "FredokaBoot"',
         '700 24px "FredokaBoot"',
         '900 24px "FredokaBoot"',
-        '400 24px "ZCOOL KuaiLe"'
+        '400 24px "ZCOOL KuaiLe UI"'
       ];
 
       await Promise.race([
@@ -746,6 +771,14 @@ export default function App() {
         font-family: 'FredokaBoot';
         src: url('${fredokaBoldCdnUrl}') format('truetype'), url('${fredokaBoldLocalUrl}') format('truetype');
         font-weight: 900;
+        font-style: normal;
+        font-display: swap;
+      }
+
+      @font-face {
+        font-family: 'ZCOOL KuaiLe UI';
+        src: url('${zcoolUiSubsetCdnUrl}') format('woff2'), url('${zcoolUiSubsetLocalUrl}') format('woff2');
+        font-weight: 400;
         font-style: normal;
         font-display: swap;
       }
