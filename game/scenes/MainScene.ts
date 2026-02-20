@@ -117,6 +117,7 @@ export class MainScene extends Phaser.Scene {
   private currentThemeUsesPortraitFrames: boolean = true;
   private pronunciationSound: Phaser.Sound.BaseSound | null = null;
   private readonly isIPadDevice: boolean = /iPad|Macintosh/i.test(navigator.userAgent) && 'ontouchend' in document;
+  private readonly isMobileDevice: boolean = /iPhone|Android|Mobile|iPad|Tablet|HarmonyOS/i.test(navigator.userAgent) || this.isIPadDevice;
   private resizeStabilizeTimers: Phaser.Time.TimerEvent[] = [];
 
   private readonly CARD_ORIENTATION_THRESHOLD = 1.0;
@@ -129,6 +130,8 @@ export class MainScene extends Phaser.Scene {
   private readonly SUCCESS_SFX_VOLUME = 0.2;
   private readonly FAILURE_SFX_VOLUME = 0.14;
   private readonly PRONUNCIATION_VOLUME = 1.0;
+  private readonly PLAYER_MAX_LEAN_ANGLE = 14;
+  private readonly PLAYER_LEAN_LERP = 0.35;
 
   declare add: Phaser.GameObjects.GameObjectFactory;
   declare make: Phaser.GameObjects.GameObjectCreator;
@@ -140,6 +143,15 @@ export class MainScene extends Phaser.Scene {
 
   constructor() {
     super({ key: 'MainScene' });
+  }
+
+  private isCompressedLandscapeViewport(width: number, height: number): boolean {
+    const viewportAspect = height / Math.max(width, 1);
+    return width > height && viewportAspect < 0.72;
+  }
+
+  private getBeeTextOffsetY(width: number, height: number): number {
+    return this.isCompressedLandscapeViewport(width, height) ? 48 * this.gameScale : 60 * this.gameScale;
   }
 
   private clearResizeStabilizers(): void {
@@ -455,12 +467,24 @@ export class MainScene extends Phaser.Scene {
     return layouts.reduce((maxHeight, layout) => Math.max(maxHeight, layout.cardHeight), 0);
   }
 
+  private getRenderDpr(): number {
+    const raw = this.registry.get('renderDpr');
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      return Math.max(1, raw);
+    }
+    return 1;
+  }
+
+  private getScaledPhysicsValue(baseValue: number): number {
+    return baseValue * this.getRenderDpr();
+  }
+
   private updateJumpVelocityByCardHeight(cardHeight: number): void {
     this.blockHeight = cardHeight;
     this.blockBottomY = this.blockHeight / 2;
     const distanceToBlock = this.floorSurfaceY - this.blockCenterY;
     const requiredJumpHeight = distanceToBlock + this.blockBottomY + Math.abs(this.playerHeadY) + this.JUMP_OVERSHOOT;
-    this.jumpVelocity = Math.sqrt(2 * this.GRAVITY_Y * requiredJumpHeight);
+    this.jumpVelocity = Math.sqrt(2 * this.getScaledPhysicsValue(this.GRAVITY_Y) * requiredJumpHeight);
   }
 
   private applyBlockVisualLayout(
@@ -482,6 +506,13 @@ export class MainScene extends Phaser.Scene {
     block.refreshBody();
 
     if (!visuals) return;
+    // Resize/fullscreen transitions can leave legacy float tweens with stale Y bounds.
+    // Clear them before re-positioning so cards snap to the latest layout immediately.
+    // Also force visual state to a stable final value in case entrance tween is interrupted.
+    this.tweens.killTweensOf(visuals);
+    visuals.setVisible(true);
+    visuals.setAlpha(1);
+    visuals.setScale(1, 1);
     visuals.x = snappedX;
     visuals.y = snappedY;
 
@@ -523,10 +554,14 @@ export class MainScene extends Phaser.Scene {
    */ 
   private recalcLayout(width: number, height: number) { 
     this.gameScale = height / 1080;
-    this.dpr = window.devicePixelRatio || 1;
+    this.dpr = this.registry.get('dpr') || this.dpr || 1;
     this.JUMP_OVERSHOOT = 60 * this.gameScale; 
 
-    const bottomMargin = Math.max(height * 0.15, 80);
+    const isCompressedLandscape = this.isCompressedLandscapeViewport(width, height);
+    const bottomMarginRatio = isCompressedLandscape ? 0.055 : (this.isMobileDevice ? 0.07 : 0.09);
+    const minBottomMargin = this.isMobileDevice ? 18 : 36;
+    const maxBottomMargin = this.isMobileDevice ? 140 : 200;
+    const bottomMargin = Phaser.Math.Clamp(height * bottomMarginRatio, minBottomMargin, maxBottomMargin);
     this.floorSurfaceY = height - bottomMargin; 
     this.floorHeight = bottomMargin;
 
@@ -541,20 +576,25 @@ export class MainScene extends Phaser.Scene {
     this.playerHeadY = -this.playerHeight;
     this.blockBottomY = this.blockHeight / 2;
 
-    const minTopMargin = 60 * this.gameScale;
-    const minBeeBlockGap = 420 * this.gameScale;
+    const minTopMargin = 56 * this.gameScale;
+    const minBeeBlockGap = (isCompressedLandscape ? 450 : 420) * this.gameScale;
+    const beeLiftOffset = (isCompressedLandscape ? 34 : 0) * this.gameScale;
 
-    const jumpRatio = height < 600 ? 0.32 : 0.40; 
-    const idealJumpHeight = Phaser.Math.Clamp(height * jumpRatio, 200 * this.gameScale, 480 * this.gameScale); 
-    
-    this.blockCenterY = this.floorSurfaceY - idealJumpHeight;
+    const jumpRatio = height < 600 ? 0.35 : 0.43; 
+    const idealJumpHeight = Phaser.Math.Clamp(height * jumpRatio, 220 * this.gameScale, 520 * this.gameScale);
+    const playerTopY = this.floorSurfaceY - this.playerHeight;
+    const desiredPlayerCardGap = Phaser.Math.Clamp(
+      height * (isCompressedLandscape ? 0.08 : 0.095),
+      40 * this.gameScale,
+      120 * this.gameScale
+    );
+    const minBlockCenterByBee = minTopMargin + minBeeBlockGap + beeLiftOffset;
+    const maxBlockCenterByPlayerGap = playerTopY - desiredPlayerCardGap - this.blockHeight / 2;
+    const blockCenterUpperBound = Math.max(maxBlockCenterByPlayerGap, minBlockCenterByBee);
+    const baseBlockCenterY = this.floorSurfaceY - idealJumpHeight;
 
-    this.beeCenterY = this.blockCenterY - minBeeBlockGap;
-    
-    if (this.beeCenterY < minTopMargin) {
-        this.beeCenterY = minTopMargin;
-        this.blockCenterY = this.beeCenterY + minBeeBlockGap;
-    }
+    this.blockCenterY = Phaser.Math.Clamp(baseBlockCenterY, minBlockCenterByBee, blockCenterUpperBound);
+    this.beeCenterY = this.blockCenterY - minBeeBlockGap - beeLiftOffset;
 
     this.updateJumpVelocityByCardHeight(this.blockHeight);
   }
@@ -857,14 +897,15 @@ export class MainScene extends Phaser.Scene {
         this.textures.get(key).setFilter(Phaser.Textures.FilterMode.LINEAR);
     });
 
-    // iPad 上禁用 FXAA，避免图片边缘在白色背景处出现闪烁和发虚
-    if (!this.isIPadDevice && this.renderer instanceof Phaser.Renderer.WebGL.WebGLRenderer) {
+    // 移动端禁用 FXAA，避免整体画面（尤其文字/图片）出现发糊；桌面端保留。
+    if (!this.isMobileDevice && this.renderer instanceof Phaser.Renderer.WebGL.WebGLRenderer) {
         // @ts-ignore - FXAAPipeline is available in Phaser 3.80+ but might be missing in types
         this.cameras.main.setPostPipeline(Phaser.Renderer.WebGL.Pipelines.FXAAPipeline);
     }
 
     const { width, height } = this.scale;
     this.recalcLayout(width, height);
+    this.cameras.main.roundPixels = this.isMobileDevice;
 
     // 初始化音效 (增加安全检查，防止加载失败导致后续代码崩溃)
     try {
@@ -916,7 +957,7 @@ export class MainScene extends Phaser.Scene {
     this.player.setOrigin(0.5, 1.0);
     this.player.setDepth(20);
     this.player.setCollideWorldBounds(true);
-    this.player.setGravityY(this.GRAVITY_Y);
+    this.player.setGravityY(this.getScaledPhysicsValue(this.GRAVITY_Y));
     
     const bodyWidth = visualPlayerSize * 0.6;
     const bodyHeight = visualPlayerSize * 0.8;
@@ -1054,6 +1095,7 @@ export class MainScene extends Phaser.Scene {
           const bodyHeight = visualPlayerSize * 0.8;
           this.player.body?.setSize(bodyWidth, bodyHeight);
           this.player.body?.setOffset((visualPlayerSize - bodyWidth) / 2, visualPlayerSize - bodyHeight);
+          this.player.setGravityY(this.getScaledPhysicsValue(this.GRAVITY_Y));
 
           if (this.player.body && (this.player.body.touching.down || this.player.y > this.floorSurfaceY)) { 
               this.player.y = this.floorSurfaceY; 
@@ -1115,8 +1157,8 @@ export class MainScene extends Phaser.Scene {
           
           // 调整：保持与 updateBeeWord 一致的尺寸
           const visualBeeSize = 80 * this.gameScale;
-          const fontSize = Math.round(36 * this.gameScale);
-          const textOffsetY = 60 * this.gameScale;
+    const fontSize = Math.round(38 * this.gameScale);
+          const textOffsetY = this.getBeeTextOffsetY(width, height);
           
           if (this.beeSprite) {
               this.beeSprite.setDisplaySize(visualBeeSize, visualBeeSize);
@@ -1220,7 +1262,13 @@ export class MainScene extends Phaser.Scene {
 
     const targetXForAngle = this.LANE_X_POSITIONS[this.targetLaneIndex];
     const diff = targetXForAngle - this.player.x;
-    this.player.setAngle(diff * 0.15);
+    const laneSpacing = this.LANE_X_POSITIONS.length > 1
+      ? Math.abs(this.LANE_X_POSITIONS[1] - this.LANE_X_POSITIONS[0])
+      : Math.max(this.scale.width * 0.3, 1);
+    const normalizedDiff = Phaser.Math.Clamp(diff / Math.max(laneSpacing, 1), -1, 1);
+    const targetLeanAngle = normalizedDiff * this.PLAYER_MAX_LEAN_ANGLE;
+    const nextLeanAngle = Phaser.Math.Linear(this.player.angle, targetLeanAngle, this.PLAYER_LEAN_LERP);
+    this.player.setAngle(nextLeanAngle);
 
     // 控制器备份 (键盘支持)
     const cursors = this.input.keyboard?.createCursorKeys();
@@ -1468,8 +1516,8 @@ export class MainScene extends Phaser.Scene {
         block.setData('answerInnerFrame', innerFrame);
         block.setData('answerIcon', icon);
 
-        // iPad 上禁用答案卡片浮动，避免图片边缘在白色背景上持续闪烁
-        if (!this.isIPadDevice) {
+        // 移动端禁用答案卡片浮动，避免 resize/fullscreen 过渡时出现旧坐标残留导致错位
+        if (!this.isMobileDevice) {
             this.tweens.add({
                 targets: container,
                 y: Math.round(container.y - 15),
@@ -1503,7 +1551,7 @@ export class MainScene extends Phaser.Scene {
   hitBlock(player: any, block: any) {
     if (!block.active || !this.isInteractionActive) return;
     
-    if (player.body.velocity.y > 500) return;
+    if (player.body.velocity.y > this.getScaledPhysicsValue(500)) return;
 
     const playerBodyTopY = player.y - player.body.height;
     const blockBottomY = block.y + (block.body.height / 2);
@@ -1512,10 +1560,13 @@ export class MainScene extends Phaser.Scene {
 
     this.isInteractionActive = false;
     
-    const recoilForce = 400;
+    const recoilForce = this.getScaledPhysicsValue(400);
     player.setVelocityY(recoilForce);
     
-    player.y = block.y + (block.body.height / 2) + player.body.height; 
+    const pushDownPadding = Math.max(2, 6 * this.gameScale);
+    const safePlayerY = blockBottomY + player.displayHeight + pushDownPadding;
+    player.y = Math.min(safePlayerY, this.floorSurfaceY);
+    player.setAngle(0);
     
     const idx = block.getData('answerIndex');
     const visuals = block.getData('visuals') as Phaser.GameObjects.Container;
@@ -1683,10 +1734,10 @@ export class MainScene extends Phaser.Scene {
             });
         }
 
-        player.setGravityY(this.GRAVITY_Y * 2);
+        player.setGravityY(this.getScaledPhysicsValue(this.GRAVITY_Y * 2));
         
         this.time.delayedCall(1200, () => {
-            player.setGravityY(this.GRAVITY_Y);
+            player.setGravityY(this.getScaledPhysicsValue(this.GRAVITY_Y));
             this.isInteractionActive = true;
         });
     }
@@ -1867,8 +1918,8 @@ export class MainScene extends Phaser.Scene {
     // 无论新建还是更新，都刷新尺寸和偏移 (适配不同分辨率切换)
     // 调整：蜜蜂和文字大小调小，适配长句子
     const visualBeeSize = 80 * this.gameScale;
-    const fontSize = Math.round(36 * this.gameScale);
-    const textOffsetY = 60 * this.gameScale; // 稍微增加文字与蜜蜂的垂直距离
+    const fontSize = Math.round(40 * this.gameScale);
+    const textOffsetY = this.getBeeTextOffsetY(this.scale.width, this.scale.height); // 非全屏横屏时减小文字下偏移，避免贴近卡片
     
     if (this.beeSprite) {
         this.beeSprite.setDisplaySize(visualBeeSize, visualBeeSize);

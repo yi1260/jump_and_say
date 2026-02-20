@@ -65,11 +65,11 @@ export const getR2ThemesListCdnUrl = (): string => {
 };
 
 export const getThemesListPrimaryUrl = (): string => {
-  return getR2ThemesListCdnUrl();
+  return getR2ThemesListUrl();
 };
 
 export const getThemesListFallbackUrl = (): string => {
-  return getR2ThemesListUrl();
+  return getR2ThemesListCdnUrl();
 };
 
 export const handleR2Error = (error: unknown, context: string): never => {

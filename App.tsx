@@ -3,11 +3,12 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BugReportButton } from './components/BugReportButton';
 import CompletionOverlay from './components/CompletionOverlay';
 import GameBackground from './components/GameBackground';
-import { GameCanvas } from './components/GameCanvas';
+import { GameCanvas, type QualityMode } from './components/GameCanvas';
 import { LoadingScreen } from './components/LoadingScreen';
 import { MainScene } from './game/scenes/MainScene';
 import { isCoverFailed, isCoverPreloaded, loadThemes, markCoverFailed, markCoverPreloaded, pauseBackgroundPreloading, preloadCoverImages, startBackgroundPreloading } from './gameConfig';
 import { preloadAllGameAssets } from './services/assetLoader';
+import { CameraSessionManager, isCameraPipelineError } from './services/cameraSessionManager';
 import { loggerService } from './services/logger';
 import { motionController } from './services/motionController';
 import { getLocalAssetUrl, getR2AssetUrl, getR2ImageUrl } from './src/config/r2Config';
@@ -32,18 +33,31 @@ export enum GamePhase {
 
 type FullscreenCapableElement = HTMLElement & {
   webkitRequestFullscreen?: () => Promise<void> | void;
+  webkitRequestFullScreen?: () => Promise<void> | void;
   mozRequestFullScreen?: () => Promise<void> | void;
   msRequestFullscreen?: () => Promise<void> | void;
 };
 
 type FullscreenCapableDocument = Document & {
+  fullscreenEnabled?: boolean;
   webkitFullscreenElement?: Element | null;
+  webkitCurrentFullScreenElement?: Element | null;
+  webkitFullscreenEnabled?: boolean;
+  webkitIsFullScreen?: boolean;
   mozFullScreenElement?: Element | null;
   msFullscreenElement?: Element | null;
   webkitExitFullscreen?: () => Promise<void> | void;
+  webkitCancelFullScreen?: () => Promise<void> | void;
   mozCancelFullScreen?: () => Promise<void> | void;
   msExitFullscreen?: () => Promise<void> | void;
 };
+
+const QUALITY_MODE_OPTIONS: Array<{ value: QualityMode; label: string }> = [
+  { value: 'high', label: '最高' },
+  { value: 'medium', label: '中等' },
+  { value: 'low', label: '最低' },
+  { value: 'adaptive', label: '自适应' }
+];
 
 const ThemeCardImage = ({ src, alt, index }: { src: string; alt: string; index: number }) => {
     const [loaded, setLoaded] = useState<boolean>(() => isCoverPreloaded(src));
@@ -152,6 +166,8 @@ export default function App() {
   const [bgIndex, setBgIndex] = useState(0);
   const [themes, setThemes] = useState<Theme[]>([]);
   const [selectedLevel, setSelectedLevel] = useState<string>('AA');
+  const [qualityMode, setQualityMode] = useState<QualityMode>('adaptive');
+  const [isQualityPickerOpen, setIsQualityPickerOpen] = useState<boolean>(false);
 
   const levels = React.useMemo(() => {
     const allLevels = Array.from(new Set(themes.map(t => t.level).filter(Boolean))) as string[];
@@ -171,6 +187,9 @@ export default function App() {
       if (levels.length === 0) return themes;
       return themes.filter(t => t.level === selectedLevel);
   }, [themes, selectedLevel, levels]);
+  const activeQualityLabel = React.useMemo(() => (
+    QUALITY_MODE_OPTIONS.find((option) => option.value === qualityMode)?.label ?? '自适应'
+  ), [qualityMode]);
 
   useEffect(() => {
     if (levels.length > 0 && !levels.includes(selectedLevel)) {
@@ -184,6 +203,7 @@ export default function App() {
   const [themeImagesLoaded, setThemeImagesLoaded] = useState(false);
   const [hasShownEmoji, setHasShownEmoji] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isFullscreenApiSupported, setIsFullscreenApiSupported] = useState(true);
   const bgmRef = useRef<HTMLAudioElement>(null);
   const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
   const isBgmEnabledRef = useRef<boolean>(isBgmEnabled);
@@ -191,15 +211,41 @@ export default function App() {
   const poseCanvasRef = useRef<HTMLCanvasElement>(null);
   const poseLoopRef = useRef<number | null>(null);
   const appRootRef = useRef<HTMLDivElement>(null);
+  const qualityPickerRef = useRef<HTMLDivElement>(null);
   const scorePanelRef = useRef<HTMLDivElement>(null);
   const fullscreenActionInFlightRef = useRef(false);
   const lastFullscreenAttemptAtRef = useRef(0);
   const lastFullscreenTouchAtRef = useRef(0);
+  const hasLoggedFullscreenUnsupportedRef = useRef(false);
   const loadingRequestIdRef = useRef(0);
   const completionCycleRef = useRef(0);
   const completionAutoAdvanceHandledCycleRef = useRef<number | null>(null);
   const restCountdownTimerRef = useRef<number | null>(null);
   const isCompletionTransitioningRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (phase !== GamePhase.MENU) {
+      setIsQualityPickerOpen(false);
+    }
+  }, [phase]);
+
+  useEffect(() => {
+    if (!isQualityPickerOpen) return;
+
+    const handlePointerDown = (event: PointerEvent): void => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (!qualityPickerRef.current) return;
+      if (!qualityPickerRef.current.contains(target)) {
+        setIsQualityPickerOpen(false);
+      }
+    };
+
+    window.addEventListener('pointerdown', handlePointerDown);
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+    };
+  }, [isQualityPickerOpen]);
   
   // Loading State
   const [loadingProgress, setLoadingProgress] = useState(0);
@@ -337,9 +383,13 @@ export default function App() {
 
   const getFullscreenElement = useCallback((): Element | null => {
     const fullscreenDoc = document as FullscreenCapableDocument;
+    if (fullscreenDoc.webkitIsFullScreen) {
+      return document.documentElement;
+    }
     return (
       document.fullscreenElement ??
       fullscreenDoc.webkitFullscreenElement ??
+      fullscreenDoc.webkitCurrentFullScreenElement ??
       fullscreenDoc.mozFullScreenElement ??
       fullscreenDoc.msFullscreenElement ??
       null
@@ -350,12 +400,55 @@ export default function App() {
     setIsFullscreen(Boolean(getFullscreenElement()));
   }, [getFullscreenElement]);
 
+  const getFullscreenRequestTargets = useCallback((): Array<{ element: FullscreenCapableElement; label: 'app-root' | 'document-element' }> => {
+    const targets: Array<{ element: FullscreenCapableElement; label: 'app-root' | 'document-element' }> = [];
+    if (appRootRef.current) {
+      targets.push({ element: appRootRef.current, label: 'app-root' });
+    }
+    const documentElement = document.documentElement as FullscreenCapableElement;
+    if (!appRootRef.current || appRootRef.current !== documentElement) {
+      targets.push({ element: documentElement, label: 'document-element' });
+    }
+    return targets;
+  }, []);
+
+  const hasFullscreenApi = useCallback((): boolean => {
+    const fullscreenDoc = document as FullscreenCapableDocument;
+    const hasRequestMethod = getFullscreenRequestTargets().some(({ element }) => (
+      Boolean(
+        element.requestFullscreen ||
+        element.webkitRequestFullscreen ||
+        element.webkitRequestFullScreen ||
+        element.mozRequestFullScreen ||
+        element.msRequestFullscreen
+      )
+    ));
+    const hasExitMethod = Boolean(
+      document.exitFullscreen ||
+      fullscreenDoc.webkitExitFullscreen ||
+      fullscreenDoc.webkitCancelFullScreen ||
+      fullscreenDoc.mozCancelFullScreen ||
+      fullscreenDoc.msExitFullscreen
+    );
+    return hasRequestMethod || hasExitMethod;
+  }, [getFullscreenRequestTargets]);
+
   const requestFullscreenSafely = useCallback(async (source: 'auto' | 'manual'): Promise<boolean> => {
     const now = Date.now();
     if (fullscreenActionInFlightRef.current) return false;
     if (source === 'auto' && now - lastFullscreenAttemptAtRef.current < 350) return false;
 
     lastFullscreenAttemptAtRef.current = now;
+
+    const fullscreenApiSupported = hasFullscreenApi();
+    setIsFullscreenApiSupported(fullscreenApiSupported);
+    if (!fullscreenApiSupported) {
+      if (!hasLoggedFullscreenUnsupportedRef.current) {
+        console.warn('[Fullscreen] API unavailable on this browser/environment.');
+        hasLoggedFullscreenUnsupportedRef.current = true;
+      }
+      return false;
+    }
 
     if (getFullscreenElement()) {
       setIsFullscreen(true);
@@ -368,21 +461,38 @@ export default function App() {
 
     fullscreenActionInFlightRef.current = true;
     try {
-      const element = document.documentElement as FullscreenCapableElement;
-      const requestMethod = 
-        element.requestFullscreen ||
-        element.webkitRequestFullscreen ||
-        element.mozRequestFullScreen ||
-        element.msRequestFullscreen;
+      const targets = getFullscreenRequestTargets();
+      let lastError: unknown = null;
+      for (const { element, label } of targets) {
+        const requestMethod =
+          element.requestFullscreen ||
+          element.webkitRequestFullscreen ||
+          element.webkitRequestFullScreen ||
+          element.mozRequestFullScreen ||
+          element.msRequestFullscreen;
 
-      if (requestMethod) {
-        await requestMethod.call(element);
-        // Small wait to allow state update
-        await waitMs(100);
-        if (getFullscreenElement()) {
-          setIsFullscreen(true);
-          return true;
+        if (!requestMethod) {
+          continue;
         }
+
+        try {
+          const maybePromise = requestMethod.call(element);
+          if (isPromiseLike(maybePromise)) {
+            await awaitWithTimeout(maybePromise, 1600);
+          }
+          await waitMs(120);
+          if (getFullscreenElement()) {
+            setIsFullscreen(true);
+            return true;
+          }
+        } catch (error) {
+          lastError = error;
+          console.warn(`[Fullscreen] request failed on ${label}:`, error);
+        }
+      }
+
+      if (lastError) {
+        console.warn('[Fullscreen] all request attempts failed.');
       }
       return false;
     } catch (error) {
@@ -392,7 +502,7 @@ export default function App() {
       fullscreenActionInFlightRef.current = false;
       syncFullscreenState();
     }
-  }, [getFullscreenElement, syncFullscreenState]);
+  }, [getFullscreenElement, getFullscreenRequestTargets, hasFullscreenApi, syncFullscreenState]);
 
   const exitFullscreenSafely = useCallback(async (source: 'manual' | 'leave_game'): Promise<boolean> => {
     if (fullscreenActionInFlightRef.current) return false;
@@ -404,15 +514,25 @@ export default function App() {
     fullscreenActionInFlightRef.current = true;
     try {
       const fullscreenDoc = document as FullscreenCapableDocument;
-      const exitMethod = 
+      const exitMethod =
         document.exitFullscreen ||
         fullscreenDoc.webkitExitFullscreen ||
+        fullscreenDoc.webkitCancelFullScreen ||
         fullscreenDoc.mozCancelFullScreen ||
         fullscreenDoc.msExitFullscreen;
 
       if (exitMethod) {
-        await exitMethod.call(document);
-        await waitMs(100);
+        const maybePromise = exitMethod.call(document);
+        if (isPromiseLike(maybePromise)) {
+          await awaitWithTimeout(maybePromise, 1600);
+        }
+        await waitMs(120);
+      } else {
+        setIsFullscreenApiSupported(false);
+        if (!hasLoggedFullscreenUnsupportedRef.current) {
+          console.warn('[Fullscreen] exit API unavailable on this browser/environment.');
+          hasLoggedFullscreenUnsupportedRef.current = true;
+        }
       }
       
       const isStillFullscreen = Boolean(getFullscreenElement());
@@ -435,24 +555,30 @@ export default function App() {
       if (e.type === 'touchstart') {
         lastFullscreenTouchAtRef.current = Date.now();
       }
-      // Debounce click after touch
       if (e.type === 'click' && Date.now() - lastFullscreenTouchAtRef.current < 700) {
         return;
       }
-      // Do NOT preventDefault() on click as it can block fullscreen on some mobile browsers
-      // But we stop propagation to prevent parent handlers
       e.stopPropagation();
     }
 
-    if (isFullscreen) {
+    if (getFullscreenElement()) {
       void exitFullscreenSafely('manual');
       return;
     }
     void requestFullscreenSafely('manual');
-  }, [exitFullscreenSafely, isFullscreen, requestFullscreenSafely]);
+  }, [exitFullscreenSafely, getFullscreenElement, requestFullscreenSafely]);
+
+  useEffect(() => {
+    const supported = hasFullscreenApi();
+    setIsFullscreenApiSupported(supported);
+    if (supported) {
+      hasLoggedFullscreenUnsupportedRef.current = false;
+    }
+  }, [hasFullscreenApi]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const cameraSessionManagerRef = useRef<CameraSessionManager>(new CameraSessionManager());
   const initializeCameraRef = useRef<() => Promise<boolean>>(async () => false);
   const startPoseOverlayLoopRef = useRef<() => void>(() => undefined);
   const isForegroundRecoveryInFlightRef = useRef<boolean>(false);
@@ -1276,14 +1402,8 @@ export default function App() {
       cancelAnimationFrame(poseLoopRef.current);
       poseLoopRef.current = null;
     }
-    if (videoRef.current) {
-      videoRef.current.pause();
-      videoRef.current.srcObject = null;
-    }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
+    cameraSessionManagerRef.current.cleanupSession(videoRef.current, streamRef.current);
+    streamRef.current = null;
     hasCalibratedPoseRef.current = false;
     lastPoseSeenAtRef.current = 0;
     setPoseDetectedState(false);
@@ -1496,7 +1616,7 @@ export default function App() {
   };
 
   const initializeCamera = async (): Promise<boolean> => {
-    let shouldDiscardLateStream = false;
+    const cameraSessionManager = cameraSessionManagerRef.current;
 
     const waitForPoseDetection = async (timeoutMs: number, sinceTimestampMs: number): Promise<boolean> => {
       const startedAt = performance.now();
@@ -1507,294 +1627,9 @@ export default function App() {
           return true;
         }
         refreshPoseDetectedState(now);
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 120));
+        await waitMs(120);
       }
       return false;
-    };
-
-    const resolvePlatformInfo = (): {
-      platform: 'ios' | 'android' | 'harmony' | 'desktop' | 'unknown';
-      isTablet: boolean;
-      isMobile: boolean;
-    } => {
-      const ua = navigator.userAgent;
-      const isTouchMac = /Macintosh/i.test(ua) && 'ontouchend' in document;
-      const isIOS = /iPhone|iPad|iPod/i.test(ua) || isTouchMac;
-      const isHarmony = /HarmonyOS|OpenHarmony|OHOS|HMOS|ArkWeb/i.test(ua);
-      const isAndroid = /Android/i.test(ua) && !isHarmony;
-      const isTablet = /iPad|Tablet/i.test(ua) || (isTouchMac && !/Mobile/i.test(ua));
-      const isMobile = isIOS || isAndroid || isHarmony || /Mobile/i.test(ua);
-      if (isIOS) return { platform: 'ios', isTablet, isMobile: true };
-      if (isHarmony) return { platform: 'harmony', isTablet, isMobile: true };
-      if (isAndroid) return { platform: 'android', isTablet, isMobile: true };
-      if (!isMobile) return { platform: 'desktop', isTablet: false, isMobile: false };
-      return { platform: 'unknown', isTablet, isMobile };
-    };
-
-    const buildConstraintProfiles = (): MediaTrackConstraints[] => {
-      const platformInfo = resolvePlatformInfo();
-      if (platformInfo.platform === 'ios') {
-        return [
-          {
-            facingMode: { ideal: 'user' },
-            width: { ideal: 960, max: 1280 },
-            height: { ideal: 540, max: 720 },
-            frameRate: { ideal: 24, max: 30 }
-          },
-          {
-            facingMode: { ideal: 'user' },
-            width: { ideal: 640, max: 960 },
-            height: { ideal: 480, max: 720 },
-            frameRate: { ideal: 24, max: 30 }
-          },
-          {
-            facingMode: { ideal: 'user' },
-            width: { ideal: 640, max: 1280 },
-            height: { ideal: 480, max: 720 }
-          }
-        ];
-      }
-
-      if (platformInfo.platform === 'android' || platformInfo.platform === 'harmony') {
-        return [
-          {
-            facingMode: { ideal: 'user' },
-            width: { ideal: 640, max: 1280 },
-            height: { ideal: 480, max: 720 },
-            frameRate: { ideal: 24, max: 30 }
-          },
-          {
-            facingMode: { ideal: 'user' },
-            width: { ideal: 960, max: 1280 },
-            height: { ideal: 540, max: 720 },
-            frameRate: { ideal: 20, max: 30 }
-          },
-          {
-            facingMode: { ideal: 'user' }
-          }
-        ];
-      }
-
-      if (platformInfo.platform === 'desktop') {
-        return [
-          {
-            facingMode: { ideal: 'user' },
-            width: { ideal: 1280, max: 1920 },
-            height: { ideal: 720, max: 1080 },
-            frameRate: { ideal: 30, max: 30 }
-          },
-          {
-            facingMode: { ideal: 'user' },
-            width: { ideal: 960, max: 1280 },
-            height: { ideal: 540, max: 720 },
-            frameRate: { ideal: 24, max: 30 }
-          }
-        ];
-      }
-
-      return [
-        {
-          facingMode: { ideal: 'user' },
-          width: { ideal: 640, max: 1280 },
-          height: { ideal: 480, max: 720 },
-          frameRate: { ideal: 24, max: 30 }
-        },
-        {
-          facingMode: { ideal: 'user' }
-        }
-      ];
-    };
-
-    const getVideoTrackDiagnostics = (stream: MediaStream): Array<Record<string, unknown>> => {
-      return stream.getVideoTracks().map((track) => {
-        let settings: MediaTrackSettings = {};
-        try {
-          settings = track.getSettings();
-        } catch {
-          settings = {};
-        }
-        return {
-          kind: track.kind,
-          enabled: track.enabled,
-          muted: track.muted,
-          readyState: track.readyState,
-          label: track.label,
-          settings
-        };
-      });
-    };
-
-    const logVideoRenderDiagnostics = (stage: string, videoElement: HTMLVideoElement, stream: MediaStream): void => {
-      const computedStyle = window.getComputedStyle(videoElement);
-      const parentElement = videoElement.parentElement;
-      const parentStyle = parentElement ? window.getComputedStyle(parentElement) : null;
-      console.warn('[Camera] Preview diagnostics', {
-        stage,
-        paused: videoElement.paused,
-        ended: videoElement.ended,
-        muted: videoElement.muted,
-        readyState: videoElement.readyState,
-        networkState: videoElement.networkState,
-        currentTime: videoElement.currentTime,
-        videoWidth: videoElement.videoWidth,
-        videoHeight: videoElement.videoHeight,
-        clientWidth: videoElement.clientWidth,
-        clientHeight: videoElement.clientHeight,
-        isConnected: videoElement.isConnected,
-        visibilityState: document.visibilityState,
-        css: {
-          display: computedStyle.display,
-          visibility: computedStyle.visibility,
-          opacity: computedStyle.opacity
-        },
-        parentCss: parentStyle
-          ? {
-            display: parentStyle.display,
-            visibility: parentStyle.visibility,
-            opacity: parentStyle.opacity,
-            overflow: parentStyle.overflow
-          }
-          : null,
-        tracks: getVideoTrackDiagnostics(stream)
-      });
-    };
-
-    const waitForFrameProgress = async (
-      videoElement: HTMLVideoElement,
-      stream: MediaStream,
-      maxWaitMs: number
-    ): Promise<boolean> => {
-      type VideoElementWithFrameStats = HTMLVideoElement & {
-        webkitDecodedFrameCount?: number;
-      };
-      type VideoFrameMetadataLike = {
-        mediaTime?: number;
-        presentedFrames?: number;
-      };
-
-      const videoWithStats = videoElement as VideoElementWithFrameStats;
-      const baselineCurrentTime = Number.isFinite(videoElement.currentTime) ? videoElement.currentTime : 0;
-      const baselineDecodedFrameCount =
-        typeof videoWithStats.webkitDecodedFrameCount === 'number' ? videoWithStats.webkitDecodedFrameCount : 0;
-
-      let callbackDisposed = false;
-      let callbackHandle: number | null = null;
-      let hasFrameCallbackMediaTimeProgress = false;
-      let hasFrameCallbackPresentedFramesProgress = false;
-
-      const scheduleFrameCallback = (): void => {
-        if (typeof videoElement.requestVideoFrameCallback !== 'function') {
-          return;
-        }
-        callbackHandle = videoElement.requestVideoFrameCallback((_, metadata: VideoFrameMetadataLike) => {
-          if (callbackDisposed) return;
-          if (typeof metadata.mediaTime === 'number' && metadata.mediaTime > baselineCurrentTime + 0.015) {
-            hasFrameCallbackMediaTimeProgress = true;
-          }
-          if (typeof metadata.presentedFrames === 'number' && metadata.presentedFrames > 0) {
-            hasFrameCallbackPresentedFramesProgress = true;
-          }
-          scheduleFrameCallback();
-        });
-      };
-
-      scheduleFrameCallback();
-
-      try {
-        const startedAt = performance.now();
-        while (performance.now() - startedAt < maxWaitMs) {
-          const videoTracks = stream.getVideoTracks();
-          const hasLiveTrack = videoTracks.some((track) => track.readyState === 'live' && track.enabled);
-          const hasUnmutedLiveTrack = videoTracks.some((track) => track.readyState === 'live' && track.enabled && !track.muted);
-          const hasUsableVideoSize = videoElement.videoWidth > 0 && videoElement.videoHeight > 0;
-          const isVideoElementActive = !videoElement.paused && !videoElement.ended;
-          const currentTime = Number.isFinite(videoElement.currentTime) ? videoElement.currentTime : baselineCurrentTime;
-          const hasTimeProgressed = currentTime > baselineCurrentTime + 0.02;
-          const decodedFrameCount =
-            typeof videoWithStats.webkitDecodedFrameCount === 'number'
-              ? videoWithStats.webkitDecodedFrameCount
-              : baselineDecodedFrameCount;
-          const hasDecodedFrameCountProgress = decodedFrameCount > baselineDecodedFrameCount;
-          const hasFrameProgress =
-            hasTimeProgressed ||
-            hasDecodedFrameCountProgress ||
-            hasFrameCallbackMediaTimeProgress ||
-            hasFrameCallbackPresentedFramesProgress;
-
-          if (
-            hasLiveTrack &&
-            hasUsableVideoSize &&
-            isVideoElementActive &&
-            hasFrameProgress &&
-            (hasUnmutedLiveTrack || hasDecodedFrameCountProgress || hasFrameCallbackPresentedFramesProgress)
-          ) {
-            return true;
-          }
-
-          await new Promise<void>((resolve) => window.setTimeout(resolve, 120));
-        }
-        return false;
-      } finally {
-        callbackDisposed = true;
-        if (callbackHandle !== null && typeof videoElement.cancelVideoFrameCallback === 'function') {
-          videoElement.cancelVideoFrameCallback(callbackHandle);
-        }
-      }
-    };
-
-    const ensureFrameProgressOrThrow = async (
-      stage: string,
-      videoElement: HTMLVideoElement,
-      stream: MediaStream,
-      timeoutMs: number
-    ): Promise<void> => {
-      const hasFrameProgress = await waitForFrameProgress(videoElement, stream, timeoutMs);
-      if (hasFrameProgress) return;
-      logVideoRenderDiagnostics(stage, videoElement, stream);
-      throw new Error('VIDEO_STREAM_NOT_RENDERING');
-    };
-
-    const playVideoWithTimeout = async (
-      videoElement: HTMLVideoElement,
-      stream: MediaStream,
-      timeoutMs: number
-    ): Promise<void> => {
-
-      const playPromise = videoElement.play();
-      const playOutcome = await Promise.race<'played' | 'timeout'>([
-        playPromise.then(() => 'played'),
-        new Promise<'timeout'>((resolve) => {
-          window.setTimeout(() => resolve('timeout'), timeoutMs);
-        })
-      ]).catch((playError: unknown) => {
-        const playName = playError instanceof DOMException ? playError.name : 'UnknownError';
-        const playMessage = playError instanceof Error ? playError.message : String(playError);
-        throw new Error(`VIDEO_PLAY_FAILED:${playName}:${playMessage}`);
-      });
-
-      if (playOutcome === 'timeout') {
-        const hasUsableVideoSize = videoElement.videoWidth > 0 && videoElement.videoHeight > 0;
-        const hasLiveVideoTrack = stream.getVideoTracks().some((track) => track.readyState === 'live');
-        if (!hasUsableVideoSize || !hasLiveVideoTrack) {
-          logVideoRenderDiagnostics('play-timeout-no-size-or-track', videoElement, stream);
-          throw new Error('VIDEO_STREAM_NOT_RENDERING');
-        }
-        console.warn('[Camera] video.play() timed out, probing for renderable frames...', {
-          readyState: videoElement.readyState,
-          videoWidth: videoElement.videoWidth,
-          videoHeight: videoElement.videoHeight,
-          hasLiveVideoTrack,
-          paused: videoElement.paused
-        });
-        await ensureFrameProgressOrThrow('play-timeout-recovery', videoElement, stream, 5000);
-        console.warn('[Camera] Recovered from play timeout after frame probe.', {
-          readyState: videoElement.readyState,
-          currentTime: videoElement.currentTime
-        });
-        return;
-      }
-
-      await ensureFrameProgressOrThrow('post-play', videoElement, stream, 3000);
     };
 
     const startMotionWithTimeout = async (
@@ -1845,195 +1680,6 @@ export default function App() {
       throw new Error('POSE_START_TIMEOUT');
     };
 
-    const requestCameraStream = async (profiles: MediaTrackConstraints[]): Promise<MediaStream> => {
-      const terminalErrors = new Set([
-        'NotAllowedError',
-        'NotReadableError',
-        'TrackStartError',
-        'SecurityError',
-        'AbortError',
-        'InvalidStateError'
-      ]);
-      let lastError: unknown = null;
-
-      for (let attempt = 0; attempt < profiles.length; attempt += 1) {
-        const constraints = profiles[attempt];
-        try {
-          return await navigator.mediaDevices.getUserMedia({ video: constraints });
-        } catch (error) {
-          lastError = error;
-          const errorName = error instanceof DOMException ? error.name : '';
-          console.warn('[Camera] getUserMedia attempt failed', {
-            attempt: attempt + 1,
-            totalAttempts: profiles.length,
-            errorName,
-            constraints
-          });
-          if (terminalErrors.has(errorName)) {
-            throw error;
-          }
-        }
-      }
-
-      try {
-        return await navigator.mediaDevices.getUserMedia({ video: true });
-      } catch (fallbackError) {
-        throw fallbackError ?? lastError;
-      }
-    };
-
-    const attachStreamToVideoElement = async (videoElement: HTMLVideoElement, stream: MediaStream): Promise<void> => {
-      // Clean up previous state before attaching new stream
-      try {
-        videoElement.pause();
-      } catch {
-        // Ignore pause errors
-      }
-      videoElement.srcObject = null;
-      videoElement.removeAttribute('src');
-      videoElement.load();
-
-      videoElement.srcObject = stream;
-      videoElement.muted = true;
-      videoElement.autoplay = true;
-      videoElement.playsInline = true;
-      videoElement.setAttribute('muted', 'true');
-      videoElement.setAttribute('autoplay', 'true');
-      videoElement.setAttribute('playsinline', 'true');
-      videoElement.setAttribute('webkit-playsinline', 'true');
-      const readinessResult = await new Promise<'ready' | 'timeout' | 'error'>((resolve) => {
-        if (videoElement.readyState >= 1 || (videoElement.videoWidth > 0 && videoElement.videoHeight > 0)) {
-          resolve('ready');
-          return;
-        }
-
-        let resolved = false;
-        const timeoutId = setTimeout(() => {
-          if (resolved) return;
-          resolved = true;
-          cleanup();
-          resolve('timeout');
-        }, 8000);
-
-        const cleanup = () => {
-          clearTimeout(timeoutId);
-          videoElement.removeEventListener('loadedmetadata', onReady);
-          videoElement.removeEventListener('loadeddata', onReady);
-          videoElement.removeEventListener('canplay', onReady);
-          videoElement.removeEventListener('playing', onReady);
-          videoElement.removeEventListener('resize', onReady);
-          videoElement.removeEventListener('error', onError);
-        };
-
-        const onReady = () => {
-          if (resolved) return;
-          resolved = true;
-          cleanup();
-          resolve('ready');
-        };
-
-        const onError = () => {
-          if (resolved) return;
-          resolved = true;
-          cleanup();
-          resolve('error');
-        };
-
-        videoElement.addEventListener('loadedmetadata', onReady, { once: true });
-        videoElement.addEventListener('loadeddata', onReady, { once: true });
-        videoElement.addEventListener('canplay', onReady, { once: true });
-        videoElement.addEventListener('playing', onReady, { once: true });
-        videoElement.addEventListener('resize', onReady, { once: true });
-        videoElement.addEventListener('error', onError, { once: true });
-      });
-
-      if (readinessResult !== 'ready') {
-        console.warn('[Camera] Video readiness check did not reach ready state before play()', {
-          readinessResult,
-          readyState: videoElement.readyState,
-          videoWidth: videoElement.videoWidth,
-          videoHeight: videoElement.videoHeight
-        });
-        logVideoRenderDiagnostics(`metadata-${readinessResult}`, videoElement, stream);
-      }
-
-      await playVideoWithTimeout(videoElement, stream, 5000);
-    };
-
-    const attachStreamWithRenderRetry = async (
-      videoElement: HTMLVideoElement,
-      initialStream: MediaStream,
-      profiles: MediaTrackConstraints[],
-      maxRetries: number
-    ): Promise<MediaStream> => {
-      let activeStream = initialStream;
-      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-        try {
-          // Check if track is muted and wait for unmute
-          const videoTracks = activeStream.getVideoTracks();
-          const hasMutedTrack = videoTracks.some((track) => track.muted);
-          if (hasMutedTrack && attempt < maxRetries) {
-            console.warn('[Camera] Track is muted, waiting for unmute...', { attempt: attempt + 1 });
-            await new Promise<void>((resolve) => {
-              const timeoutId = setTimeout(resolve, 1500);
-              const checkUnmute = () => {
-                const stillMuted = activeStream.getVideoTracks().some((track) => track.muted);
-                if (!stillMuted) {
-                  clearTimeout(timeoutId);
-                  resolve();
-                }
-              };
-              videoTracks.forEach((track) => {
-                track.addEventListener('unmute', checkUnmute, { once: true });
-              });
-            });
-          }
-
-          await attachStreamToVideoElement(videoElement, activeStream);
-
-          // Verify the stream is actually rendering
-          const finalTracks = activeStream.getVideoTracks();
-          const stillMuted = finalTracks.some((track) => track.muted);
-          if (stillMuted && attempt < maxRetries) {
-            throw new Error('VIDEO_STREAM_NOT_RENDERING');
-          }
-
-          return activeStream;
-        } catch (error) {
-          const isRenderError = error instanceof Error && error.message === 'VIDEO_STREAM_NOT_RENDERING';
-          if (!isRenderError || attempt >= maxRetries) {
-            throw error;
-          }
-          console.warn('[Camera] Stream not renderable, retrying with fresh stream...', {
-            attempt: attempt + 1,
-            maxRetries,
-            trackStates: activeStream.getVideoTracks().map((t) => ({
-              readyState: t.readyState,
-              muted: t.muted,
-              enabled: t.enabled
-            }))
-          });
-
-          // Thorough cleanup
-          activeStream.getTracks().forEach((track) => track.stop());
-          try {
-            videoElement.pause();
-          } catch {
-            // Ignore
-          }
-          videoElement.srcObject = null;
-          videoElement.removeAttribute('src');
-          videoElement.load();
-
-          // Longer wait before retry to let browser fully release resources
-          await waitMs(500);
-          activeStream = await requestCameraStream(profiles);
-          streamRef.current = activeStream;
-        }
-      }
-      return activeStream;
-    };
-
     const warmupPoseAfterEngineStart = async (label: string): Promise<void> => {
       setLoadingStatus('识别引擎已启动，正在等待人体进入镜头...');
       const detectionSinceTs = performance.now();
@@ -2045,8 +1691,17 @@ export default function App() {
         if (!videoElement || !stream) {
           throw new Error('VIDEO_STREAM_NOT_RENDERING');
         }
-        await ensureFrameProgressOrThrow(`${label}:post-motion-no-pose`, videoElement, stream, 2200);
+        await cameraSessionManager.recoverForegroundPreview(videoElement, stream);
         console.warn(`[Camera] ${label}: pose warmup timeout, camera preview is active, continue observing.`);
+      }
+    };
+
+    const stopMotionAndOverlay = (): void => {
+      motionController.stop();
+      motionController.resetPoseObservation();
+      if (poseLoopRef.current !== null) {
+        cancelAnimationFrame(poseLoopRef.current);
+        poseLoopRef.current = null;
       }
     };
 
@@ -2055,32 +1710,7 @@ export default function App() {
     const inIframeContext = isInIframe();
     const inAppBrowserContext = isLikelyInAppBrowser();
 
-    // Thorough cleanup before any camera initialization attempt
-    // This ensures we start from a clean state, especially important after errors
-    const cleanupBeforeInit = () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-      }
-      if (videoRef.current) {
-        try {
-          videoRef.current.pause();
-        } catch {
-          // Ignore
-        }
-        videoRef.current.srcObject = null;
-        videoRef.current.removeAttribute('src');
-        videoRef.current.load();
-      }
-      motionController.stop();
-      if (poseLoopRef.current !== null) {
-        cancelAnimationFrame(poseLoopRef.current);
-        poseLoopRef.current = null;
-      }
-    };
-
-    // Always cleanup first - this fixes the "retry doesn't work" issue
-    cleanupBeforeInit();
+    stopMotionAndOverlay();
 
     if (simulatedFailure === 'camera_api_missing') {
       const message = simulatedPrefix + buildCameraGuidance('api-missing', inIframeContext, inAppBrowserContext);
@@ -2126,40 +1756,6 @@ export default function App() {
       return false;
     }
 
-    const videoProfiles = buildConstraintProfiles();
-    const renderRetryCount = resolvePlatformInfo().platform === 'ios' ? 2 : 1;
-
-    if (streamRef.current && streamRef.current.active && videoRef.current) {
-      try {
-        setLoadingStatus('正在恢复摄像头连接...');
-        const recoveredStream = await attachStreamWithRenderRetry(
-          videoRef.current,
-          streamRef.current,
-          videoProfiles,
-          renderRetryCount
-        );
-        streamRef.current = recoveredStream;
-        if (!motionController.isStarted) {
-          await startMotionWithRetry(videoRef.current, 1);
-        }
-        await warmupPoseAfterEngineStart('reuse-stream');
-        startPoseOverlayLoop();
-        setCameraIssueMessage('');
-        return true;
-      } catch (reuseError) {
-        console.error('Failed to reuse camera:', reuseError);
-        motionController.stop();
-        motionController.resetPoseObservation();
-        if (videoRef.current) {
-          videoRef.current.srcObject = null;
-        }
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach((track) => track.stop());
-          streamRef.current = null;
-        }
-      }
-    }
-
     try {
       if (!window.isSecureContext) {
         const message = buildCameraGuidance('insecure', inIframeContext, inAppBrowserContext);
@@ -2176,58 +1772,32 @@ export default function App() {
         return false;
       }
 
-      setLoadingStatus('正在请求摄像头权限...');
-
-      const cameraRequest = requestCameraStream(videoProfiles).then((candidateStream) => {
-        if (shouldDiscardLateStream) {
-          candidateStream.getTracks().forEach((track) => track.stop());
-          throw new Error('CAMERA_LATE_STREAM_DISCARDED');
-        }
-        return candidateStream;
-      });
-      void cameraRequest.catch((lateError) => {
-        if (lateError instanceof Error && lateError.message === 'CAMERA_LATE_STREAM_DISCARDED') {
-          console.info('[Camera] Late stream discarded after timeout');
-          return;
-        }
-        console.warn('[Camera] Deferred camera request failed:', lateError);
-      });
-
-      let permissionTimeoutId: ReturnType<typeof setTimeout> | null = null;
-      const timeoutPromise = new Promise<MediaStream>((_, reject) => {
-        permissionTimeoutId = setTimeout(() => {
-          reject(new Error('CAMERA_PERMISSION_TIMEOUT'));
-        }, isSimulatedFailure('camera_timeout') ? 300 : 12000);
-      });
-
-      let stream: MediaStream;
-      try {
-        stream = await Promise.race<MediaStream>([cameraRequest, timeoutPromise]);
-      } finally {
-        if (permissionTimeoutId !== null) {
-          clearTimeout(permissionTimeoutId);
-        }
-      }
-
-      streamRef.current = stream;
-      if (!videoRef.current) {
-        stream.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
+      const videoElement = videoRef.current;
+      if (!videoElement) {
         setLoadingStatus('摄像头预览初始化失败。');
         setCameraIssueMessage('摄像头已打开，但画面初始化失败。\n请点击“重试”。');
         return false;
       }
 
-      setLoadingStatus('摄像头权限已允许，正在启动画面...');
-      stream = await attachStreamWithRenderRetry(videoRef.current, stream, videoProfiles, renderRetryCount);
+      setLoadingStatus(streamRef.current ? '正在恢复摄像头连接...' : '正在请求摄像头权限...');
+
+      const platformInfo = cameraSessionManager.resolvePlatformInfo();
+      const renderRetryCount = cameraSessionManager.getRenderRetryCount(platformInfo);
+      const permissionTimeoutMs = isSimulatedFailure('camera_timeout') ? 300 : 12000;
+      const stream = await cameraSessionManager.acquireRenderableStream({
+        videoElement,
+        existingStream: streamRef.current,
+        permissionTimeoutMs,
+        renderRetryCount
+      });
       streamRef.current = stream;
 
       setLoadingStatus('摄像头已连接，正在启动识别引擎...');
       if (isSimulatedFailure('pose_init_timeout')) {
         throw new Error('Pose initialize timeout (simulated)');
       }
-      await startMotionWithRetry(videoRef.current, 1);
-      await warmupPoseAfterEngineStart('cold-start');
+      await startMotionWithRetry(videoElement, 1);
+      await warmupPoseAfterEngineStart('camera-start');
 
       startPoseOverlayLoop();
       setCameraIssueMessage('');
@@ -2240,6 +1810,41 @@ export default function App() {
       const errorMessage = String(err);
       const errorName = err instanceof DOMException ? err.name : '';
 
+      if (isCameraPipelineError(err)) {
+        if (err.code === 'CAMERA_API_MISSING') {
+          const message = buildCameraGuidance('api-missing', inIframeContext, inAppBrowserContext);
+          setLoadingStatus('当前浏览器不支持摄像头。');
+          setCameraIssueMessage(message);
+          return false;
+        }
+
+        if (err.code === 'CAMERA_PERMISSION_TIMEOUT') {
+          const guidance = buildCameraGuidance('timeout', inIframeContext, inAppBrowserContext);
+          setLoadingStatus('等待摄像头授权超时。');
+          setCameraIssueMessage(guidance);
+          return false;
+        }
+
+        if (err.code === 'CAMERA_LATE_STREAM_DISCARDED') {
+          return false;
+        }
+
+        if (err.code === 'VIDEO_PLAY_FAILED') {
+          setLoadingStatus('摄像头画面播放失败。');
+          setCameraIssueMessage('摄像头已打开，但画面启动失败。\n请点击“重试”，并确认系统摄像头权限仍为允许。');
+          return false;
+        }
+
+        if (err.code === 'VIDEO_STREAM_NOT_RENDERING') {
+          cameraSessionManager.cleanupSession(videoRef.current, streamRef.current);
+          streamRef.current = null;
+          motionController.stop();
+          setLoadingStatus('摄像头画面不可用。');
+          setCameraIssueMessage('摄像头权限已允许，但画面未正常渲染。\n请点击"重试"，并确认没有其他应用占用摄像头。');
+          return false;
+        }
+      }
+
       if (errorName === 'NotAllowedError') {
         console.error('[Camera] NotAllowedError context:', {
           isSecureContext: window.isSecureContext,
@@ -2248,7 +1853,6 @@ export default function App() {
           visibilityState: document.visibilityState,
           userAgent: navigator.userAgent
         });
-
         const guidance = buildCameraGuidance('blocked', inIframeContext, inAppBrowserContext);
         setLoadingStatus('摄像头被浏览器拦截。');
         setCameraIssueMessage(guidance);
@@ -2289,69 +1893,9 @@ export default function App() {
         return false;
       }
 
-      if (err instanceof Error && err.message === 'CAMERA_PERMISSION_TIMEOUT') {
-        shouldDiscardLateStream = true;
-        const guidance = buildCameraGuidance('timeout', inIframeContext, inAppBrowserContext);
-        setLoadingStatus('等待摄像头授权超时。');
-        setCameraIssueMessage(guidance);
-        return false;
-      }
-
-      if (err instanceof Error && err.message.startsWith('VIDEO_PLAY_FAILED:')) {
-        setLoadingStatus('摄像头画面播放失败。');
-        setCameraIssueMessage('摄像头已打开，但画面启动失败。\n请点击“重试”，并确认系统摄像头权限仍为允许。');
-        return false;
-      }
-
-      if (err instanceof Error && err.message === 'VIDEO_PLAY_TIMEOUT') {
-        setLoadingStatus('摄像头画面启动超时。');
-        setCameraIssueMessage('摄像头已打开，但画面启动超时。\n请点击“重试”并保持页面在前台。');
-        return false;
-      }
-
-      if (err instanceof Error && err.message === 'VIDEO_STREAM_NOT_RENDERING') {
-        // Clean up the invalid stream completely
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach((track) => track.stop());
-          streamRef.current = null;
-        }
-        if (videoRef.current) {
-          try {
-            videoRef.current.pause();
-          } catch {
-            // Ignore
-          }
-          videoRef.current.srcObject = null;
-          videoRef.current.removeAttribute('src');
-          videoRef.current.load();
-        }
-        motionController.stop();
-
-        setLoadingStatus('摄像头画面不可用。');
-        setCameraIssueMessage('摄像头权限已允许，但画面未正常渲染。\n请点击"重试"，并确认没有其他应用占用摄像头。');
-        return false;
-      }
-
       if (err instanceof Error && err.message === 'POSE_START_TIMEOUT') {
         setLoadingStatus('识别引擎启动超时。');
         setCameraIssueMessage('识别引擎启动超时。\n请检查网络并点击“重试”。');
-        return false;
-      }
-
-      if (err instanceof Error && err.message === 'POSE_NOT_DETECTED') {
-        setLoadingStatus('没有识别到人体。');
-        setCameraIssueMessage('请站到镜头前并保持上半身完整入镜，然后点击“重试”。');
-        setPoseDetectedState(false);
-        return false;
-      }
-
-      if (err instanceof Error && (err.message === 'VIDEO_METADATA_TIMEOUT' || err.message === 'VIDEO_METADATA_ERROR')) {
-        setLoadingStatus('摄像头画面初始化失败。');
-        setCameraIssueMessage('摄像头已打开，但画面初始化超时或失败。\n请点击“重试”，并确认摄像头权限与网络正常。');
-        return false;
-      }
-
-      if (err instanceof Error && err.message === 'CAMERA_LATE_STREAM_DISCARDED') {
         return false;
       }
 
@@ -2498,68 +2042,26 @@ export default function App() {
           return;
         }
 
-        const videoTracks = stream.getVideoTracks();
-        const hasLiveTrack = videoTracks.some((track) => track.readyState === 'live' && track.enabled);
-        const hasUnmutedLiveTrack = videoTracks.some(
-          (track) => track.readyState === 'live' && track.enabled && !track.muted
-        );
-
-        if (!hasLiveTrack) {
+        const cameraSessionManager = cameraSessionManagerRef.current;
+        if (!cameraSessionManager.hasUsableLiveTrack(stream)) {
           console.warn('[Lifecycle] Foreground resume detected no live track, reinitializing.', {
             reason,
-            tracks: videoTracks.map((track) => ({
-              readyState: track.readyState,
-              enabled: track.enabled,
-              muted: track.muted
-            }))
+            tracks: cameraSessionManager.getVideoTrackDiagnostics(stream)
           });
           await initializeCameraRef.current();
           return;
         }
 
-        // If track is muted, wait for unmute before proceeding
-        if (!hasUnmutedLiveTrack) {
-          console.warn('[Lifecycle] Foreground resume detected muted track, waiting for unmute...', {
+        try {
+          await cameraSessionManager.recoverForegroundPreview(videoElement, stream);
+        } catch (previewError) {
+          console.warn('[Lifecycle] Foreground preview recovery failed, reinitializing camera.', {
             reason,
-            tracks: videoTracks.map((track) => ({
-              readyState: track.readyState,
-              enabled: track.enabled,
-              muted: track.muted
-            }))
+            error: previewError,
+            tracks: cameraSessionManager.getVideoTrackDiagnostics(stream)
           });
-
-          const unmuteResult = await new Promise<boolean>((resolve) => {
-            const timeoutId = setTimeout(() => resolve(false), 2000);
-            const checkUnmute = () => {
-              const currentTracks = stream.getVideoTracks();
-              const hasUnmuted = currentTracks.some((t) => t.readyState === 'live' && t.enabled && !t.muted);
-              if (hasUnmuted) {
-                clearTimeout(timeoutId);
-                resolve(true);
-              }
-            };
-            videoTracks.forEach((track) => {
-              track.addEventListener('unmute', checkUnmute, { once: true });
-            });
-          });
-
-          if (!unmuteResult) {
-            console.warn('[Lifecycle] Track still muted after waiting, reinitializing camera.');
-            await initializeCameraRef.current();
-            return;
-          }
-        }
-
-        if (videoElement.srcObject !== stream) {
-          videoElement.srcObject = stream;
-        }
-
-        if (videoElement.paused || videoElement.ended) {
-          try {
-            await videoElement.play();
-          } catch (playError) {
-            console.warn('[Lifecycle] Failed to resume video playback after foreground return:', playError);
-          }
+          await initializeCameraRef.current();
+          return;
         }
 
         if (!motionController.isStarted || !motionController.isActuallyRunning()) {
@@ -3031,9 +2533,11 @@ export default function App() {
                 onTouchStart={(e) => handleToggleFullscreen(e)}
                 onClick={(e) => handleToggleFullscreen(e)}
                 style={{ pointerEvents: 'auto', touchAction: 'none' }}
-                className={`kenney-button-circle group scale-90 md:scale-100 ${isFullscreen ? 'bg-kenney-yellow' : 'bg-kenney-blue'}`}
-                title={isFullscreen ? '退出全屏' : '进入全屏'}
+                className={`kenney-button-circle group scale-90 md:scale-100 ${isFullscreen ? 'bg-kenney-yellow' : 'bg-kenney-blue'} ${isFullscreenApiSupported ? '' : 'opacity-50 cursor-not-allowed'}`}
+                title={isFullscreenApiSupported ? (isFullscreen ? '退出全屏' : '进入全屏') : '当前浏览器限制网页全屏（iOS Safari 部分场景不支持）'}
                 aria-pressed={isFullscreen}
+                aria-disabled={!isFullscreenApiSupported}
+                disabled={!isFullscreenApiSupported}
               >
                 {isFullscreen ? (
                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={3.5} stroke="currentColor" className="w-5 h-5 md:w-8 md:h-8 group-hover:scale-110 transition-transform">
@@ -3075,6 +2579,7 @@ export default function App() {
               // @ts-ignore
               themes={selectedThemes}
               allThemes={themes}
+              qualityMode={qualityMode}
             />
           </div>
         </>
@@ -3150,31 +2655,76 @@ export default function App() {
             
             {/* MAIN MENU */}
             {phase === GamePhase.MENU && (
-                <div className="menu-shell non-game-scale text-center w-full max-w-4xl px-4 md:px-8 relative flex flex-col items-center justify-center min-h-0 h-full max-h-screen overflow-y-auto py-4 md:py-12 gap-2 md:gap-6 scrollbar-hide">
-                    {/* Top: Player Character */}
-                    <div className="relative shrink-0">
-                      <img 
-                        src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')}
-                        className="w-16 h-16 sm:w-20 sm:h-20 md:w-48 md:h-48 lg:w-56 lg:h-56 animate-bounce drop-shadow-xl mobile-landscape-character" 
-                        alt="角色" 
-                      />
+              <div className="menu-shell non-game-scale text-center w-full max-w-4xl px-4 md:px-8 relative flex flex-col items-center justify-center min-h-0 h-full max-h-screen overflow-y-auto py-4 md:py-12 gap-2 md:gap-6 scrollbar-hide">
+                  {/* Top: Player Character */}
+                  <div className="relative shrink-0">
+                    <img 
+                      src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')}
+                      className="w-16 h-16 sm:w-20 sm:h-20 md:w-48 md:h-48 lg:w-56 lg:h-56 animate-bounce drop-shadow-xl mobile-landscape-character" 
+                      alt="角色" 
+                    />
+                  </div>
+
+                  {/* Middle: Title (Single Line) */}
+                  <div className="flex flex-col items-center px-4 md:px-10 w-full overflow-hidden shrink-0">
+                      <h1 className="brand-title text-3xl sm:text-5xl md:text-8xl lg:text-9xl font-bold text-white drop-shadow-[0_4px_0_#333333] md:drop-shadow-[0_6px_0_#333333] tracking-normal uppercase italic leading-none rotate-[-1deg] whitespace-nowrap py-2 md:py-4 mobile-landscape-title">
+                          JUMP <span className="text-kenney-yellow">&</span> SAY
+                      </h1>
+                  </div>
+                  
+                  {/* Start Button */}
+                  <div className="py-2 md:py-0 shrink-0">
+                      <button onClick={handleStartProcess} 
+                          className="kenney-button kenney-button-handdrawn px-6 sm:px-12 md:px-24 py-2 sm:py-4 md:py-8 text-base sm:text-2xl md:text-4xl hover:scale-110 transition-transform mobile-landscape-button">
+                          开始游戏
+                      </button>
+                  </div>
+
+                  {/* Quality Selector */}
+                  <div className="w-full flex flex-col items-center gap-1 md:gap-2 mt-1 md:mt-2 shrink-0">
+                    <div ref={qualityPickerRef} className="relative pointer-events-auto">
+                      <button
+                        type="button"
+                        onClick={() => setIsQualityPickerOpen((prev) => !prev)}
+                        className="inline-flex items-center gap-1.5 md:gap-2 rounded-full border border-white/35 bg-white/10 px-3 md:px-4 py-1.5 md:py-2 text-white/80 hover:bg-white/14 transition-colors"
+                        aria-haspopup="listbox"
+                        aria-expanded={isQualityPickerOpen}
+                        title="游戏画质"
+                      >
+                        <span className="text-xs md:text-sm font-black tracking-[0.01em]">游戏画质：{activeQualityLabel}</span>
+                        <svg className={`w-3 h-3 md:w-3.5 md:h-3.5 transition-transform ${isQualityPickerOpen ? 'rotate-180' : ''}`} viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                          <path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" />
+                        </svg>
+                      </button>
+                      {isQualityPickerOpen && (
+                        <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 min-w-[168px] max-w-[84vw] rounded-2xl border border-white/35 bg-[#78AFFF]/95 backdrop-blur-md px-2 py-2 shadow-xl z-20">
+                          <div className="flex flex-col gap-1 max-h-[46vh] overflow-y-auto" role="listbox" aria-label="游戏画质">
+                            {QUALITY_MODE_OPTIONS.map((option) => {
+                              const isActive = option.value === qualityMode;
+                              return (
+                                <button
+                                  key={option.value}
+                                  type="button"
+                                  onClick={() => {
+                                    setQualityMode(option.value);
+                                    setIsQualityPickerOpen(false);
+                                  }}
+                                  className={`w-full rounded-xl px-3 py-1.5 md:py-2 text-left text-sm md:text-base font-black transition-colors ${
+                                    isActive ? 'bg-white/92 text-[#4f6e96]' : 'text-white/78 hover:bg-white/14'
+                                  }`}
+                                  aria-selected={isActive}
+                                >
+                                  {option.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    
-                    {/* Middle: Title (Single Line) */}
-                    <div className="flex flex-col items-center px-4 md:px-10 w-full overflow-hidden shrink-0">
-                        <h1 className="brand-title text-3xl sm:text-5xl md:text-8xl lg:text-9xl font-bold text-white drop-shadow-[0_4px_0_#333333] md:drop-shadow-[0_6px_0_#333333] tracking-normal uppercase italic leading-none rotate-[-1deg] whitespace-nowrap py-2 md:py-4 mobile-landscape-title">
-                            JUMP <span className="text-kenney-yellow">&</span> SAY
-                        </h1>
-                    </div>
-                    
-                    {/* Bottom: Start Button */}
-                    <div className="py-2 md:py-0 shrink-0">
-                        <button onClick={handleStartProcess} 
-                            className="kenney-button kenney-button-handdrawn px-6 sm:px-12 md:px-24 py-2 sm:py-4 md:py-8 text-base sm:text-2xl md:text-4xl hover:scale-110 transition-transform mobile-landscape-button">
-                            开始游戏
-                        </button>
-                    </div>
-                </div>
+
+                  </div>
+              </div>
             )}
 
             {/* THEME SELECTION */}

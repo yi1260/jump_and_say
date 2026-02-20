@@ -210,3 +210,104 @@ Original prompt: 跳跃检测出现了问题,  离的远一点, 尤其屏幕倾�
   - `velocityThreshold` base constant `0.58`
   - `displacementThreshold` base constant `0.095`
   - `candidateScore` gate (currently >=2 or burst fallback).
+
+## 2026-02-19 (Player position spacing tune for iPad/mobile/non-fullscreen)
+- Updated layout calculation in `/Users/liushuai/github/jump_and_say/game/scenes/MainScene.ts` (`recalcLayout`) to adjust player/card vertical spacing while keeping responsive behavior:
+  - Reduced floor bottom margin from fixed `max(height*0.15, 80)` to adaptive clamp by viewport/device:
+    - compressed landscape (non-fullscreen-like): `ratio 0.105`
+    - mobile normal: `ratio 0.12`
+    - desktop/tablet wider viewport: `ratio 0.13`
+    - clamped by device-specific min/max to avoid extremes.
+  - Added explicit minimum vertical gap target between player top and answer card bottom (`desiredPlayerCardGap`) so player stays farther away from the image cards.
+  - Kept top safe area constraints by clamping `blockCenterY` between bee-safe lower bound and player-gap upper bound.
+  - Slightly adjusted jump layout parameters (`jumpRatio`, min/max jump height, bee/card gap on compressed landscape) so behavior remains stable under phone + non-fullscreen heights.
+
+- Verification:
+  - `npm run build` passed.
+  - Ran web-game skill Playwright client:
+    - `node /Users/liushuai/.codex/skills/develop-web-game/scripts/web_game_playwright_client.js --url https://localhost:3000 --actions-file /Users/liushuai/.codex/skills/develop-web-game/references/action_payloads.json --iterations 1 --pause-ms 300 --screenshot-dir output/web-game-player-position-ipad`
+    - `node /Users/liushuai/.codex/skills/develop-web-game/scripts/web_game_playwright_client.js --url https://localhost:3000 --actions-json '{"steps":[{"buttons":[],"frames":180}]}' --iterations 1 --pause-ms 1000 --screenshot-dir output/web-game-player-position-ipad-wait`
+  - Automation screenshot remained a blank-color canvas in this environment, so final visual confirmation still needs manual iPad/phone verification.
+
+## TODO
+- Manual device verification (required):
+  - iPad landscape (fullscreen + non-fullscreen): confirm player is lower, card gap is visibly larger, and bottom margin is slightly smaller.
+  - Phone landscape/portrait: confirm no overlap and jump reach remains comfortable.
+- If iPad gap is still too tight, tune only these constants in `recalcLayout`:
+  - `desiredPlayerCardGap` ratio (`0.095` / `0.08`)
+  - `bottomMarginRatio` (`0.12` / `0.105`)
+  - `jumpRatio` (`0.43` / `0.35`)
+
+## 2026-02-19 (Second pass: lower player + raise bee in non-fullscreen)
+- Applied feedback-driven layout tweaks in `/Users/liushuai/github/jump_and_say/game/scenes/MainScene.ts`:
+  - Lowered player further by reducing adaptive floor bottom margins:
+    - compressed landscape ratio `0.085` (was `0.105`)
+    - mobile normal ratio `0.10` (was `0.12`)
+    - desktop/tablet ratio `0.115` (was `0.13`)
+    - min bottom margin `42/60` (mobile/desktop).
+  - Raised bee region in compressed landscape (non-fullscreen-like):
+    - `minBeeBlockGap` increased to `450 * gameScale`
+    - added extra `beeLiftOffset` upward shift.
+  - Reduced bee-word vertical offset in compressed landscape:
+    - introduced `getBeeTextOffsetY()` -> `48 * gameScale` (compressed) vs `60 * gameScale` (normal).
+- Build verification: `npm run build` passed.
+
+## 2026-02-19 (Fullscreen toggle refactor)
+- Refactored fullscreen logic in `/Users/liushuai/github/jump_and_say/App.tsx` to improve mobile Safari resilience:
+  - Added request fallback chain: try app root first, then `document.documentElement`.
+  - Added broader WebKit compatibility fields/methods (`webkitRequestFullScreen`, `webkitCurrentFullScreenElement`, `webkitCancelFullScreen`, `webkitIsFullScreen`).
+  - Restored fullscreen button dual event entry (`touchstart` + `click`) with dedupe to avoid touch/click double-trigger.
+  - Toggle branch now uses real-time fullscreen state (`getFullscreenElement()`) instead of only React state.
+  - Added API support detection; when unavailable, fullscreen button is disabled and shows limitation hint.
+- Verification:
+  - `npm run build` passed.
+  - Ran Playwright client against local dev server (`https://localhost:3001`) and captured artifact at `/Users/liushuai/github/jump_and_say/output/web-game-fullscreen-refactor/shot-0.png`.
+  - Automation screenshot only captured a blank initial frame, so fullscreen behavior still needs real-device manual verification (iPad Safari).
+- TODO:
+  - Manual iPad Safari validation for enter/exit/re-enter fullscreen in PLAYING scene.
+  - If still rejected with `TypeError` + `webkitfullscreenerror`, treat as browser policy restriction in that environment and consider replacing with UX fallback (orientation-only windowed mode).
+
+## 2026-02-19 (Player inverted/on-card severe bug fix)
+- Investigated severe issue where player could appear inverted and visually run onto answer cards.
+- Root cause 1 in `/Users/liushuai/github/jump_and_say/game/scenes/MainScene.ts`:
+  - Player lean used raw pixel delta: `setAngle(diff * 0.15)`.
+  - On wide iPad landscape, lane-switch delta can exceed 600-800px, producing `90°+` rotation (visual inversion).
+- Root cause 2 in `/Users/liushuai/github/jump_and_say/game/scenes/MainScene.ts` `hitBlock()`:
+  - Recoil reposition used `player.body.height`, which ignores extra sprite head area with `origin(0.5, 1)` and body offset.
+  - This can place sprite visuals into card area after collision.
+
+### Fixes
+- Added bounded + normalized lean calculation:
+  - `PLAYER_MAX_LEAN_ANGLE = 14`
+  - Normalize by lane spacing and clamp to `[-1, 1]`
+  - Smooth with `PLAYER_LEAN_LERP = 0.35`
+- Updated recoil reposition in `hitBlock()`:
+  - Use `player.displayHeight` + small padding to keep full sprite below block bottom.
+  - Clamp by `floorSurfaceY` to avoid overshoot.
+  - Reset `player` angle to `0` after collision correction.
+
+### Verification
+- `npm run build` passed.
+- Ran Playwright client against local dev server (`https://localhost:3002`) in both headless and headed modes:
+  - `node /Users/liushuai/.codex/skills/develop-web-game/scripts/web_game_playwright_client.js --url https://localhost:3002 --actions-file /Users/liushuai/.codex/skills/develop-web-game/references/action_payloads.json --iterations 1 --pause-ms 300 --screenshot-dir output/web-game-player-invert-fix`
+  - `node /Users/liushuai/.codex/skills/develop-web-game/scripts/web_game_playwright_client.js --url https://localhost:3002 --actions-file /Users/liushuai/.codex/skills/develop-web-game/references/action_payloads.json --iterations 1 --pause-ms 300 --headless false --screenshot-dir output/web-game-player-invert-fix-headed`
+- Automation screenshots in this environment were still a blank blue canvas, so final behavioral confirmation remains real-device only.
+
+## TODO
+- Real-device iPad regression check:
+  - Rapidly switch between left/right lanes and confirm no upside-down rotation.
+  - Repeatedly hit card bottoms and confirm player never visually enters/runs on card images.
+
+## 2026-02-19 (Resize transition visual-state bug fix)
+- Fixed a critical resize/fullscreen transition bug in `/Users/liushuai/github/jump_and_say/game/scenes/MainScene.ts` where answer-card visual containers could become invisible or oversized while hitboxes remained active.
+- Root cause:
+  - During responsive relayout, `applyBlockVisualLayout()` killed container tweens.
+  - If resize interrupted entrance tween (`scale 0 -> 1, Back.easeOut`), some containers stayed at `scale=0` (invisible but collidable), while others froze at overshoot scale (>1), causing abnormal size.
+- Fix:
+  - After killing tweens, force container stable visual state:
+    - `setVisible(true)`
+    - `setAlpha(1)`
+    - `setScale(1, 1)`
+  - Then apply snapped `x/y` layout.
+- Verification:
+  - `npm run build` passed.

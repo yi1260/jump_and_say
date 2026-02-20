@@ -1,5 +1,5 @@
 import { isThemePreloaded, preloadThemeImagesStrict } from '@/gameConfig';
-import { getR2AssetUrl, getThemesListFallbackUrl, getThemesListPrimaryUrl } from '@/src/config/r2Config';
+import { getLocalAssetUrl, getR2AssetUrl, getThemesListFallbackUrl, getThemesListPrimaryUrl } from '@/src/config/r2Config';
 import { ThemeId } from '@/types';
 import { motionController } from './motionController';
 
@@ -96,9 +96,11 @@ const sleep = (ms: number): Promise<void> => (
 );
 
 const preloadSingleGameAsset = async (path: string): Promise<void> => {
-  const url = getR2AssetUrl(path);
+  const localUrl = getLocalAssetUrl(path);
+  const cdnUrl = getR2AssetUrl(path);
 
-  const loadWithRetry = async (retriesLeft: number): Promise<void> => {
+  const loadWithRetry = async (url: string, retriesLeft: number, isCdn: boolean): Promise<void> => {
+    const label = isCdn ? 'CDN' : 'LOCAL';
     try {
       const start = performance.now();
       if (path.endsWith('.mp3') || path.endsWith('.ogg')) {
@@ -131,15 +133,20 @@ const preloadSingleGameAsset = async (path: string): Promise<void> => {
     } catch (error) {
       if (retriesLeft > 0) {
         const retryDelayMs = (PRELOAD_RETRIES - retriesLeft + 1) * 800;
-        console.warn(`Retrying ${path} (${retriesLeft} retries left) in ${retryDelayMs}ms...`);
+        console.warn(`Retrying ${path} [${label}] (${retriesLeft} retries left) in ${retryDelayMs}ms...`);
         await sleep(retryDelayMs);
-        return loadWithRetry(retriesLeft - 1);
+        return loadWithRetry(url, retriesLeft - 1, isCdn);
       }
       throw error;
     }
   };
 
-  await loadWithRetry(PRELOAD_RETRIES);
+  try {
+    await loadWithRetry(localUrl, PRELOAD_RETRIES, false);
+  } catch (localError) {
+    console.warn(`[AssetLoader] Local load failed for ${path}, falling back to CDN`, localError);
+    await loadWithRetry(cdnUrl, PRELOAD_RETRIES, true);
+  }
 };
 
 const preloadThemesListJson = async (): Promise<void> => {

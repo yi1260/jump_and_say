@@ -206,86 +206,81 @@ export class PreloadScene extends Phaser.Scene {
   }
 
   private loadGameAssets() {
-    // Determine base URL: use R2 if in production (import.meta.env.PROD), otherwise local
-    // const useR2 = import.meta.env.PROD; 
-    // Actually, user wants to solve speed issues, so we should prefer R2 if possible.
-    // Let's use a helper that can be toggled or use R2 by default for these assets.
-    // For now, let's stick to the requested change to use R2.
-    
     const soundBase = 'assets/kenney/Sounds/';
     const kenneyBase = 'assets/kenney/Vector/';
     
-    // Helper to get full URL
-    const getUrl = (path: string) => getR2AssetUrl(path);
+    const getLocalUrl = (path: string) => getLocalAssetUrl(path);
 
     this.load.audio('sfx_jump', [
-        getUrl(`${soundBase}sfx_jump-high.mp3`),
-        getUrl(`${soundBase}sfx_jump-high.ogg`)
+        getLocalUrl(`${soundBase}sfx_jump-high.mp3`),
+        getLocalUrl(`${soundBase}sfx_jump-high.ogg`)
     ]);
     this.load.audio('sfx_success', [
-        getUrl(`${soundBase}sfx_coin.mp3`),
-        getUrl(`${soundBase}sfx_coin.ogg`)
+        getLocalUrl(`${soundBase}sfx_coin.mp3`),
+        getLocalUrl(`${soundBase}sfx_coin.ogg`)
     ]);
     this.load.audio('sfx_failure', [
-        getUrl(`${soundBase}sfx_disappear.mp3`),
-        getUrl(`${soundBase}sfx_disappear.ogg`)
+        getLocalUrl(`${soundBase}sfx_disappear.mp3`),
+        getLocalUrl(`${soundBase}sfx_disappear.ogg`)
     ]);
     this.load.audio('sfx_bump', [
-        getUrl(`${soundBase}sfx_bump.mp3`),
-        getUrl(`${soundBase}sfx_bump.ogg`)
+        getLocalUrl(`${soundBase}sfx_bump.mp3`),
+        getLocalUrl(`${soundBase}sfx_bump.ogg`)
     ]);
 
     REWARD_VOICE_WORDS.forEach((word) => {
       const voiceKey = `voice_${word}`;
-      const voiceUrl = getUrl(`${soundBase}${word}.mp3`);
+      const voiceUrl = getLocalUrl(`${soundBase}${word}.mp3`);
       console.log(`[PreloadScene] Loading voice audio: ${voiceKey} from ${voiceUrl}`);
       this.load.audio(voiceKey, voiceUrl);
     });
     
     const { height } = this.scale;
     const gameScale = height / 1080;
-    const rawDpr = this.registry.get('dpr') || window.devicePixelRatio || 1;
-    const dprScale = Math.min(rawDpr, 2);
+    const rawDpr = this.registry.get('dpr') || 1;
+    const textureBoostRaw = this.registry.get('textureBoost');
+    const textureBoost = typeof textureBoostRaw === 'number' && Number.isFinite(textureBoostRaw)
+      ? Phaser.Math.Clamp(textureBoostRaw, 1, 1.4)
+      : 1;
+    const dprScale = Math.max(1, Math.min(rawDpr * textureBoost, 3.2));
     const targetBeeSize = Math.round(100 * gameScale * dprScale);
     const charTextureSize = Math.round(180 * gameScale * dprScale);
     const tileTextureSize = Math.round(320 * gameScale * dprScale);
     
     if (!this.textures.exists('p1_stand')) {
-        this.load.svg('p1_stand', getUrl(`${kenneyBase}Characters/character_pink_idle.svg`), { width: charTextureSize, height: charTextureSize });
-        this.load.svg('p1_jump', getUrl(`${kenneyBase}Characters/character_pink_jump.svg`), { width: charTextureSize, height: charTextureSize });
-        this.load.svg('p1_walk_a', getUrl(`${kenneyBase}Characters/character_pink_walk_a.svg`), { width: charTextureSize, height: charTextureSize });
-        this.load.svg('p1_walk_b', getUrl(`${kenneyBase}Characters/character_pink_walk_b.svg`), { width: charTextureSize, height: charTextureSize });
+        this.load.svg('p1_stand', getLocalUrl(`${kenneyBase}Characters/character_pink_idle.svg`), { width: charTextureSize, height: charTextureSize });
+        this.load.svg('p1_jump', getLocalUrl(`${kenneyBase}Characters/character_pink_jump.svg`), { width: charTextureSize, height: charTextureSize });
+        this.load.svg('p1_walk_a', getLocalUrl(`${kenneyBase}Characters/character_pink_walk_a.svg`), { width: charTextureSize, height: charTextureSize });
+        this.load.svg('p1_walk_b', getLocalUrl(`${kenneyBase}Characters/character_pink_walk_b.svg`), { width: charTextureSize, height: charTextureSize });
     }
         
     if (!this.textures.exists('tile_box')) {
-        this.load.svg('tile_box', getUrl(`${kenneyBase}Tiles/block_empty.svg`), { width: tileTextureSize, height: tileTextureSize });
+        this.load.svg('tile_box', getLocalUrl(`${kenneyBase}Tiles/block_empty.svg`), { width: tileTextureSize, height: tileTextureSize });
     }
         
     if (!this.textures.exists('bee_a')) {
-        this.load.svg('bee_a', getUrl(`${kenneyBase}Enemies/bee_a.svg`), { width: targetBeeSize, height: targetBeeSize });
+        this.load.svg('bee_a', getLocalUrl(`${kenneyBase}Enemies/bee_a.svg`), { width: targetBeeSize, height: targetBeeSize });
     }
     if (!this.textures.exists('bee_b')) {
-        this.load.svg('bee_b', getUrl(`${kenneyBase}Enemies/bee_b.svg`), { width: targetBeeSize, height: targetBeeSize });
+        this.load.svg('bee_b', getLocalUrl(`${kenneyBase}Enemies/bee_b.svg`), { width: targetBeeSize, height: targetBeeSize });
     }
 
-    // Reward & UI sizes
     const safeRewardSize = Math.min(512, Math.max(192, Math.round(220 * gameScale * dprScale)));
     const safeIconSize = Math.min(512, Math.max(192, Math.round(200 * gameScale * dprScale)));
 
     if (!this.textures.exists('star_gold')) {
-      this.load.svg('star_gold', getUrl(`${kenneyBase}Tiles/star.svg`), { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('mushroom_red', getUrl(`${kenneyBase}Tiles/mushroom_red.svg`), { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('mushroom_brown', getUrl(`${kenneyBase}Tiles/mushroom_brown.svg`), { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('gem_blue', getUrl(`${kenneyBase}Tiles/gem_blue.svg`), { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('gem_red', getUrl(`${kenneyBase}Tiles/gem_red.svg`), { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('gem_green', getUrl(`${kenneyBase}Tiles/gem_green.svg`), { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('gem_yellow', getUrl(`${kenneyBase}Tiles/gem_yellow.svg`), { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('grass', getUrl(`${kenneyBase}Tiles/grass.svg`), { width: safeRewardSize, height: safeRewardSize });
-      this.load.svg('grass_purple', getUrl(`${kenneyBase}Tiles/grass_purple.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('star_gold', getLocalUrl(`${kenneyBase}Tiles/star.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('mushroom_red', getLocalUrl(`${kenneyBase}Tiles/mushroom_red.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('mushroom_brown', getLocalUrl(`${kenneyBase}Tiles/mushroom_brown.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('gem_blue', getLocalUrl(`${kenneyBase}Tiles/gem_blue.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('gem_red', getLocalUrl(`${kenneyBase}Tiles/gem_red.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('gem_green', getLocalUrl(`${kenneyBase}Tiles/gem_green.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('gem_yellow', getLocalUrl(`${kenneyBase}Tiles/gem_yellow.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('grass', getLocalUrl(`${kenneyBase}Tiles/grass.svg`), { width: safeRewardSize, height: safeRewardSize });
+      this.load.svg('grass_purple', getLocalUrl(`${kenneyBase}Tiles/grass_purple.svg`), { width: safeRewardSize, height: safeRewardSize });
       
-      // UI Icons
-      this.load.svg('icon_retry', getUrl(`${kenneyBase}Tiles/replay_256dp.svg`), { width: safeIconSize, height: safeIconSize });
-      this.load.svg('icon_next', getUrl(`${kenneyBase}Tiles/keyboard_double_arrow_right_256dp.svg`), { width: safeIconSize, height: safeIconSize });
+      this.load.svg('icon_retry', getLocalUrl(`${kenneyBase}Tiles/replay_256dp.svg`), { width: safeIconSize, height: safeIconSize });
+      this.load.svg('icon_next', getLocalUrl(`${kenneyBase}Tiles/keyboard_double_arrow_right_256dp.svg`), { width: safeIconSize, height: safeIconSize });
     }
   }
 
