@@ -246,8 +246,17 @@ const syncHiDpiScale = (
   game.registry.set('textureBoost', Phaser.Math.Clamp(textureBoost, 1, profile.textureBoost));
   game.registry.set('renderQualityStep', profile.appliedQualityStep);
   game.registry.set('dpr', 1);
-  game.scale.setZoom(1 / renderDpr);
+  game.registry.set('cssWidth', cssWidth);
+  game.registry.set('cssHeight', cssHeight);
+
+  // IMPORTANT: resize first, then setZoom.
+  // setZoom() calls refresh() which emits a resize event. If setZoom is called
+  // first, the resize event fires with the OLD game size but NEW zoom, causing
+  // MainScene to calculate layout for the old (larger) coordinate space while
+  // the display zoom is already increased — making everything appear oversized.
+  // By calling resize() first, both resize events use the correct game size.
   game.scale.resize(internalWidth, internalHeight);
+  game.scale.setZoom(1 / renderDpr);
 
   return {
     profile: profile.name,
