@@ -215,7 +215,7 @@ export default function App() {
   const scorePanelRef = useRef<HTMLDivElement>(null);
   const fullscreenActionInFlightRef = useRef(false);
   const lastFullscreenAttemptAtRef = useRef(0);
-  const lastFullscreenTouchAtRef = useRef(0);
+
   const hasLoggedFullscreenUnsupportedRef = useRef(false);
   const loadingRequestIdRef = useRef(0);
   const completionCycleRef = useRef(0);
@@ -552,12 +552,7 @@ export default function App() {
 
   const handleToggleFullscreen = useCallback((e?: React.MouseEvent | React.TouchEvent): void => {
     if (e) {
-      if (e.type === 'touchstart') {
-        lastFullscreenTouchAtRef.current = Date.now();
-      }
-      if (e.type === 'click' && Date.now() - lastFullscreenTouchAtRef.current < 700) {
-        return;
-      }
+      e.preventDefault();
       e.stopPropagation();
     }
 
@@ -1082,13 +1077,16 @@ export default function App() {
         .mobile-landscape-title {
           font-size: clamp(1.6rem, 8.5vw, 3rem) !important;
         }
+        .home-landscape-title {
+          font-size: clamp(2.5rem, 10vw, 4.5rem) !important;
+        }
         .mobile-landscape-button {
           padding: 0.5rem 1.75rem !important;
           font-size: clamp(1rem, 4.8vw, 1.6rem) !important;
         }
         .mobile-landscape-character {
-          width: 4.5rem !important;
-          height: 4.5rem !important;
+          width: 5.5rem !important;
+          height: 5.5rem !important;
         }
         .theme-card {
           height: 3.25rem !important;
@@ -1244,9 +1242,16 @@ export default function App() {
           padding-bottom: 0.1rem !important;
           margin-bottom: 0.25rem !important;
         }
+        .home-landscape-title {
+          font-size: 3.5rem !important;
+          line-height: 1 !important;
+          padding-top: 0.1rem !important;
+          padding-bottom: 0.1rem !important;
+          margin-bottom: 0.25rem !important;
+        }
         .mobile-landscape-character {
-          width: 5rem !important;
-          height: 5rem !important;
+          width: 6rem !important;
+          height: 6rem !important;
         }
         .mobile-landscape-button {
           padding: 0.4rem 2rem !important;
@@ -2530,9 +2535,9 @@ export default function App() {
             {/* Fullscreen Toggle (PLAYING only) */}
             {phase === GamePhase.PLAYING && (
               <button
-                onTouchStart={(e) => handleToggleFullscreen(e)}
+                onTouchEnd={(e) => handleToggleFullscreen(e)}
                 onClick={(e) => handleToggleFullscreen(e)}
-                style={{ pointerEvents: 'auto', touchAction: 'none' }}
+                style={{ pointerEvents: 'auto', touchAction: 'manipulation' }}
                 className={`kenney-button-circle group scale-90 md:scale-100 ${isFullscreen ? 'bg-kenney-yellow' : 'bg-kenney-blue'} ${isFullscreenApiSupported ? '' : 'opacity-50 cursor-not-allowed'}`}
                 title={isFullscreenApiSupported ? (isFullscreen ? '退出全屏' : '进入全屏') : '当前浏览器限制网页全屏（iOS Safari 部分场景不支持）'}
                 aria-pressed={isFullscreen}
@@ -2655,25 +2660,29 @@ export default function App() {
             
             {/* MAIN MENU */}
             {phase === GamePhase.MENU && (
-              <div className="menu-shell non-game-scale text-center w-full max-w-4xl px-4 md:px-8 relative flex flex-col items-center justify-center min-h-0 h-full max-h-screen overflow-y-auto py-4 md:py-12 gap-2 md:gap-6 scrollbar-hide">
-                  {/* Top: Player Character */}
-                  <div className="relative shrink-0">
-                    <img 
-                      src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')}
-                      className="w-16 h-16 sm:w-20 sm:h-20 md:w-48 md:h-48 lg:w-56 lg:h-56 animate-bounce drop-shadow-xl mobile-landscape-character" 
-                      alt="角色" 
-                    />
-                  </div>
+              <div className="menu-shell non-game-scale text-center w-full max-w-4xl px-4 md:px-8 relative flex flex-col items-center justify-between lg:justify-center min-h-0 h-full max-h-screen overflow-y-auto py-2 md:py-12 lg:gap-6 scrollbar-hide">
+                  
+                  {/* Title and Character Group */}
+                  <div className="flex flex-row lg:flex-col items-center justify-center gap-2 lg:gap-6 shrink-0 w-full flex-1 lg:flex-none">
+                      {/* Title */}
+                      <div className="flex flex-col items-center px-0 lg:px-10 overflow-hidden shrink-0 order-1 lg:order-2">
+                          <h1 className="brand-title text-5xl sm:text-6xl md:text-8xl lg:text-9xl font-bold text-white drop-shadow-[0_4px_0_#333333] md:drop-shadow-[0_6px_0_#333333] tracking-normal uppercase italic leading-none rotate-[-1deg] whitespace-nowrap py-2 md:py-4 home-landscape-title">
+                              JUMP <span className="text-kenney-yellow">&</span> SAY
+                          </h1>
+                      </div>
 
-                  {/* Middle: Title (Single Line) */}
-                  <div className="flex flex-col items-center px-4 md:px-10 w-full overflow-hidden shrink-0">
-                      <h1 className="brand-title text-3xl sm:text-5xl md:text-8xl lg:text-9xl font-bold text-white drop-shadow-[0_4px_0_#333333] md:drop-shadow-[0_6px_0_#333333] tracking-normal uppercase italic leading-none rotate-[-1deg] whitespace-nowrap py-2 md:py-4 mobile-landscape-title">
-                          JUMP <span className="text-kenney-yellow">&</span> SAY
-                      </h1>
+                      {/* Character */}
+                      <div className="relative shrink-0 order-2 lg:order-1">
+                        <img 
+                          src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')}
+                          className="w-20 h-20 sm:w-24 sm:h-24 md:w-48 md:h-48 lg:w-56 lg:h-56 animate-bounce drop-shadow-xl mobile-landscape-character" 
+                          alt="角色" 
+                        />
+                      </div>
                   </div>
                   
                   {/* Start Button */}
-                  <div className="py-2 md:py-0 shrink-0">
+                  <div className="pb-4 pt-2 lg:py-0 shrink-0">
                       <button onClick={handleStartProcess} 
                           className="kenney-button kenney-button-handdrawn px-6 sm:px-12 md:px-24 py-2 sm:py-4 md:py-8 text-base sm:text-2xl md:text-4xl hover:scale-110 transition-transform mobile-landscape-button">
                           开始游戏
@@ -2681,7 +2690,7 @@ export default function App() {
                   </div>
 
                   {/* Quality Selector */}
-                  <div className="w-full flex flex-col items-center gap-1 md:gap-2 mt-1 md:mt-2 shrink-0">
+                  <div className="w-full flex flex-col items-center gap-1 md:gap-2 mb-2 lg:mt-2 shrink-0">
                     <div ref={qualityPickerRef} className="relative pointer-events-auto">
                       <button
                         type="button"

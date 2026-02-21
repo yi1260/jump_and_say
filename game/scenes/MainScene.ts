@@ -1171,10 +1171,14 @@ export class MainScene extends Phaser.Scene {
       }
   }
 
-  handleResize(gameSize: Phaser.Structs.Size) {
-      const immediateWidth = Math.round(gameSize.width);
-      const immediateHeight = Math.round(gameSize.height);
-      this.applyResponsiveLayout(immediateWidth, immediateHeight);
+  handleResize(_gameSize: Phaser.Structs.Size) {
+      // Always read the latest scale dimensions instead of using the gameSize
+      // parameter directly. During adaptive quality changes, setZoom() and
+      // resize() fire separate resize events — the first may carry stale
+      // dimensions that don't match the current zoom, causing layout overflow.
+      const currentWidth = Math.round(this.scale.width);
+      const currentHeight = Math.round(this.scale.height);
+      this.applyResponsiveLayout(currentWidth, currentHeight);
 
       // iPad/Safari 在退出全屏时会先抛出一次过渡尺寸，随后才稳定。
       // 追加两次短延迟重排，读取最新 scale 尺寸，避免偶发布局错位。
