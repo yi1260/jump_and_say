@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import React, { useEffect, useRef } from 'react';
+import { bindActivePhaserGame, ensurePhaserAudioUnlocked, getPhaserAudioConfig } from '../services/audioController';
 import { MainScene } from '../game/scenes/MainScene';
 import { PreloadScene } from '../game/scenes/PreloadScene';
 import { Theme, ThemeId } from '../types';
@@ -39,6 +40,15 @@ const QUALITY_STATE_STORAGE_KEY = 'jump_and_say_quality_state_v1';
 const RUNTIME_MARKER_STORAGE_KEY = 'jump_and_say_runtime_marker_v1';
 const QUALITY_STATE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const RUNTIME_MARKER_TTL_MS = 15 * 60 * 1000;
+const MIN_VALID_VIEWPORT_WIDTH = 64;
+const MIN_VALID_VIEWPORT_HEIGHT = 64;
+
+const isValidViewportSize = (width: number, height: number): boolean => (
+  Number.isFinite(width) &&
+  Number.isFinite(height) &&
+  width >= MIN_VALID_VIEWPORT_WIDTH &&
+  height >= MIN_VALID_VIEWPORT_HEIGHT
+);
 
 const clampQualityStep = (step: number, maxStep: number): number => {
   const safeStep = Number.isFinite(step) ? Math.floor(step) : 0;
@@ -232,8 +242,36 @@ const syncHiDpiScale = (
   const profile = getAppliedRenderProfile(qualityStep);
   const targetRenderDpr = profile.renderDpr;
   const rect = container.getBoundingClientRect();
-  const cssWidth = Math.max(1, Math.floor(rect.width));
-  const cssHeight = Math.max(1, Math.floor(rect.height));
+  const measuredCssWidth = Math.floor(rect.width);
+  const measuredCssHeight = Math.floor(rect.height);
+  const storedCssWidth = game.registry.get('cssWidth');
+  const storedCssHeight = game.registry.get('cssHeight');
+  const fallbackCssWidth = Math.floor(window.innerWidth || document.documentElement.clientWidth || 0);
+  const fallbackCssHeight = Math.floor(window.innerHeight || document.documentElement.clientHeight || 0);
+
+  const measuredIsValid = isValidViewportSize(measuredCssWidth, measuredCssHeight);
+  const storedIsValid = (
+    typeof storedCssWidth === 'number' &&
+    typeof storedCssHeight === 'number' &&
+    isValidViewportSize(storedCssWidth, storedCssHeight)
+  );
+  const fallbackIsValid = isValidViewportSize(fallbackCssWidth, fallbackCssHeight);
+
+  const cssWidth = measuredIsValid
+    ? measuredCssWidth
+    : (storedIsValid ? Math.floor(storedCssWidth) : fallbackCssWidth);
+  const cssHeight = measuredIsValid
+    ? measuredCssHeight
+    : (storedIsValid ? Math.floor(storedCssHeight) : fallbackCssHeight);
+
+  if (!isValidViewportSize(cssWidth, cssHeight) && !fallbackIsValid) {
+    return {
+      profile: profile.name,
+      appliedQualityStep: profile.appliedQualityStep,
+      maxQualityStep: profile.maxQualityStep
+    };
+  }
+
   const cssArea = Math.max(1, cssWidth * cssHeight);
   const maxDprByPixels = Math.sqrt(profile.maxInternalPixels / cssArea);
   const renderDpr = Phaser.Math.Clamp(Math.min(targetRenderDpr, maxDprByPixels), 1, targetRenderDpr);
@@ -255,8 +293,18 @@ const syncHiDpiScale = (
   // MainScene to calculate layout for the old (larger) coordinate space while
   // the display zoom is already increased — making everything appear oversized.
   // By calling resize() first, both resize events use the correct game size.
-  game.scale.resize(internalWidth, internalHeight);
-  game.scale.setZoom(1 / renderDpr);
+  const currentInternalWidth = Math.round(game.scale.gameSize.width);
+  const currentInternalHeight = Math.round(game.scale.gameSize.height);
+  const nextZoom = 1 / renderDpr;
+  const shouldResize = currentInternalWidth !== internalWidth || currentInternalHeight !== internalHeight;
+  const shouldSetZoom = Math.abs(game.scale.zoom - nextZoom) > 0.0001;
+
+  if (shouldResize) {
+    game.scale.resize(internalWidth, internalHeight);
+  }
+  if (shouldSetZoom) {
+    game.scale.setZoom(nextZoom);
+  }
 
   return {
     profile: profile.name,
@@ -507,6 +555,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         parent: containerRef.current,
         backgroundColor: 'transparent',
         transparent: true,
+        audio: getPhaserAudioConfig(),
         render: {
           antialias: true,
           pixelArt: false,
@@ -562,6 +611,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       const game = new Phaser.Game(config);
       gameRef.current = game;
       (window as Window & { phaserGame?: Phaser.Game }).phaserGame = game;
+      bindActivePhaserGame(game);
+      void ensurePhaserAudioUnlocked();
 
       scheduleHiDpiSync();
       window.addEventListener('resize', scheduleHiDpiSync, { passive: true });
@@ -650,6 +701,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       }
       game.destroy(true);
       gameRef.current = null;
+      bindActivePhaserGame(null);
     };
   }, []);
 

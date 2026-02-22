@@ -21,6 +21,11 @@ interface AnswerCardLayout {
   imageRatio: number;
 }
 
+interface ViewportSize {
+  width: number;
+  height: number;
+}
+
 export class MainScene extends Phaser.Scene {
   private player!: Phaser.Physics.Arcade.Sprite;
   private jumpBurstEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
@@ -49,6 +54,8 @@ export class MainScene extends Phaser.Scene {
   private playerHeadY: number = 0;   // 主角头部Y坐标 (相对于脚底)
   private blockBottomY: number = 0;  // 木箱底部Y坐标 (相对于中心) 
   private gameScale: number = 1;  
+  private stableViewportWidth: number = 1280;
+  private stableViewportHeight: number = 720;
   
   // Logic State
   private score: number = 0;
@@ -132,6 +139,8 @@ export class MainScene extends Phaser.Scene {
   private readonly PRONUNCIATION_VOLUME = 1.0;
   private readonly PLAYER_MAX_LEAN_ANGLE = 14;
   private readonly PLAYER_LEAN_LERP = 0.35;
+  private readonly MIN_VALID_VIEWPORT_WIDTH = 64;
+  private readonly MIN_VALID_VIEWPORT_HEIGHT = 64;
 
   declare add: Phaser.GameObjects.GameObjectFactory;
   declare make: Phaser.GameObjects.GameObjectCreator;
@@ -148,6 +157,92 @@ export class MainScene extends Phaser.Scene {
   private isCompressedLandscapeViewport(width: number, height: number): boolean {
     const viewportAspect = height / Math.max(width, 1);
     return width > height && viewportAspect < 0.72;
+  }
+
+  private isValidViewportSize(width: number, height: number): boolean {
+    return (
+      Number.isFinite(width) &&
+      Number.isFinite(height) &&
+      width >= this.MIN_VALID_VIEWPORT_WIDTH &&
+      height >= this.MIN_VALID_VIEWPORT_HEIGHT
+    );
+  }
+
+  private resolveViewportSize(width: number, height: number): ViewportSize {
+    const normalizedWidth = Math.round(width);
+    const normalizedHeight = Math.round(height);
+    if (this.isValidViewportSize(normalizedWidth, normalizedHeight)) {
+      this.stableViewportWidth = normalizedWidth;
+      this.stableViewportHeight = normalizedHeight;
+      return { width: normalizedWidth, height: normalizedHeight };
+    }
+
+    const registryCssWidth = this.registry.get('cssWidth');
+    const registryCssHeight = this.registry.get('cssHeight');
+    if (
+      typeof registryCssWidth === 'number' &&
+      typeof registryCssHeight === 'number' &&
+      this.isValidViewportSize(registryCssWidth, registryCssHeight)
+    ) {
+      this.stableViewportWidth = Math.round(registryCssWidth);
+      this.stableViewportHeight = Math.round(registryCssHeight);
+      return {
+        width: this.stableViewportWidth,
+        height: this.stableViewportHeight
+      };
+    }
+
+    return {
+      width: this.stableViewportWidth,
+      height: this.stableViewportHeight
+    };
+  }
+
+  private getCurrentViewportSize(): ViewportSize {
+    return this.resolveViewportSize(this.scale.width, this.scale.height);
+  }
+
+  private updateSceneBounds(width: number, height: number): void {
+    if (!this.physics?.world) return;
+    this.physics.world.setBounds(0, 0, width, height);
+    this.cameras.main.setBounds(0, 0, width, height);
+  }
+
+  private getLaneXPosition(index: number): number {
+    const laneX = this.LANE_X_POSITIONS[index];
+    if (typeof laneX === 'number' && Number.isFinite(laneX)) {
+      return laneX;
+    }
+    return this.stableViewportWidth * 0.5;
+  }
+
+  private getLaneSpacing(): number {
+    const leftLane = this.getLaneXPosition(0);
+    const centerLane = this.getLaneXPosition(1);
+    const spacing = Math.abs(centerLane - leftLane);
+    if (spacing > 1) {
+      return spacing;
+    }
+    return Math.max(this.stableViewportWidth * 0.3, 1);
+  }
+
+  private recoverPlayerIfCorrupted(): void {
+    if (!this.player || !this.player.body) return;
+    const laneTargetX = this.getLaneXPosition(this.targetLaneIndex);
+    const isCorruptedX = !Number.isFinite(this.player.x) || this.player.x < -this.stableViewportWidth || this.player.x > this.stableViewportWidth * 2;
+    const isCorruptedY = !Number.isFinite(this.player.y) || this.player.y < -this.playerHeight * 2 || this.player.y > this.stableViewportHeight * 2;
+    const isPinnedToTopLeft = this.player.x <= 2 && this.player.y <= 2;
+    if (!isCorruptedX && !isCorruptedY && !isPinnedToTopLeft) {
+      return;
+    }
+
+    const safeX = laneTargetX;
+    const safeY = this.floorSurfaceY;
+    this.player.setPosition(safeX, safeY);
+    const body = this.player.body as Phaser.Physics.Arcade.Body;
+    body.reset(safeX, safeY);
+    body.setVelocity(0, 0);
+    this.player.setAngle(0);
   }
 
   private getBeeTextOffsetY(width: number, height: number): number {
@@ -221,7 +316,8 @@ export class MainScene extends Phaser.Scene {
     }
     this.dpr = data.dpr || 1;
     this.lastQuestionWord = '';
-    this.gameScale = this.scale?.height ? this.scale.height / 1080 : 1;
+    const viewport = this.getCurrentViewportSize();
+    this.gameScale = viewport.height / 1080;
   }
 
   private initThemeDataFromCache() {
@@ -553,22 +649,26 @@ export class MainScene extends Phaser.Scene {
    * 逻辑：定死地面位置 -> 算出方块高度 -> 算出蜜蜂高度 -> 反推速度 
    */ 
   private recalcLayout(width: number, height: number) { 
-    this.gameScale = height / 1080;
+    const viewport = this.resolveViewportSize(width, height);
+    const safeWidth = viewport.width;
+    const safeHeight = viewport.height;
+
+    this.gameScale = safeHeight / 1080;
     this.dpr = this.registry.get('dpr') || this.dpr || 1;
     this.JUMP_OVERSHOOT = 60 * this.gameScale; 
 
-    const isCompressedLandscape = this.isCompressedLandscapeViewport(width, height);
+    const isCompressedLandscape = this.isCompressedLandscapeViewport(safeWidth, safeHeight);
     const bottomMarginRatio = isCompressedLandscape ? 0.055 : (this.isMobileDevice ? 0.07 : 0.09);
     const minBottomMargin = this.isMobileDevice ? 18 : 36;
     const maxBottomMargin = this.isMobileDevice ? 140 : 200;
-    const bottomMargin = Phaser.Math.Clamp(height * bottomMarginRatio, minBottomMargin, maxBottomMargin);
-    this.floorSurfaceY = height - bottomMargin; 
+    const bottomMargin = Phaser.Math.Clamp(safeHeight * bottomMarginRatio, minBottomMargin, maxBottomMargin);
+    this.floorSurfaceY = safeHeight - bottomMargin; 
     this.floorHeight = bottomMargin;
 
-    this.LANE_X_POSITIONS = [width * 0.20, width * 0.5, width * 0.80]; 
+    this.LANE_X_POSITIONS = [safeWidth * 0.20, safeWidth * 0.5, safeWidth * 0.80]; 
 
     const visualPlayerSize = 180 * this.gameScale;
-    const visualBoxSize = Math.min(380 * this.gameScale, height * 0.38);
+    const visualBoxSize = Math.min(380 * this.gameScale, safeHeight * 0.38);
     
     this.playerHeight = visualPlayerSize;
     this.blockHeight = visualBoxSize;
@@ -580,11 +680,11 @@ export class MainScene extends Phaser.Scene {
     const minBeeBlockGap = (isCompressedLandscape ? 450 : 420) * this.gameScale;
     const beeLiftOffset = (isCompressedLandscape ? 34 : 0) * this.gameScale;
 
-    const jumpRatio = height < 600 ? 0.35 : 0.43; 
-    const idealJumpHeight = Phaser.Math.Clamp(height * jumpRatio, 220 * this.gameScale, 520 * this.gameScale);
+    const jumpRatio = safeHeight < 600 ? 0.35 : 0.43; 
+    const idealJumpHeight = Phaser.Math.Clamp(safeHeight * jumpRatio, 220 * this.gameScale, 520 * this.gameScale);
     const playerTopY = this.floorSurfaceY - this.playerHeight;
     const desiredPlayerCardGap = Phaser.Math.Clamp(
-      height * (isCompressedLandscape ? 0.08 : 0.095),
+      safeHeight * (isCompressedLandscape ? 0.08 : 0.095),
       40 * this.gameScale,
       120 * this.gameScale
     );
@@ -903,8 +1003,11 @@ export class MainScene extends Phaser.Scene {
         this.cameras.main.setPostPipeline(Phaser.Renderer.WebGL.Pipelines.FXAAPipeline);
     }
 
-    const { width, height } = this.scale;
+    const viewport = this.getCurrentViewportSize();
+    const width = viewport.width;
+    const height = viewport.height;
     this.recalcLayout(width, height);
+    this.updateSceneBounds(width, height);
     this.cameras.main.roundPixels = this.isMobileDevice;
 
     // 初始化音效 (增加安全检查，防止加载失败导致后续代码崩溃)
@@ -956,7 +1059,8 @@ export class MainScene extends Phaser.Scene {
     this.player.setDisplaySize(visualPlayerSize, visualPlayerSize);
     this.player.setOrigin(0.5, 1.0);
     this.player.setDepth(20);
-    this.player.setCollideWorldBounds(true);
+    // Keep lane control deterministic; avoid temporary world-bounds glitches snapping player to (0,0).
+    this.player.setCollideWorldBounds(false);
     this.player.setGravityY(this.getScaledPhysicsValue(this.GRAVITY_Y));
     
     const bodyWidth = visualPlayerSize * 0.6;
@@ -980,6 +1084,7 @@ export class MainScene extends Phaser.Scene {
 
     this.physics.add.collider(this.player, platforms);
     this.physics.add.overlap(this.player, this.blocks, this.hitBlock, undefined, this);
+    this.applyResponsiveLayout(width, height);
 
     // 预创建小蜜蜂飞行动画 (移到 create 中)
     if (!this.anims.exists('bee_fly')) {
@@ -1071,51 +1176,68 @@ export class MainScene extends Phaser.Scene {
   }
 
   private applyResponsiveLayout(width: number, height: number): void {
-      this.recalcLayout(width, height); 
+      const viewport = this.resolveViewportSize(width, height);
+      const safeWidth = viewport.width;
+      const safeHeight = viewport.height;
 
-      // 1. 更新地面位置 
-      if (this.floor) { 
-          const floorHeight = 80; // 与 create 中保持一致 
-          this.floor.width = width; 
-          this.floor.height = floorHeight; 
-          // 重新定位地板 Sprite，让它的“上表面”对齐 floorSurfaceY 
-          this.floor.y = this.floorSurfaceY + floorHeight; 
-          
-          // 【极为重要】更新静态物理体 
-          const body = this.floor.body as Phaser.Physics.Arcade.StaticBody; 
-          body.updateFromGameObject(); 
-      } 
-      
-      // 2. 更新主角位置 (如果在地面上) 
-      if (this.player) { 
-          const visualPlayerSize = 180 * this.gameScale;
-          this.player.setDisplaySize(visualPlayerSize, visualPlayerSize);
-          
-          const bodyWidth = visualPlayerSize * 0.6;
-          const bodyHeight = visualPlayerSize * 0.8;
-          this.player.body?.setSize(bodyWidth, bodyHeight);
-          this.player.body?.setOffset((visualPlayerSize - bodyWidth) / 2, visualPlayerSize - bodyHeight);
-          this.player.setGravityY(this.getScaledPhysicsValue(this.GRAVITY_Y));
-
-          if (this.player.body && (this.player.body.touching.down || this.player.y > this.floorSurfaceY)) { 
-              this.player.y = this.floorSurfaceY; 
-          } 
-      } 
+      this.recalcLayout(safeWidth, safeHeight);
+      this.updateSceneBounds(safeWidth, safeHeight);
 
       if (this.currentAnswerRatios.length === 3) {
-          this.activeCardLayouts = this.computeAnswerCardLayouts(this.currentAnswerRatios, width, height);
+          this.activeCardLayouts = this.computeAnswerCardLayouts(this.currentAnswerRatios, safeWidth, safeHeight);
           this.LANE_X_POSITIONS = this.activeCardLayouts.map((layout) => layout.centerX);
           if (this.activeCardLayouts.length > 0) {
               this.updateJumpVelocityByCardHeight(this.getMaxCardHeight(this.activeCardLayouts));
           }
       } else {
           this.activeCardLayouts = [];
+          this.LANE_X_POSITIONS = [safeWidth * 0.20, safeWidth * 0.5, safeWidth * 0.80];
+      }
+      this.targetLaneIndex = Phaser.Math.Clamp(this.targetLaneIndex, 0, Math.max(0, this.LANE_X_POSITIONS.length - 1));
+
+      // 1. 更新地面位置
+      if (this.floor) {
+          const floorHeight = 80;
+          this.floor.width = safeWidth;
+          this.floor.height = floorHeight;
+          this.floor.y = this.floorSurfaceY + floorHeight;
+          const floorBody = this.floor.body as Phaser.Physics.Arcade.StaticBody;
+          floorBody.updateFromGameObject();
       }
 
-      if (this.blocks) { 
-          this.blocks.children.iterate((b: any) => { 
-              if (!b || !b.active) return true; 
-              
+      // 2. 更新主角尺寸与安全位置
+      if (this.player && this.player.body) {
+          const visualPlayerSize = 180 * this.gameScale;
+          this.player.setDisplaySize(visualPlayerSize, visualPlayerSize);
+
+          const bodyWidth = visualPlayerSize * 0.6;
+          const bodyHeight = visualPlayerSize * 0.8;
+          this.player.body.setSize(bodyWidth, bodyHeight);
+          this.player.body.setOffset((visualPlayerSize - bodyWidth) / 2, visualPlayerSize - bodyHeight);
+          this.player.setGravityY(this.getScaledPhysicsValue(this.GRAVITY_Y));
+
+          const laneTargetX = this.getLaneXPosition(this.targetLaneIndex);
+          const shouldSnapToFloor =
+            !Number.isFinite(this.player.y) ||
+            this.player.y > this.floorSurfaceY ||
+            this.player.y < 0 ||
+            this.player.body.touching.down ||
+            this.player.body.blocked.down;
+          if (shouldSnapToFloor) {
+              this.player.y = this.floorSurfaceY;
+          }
+
+          if (!Number.isFinite(this.player.x) || this.player.x < -safeWidth || this.player.x > safeWidth * 2) {
+              this.player.x = laneTargetX;
+          }
+          this.recoverPlayerIfCorrupted();
+      }
+
+      // 3. 更新答案块
+      if (this.blocks) {
+          this.blocks.children.iterate((b: any) => {
+              if (!b || !b.active) return true;
+
               const answerIndex = b.getData('answerIndex');
               const visuals = b.getData('visuals') as Phaser.GameObjects.Container | undefined;
 
@@ -1127,7 +1249,7 @@ export class MainScene extends Phaser.Scene {
 
               const optionId = b.getData('optionId') as string | undefined;
               if (optionId) {
-                  const optionX = optionId === 'retry' ? this.LANE_X_POSITIONS[0] : this.LANE_X_POSITIONS[2];
+                  const optionX = optionId === 'retry' ? this.getLaneXPosition(0) : this.getLaneXPosition(2);
                   const optionSize = 240 * this.gameScale;
                   b.x = optionX;
                   b.y = this.blockCenterY;
@@ -1146,27 +1268,25 @@ export class MainScene extends Phaser.Scene {
                       }
                   }
               }
-              return true; 
-          }); 
-      } 
-      
+              return true;
+          });
+      }
+
       // 4. 更新蜜蜂位置
       if (this.beeContainer && this.beeContainer.active) {
-          this.beeContainer.x = width / 2;
+          this.beeContainer.x = safeWidth / 2;
           this.beeContainer.y = this.beeCenterY;
-          
-          // 调整：保持与 updateBeeWord 一致的尺寸
+
           const visualBeeSize = 80 * this.gameScale;
-    const fontSize = Math.round(38 * this.gameScale);
-          const textOffsetY = this.getBeeTextOffsetY(width, height);
-          
+          const fontSize = Math.round(38 * this.gameScale);
+          const textOffsetY = this.getBeeTextOffsetY(safeWidth, safeHeight);
+
           if (this.beeSprite) {
               this.beeSprite.setDisplaySize(visualBeeSize, visualBeeSize);
           }
           if (this.beeWordText) {
               this.beeWordText.setFontSize(`${fontSize}px`);
               this.beeWordText.y = textOffsetY;
-              // this.beeWordText.setStroke('#000000', Math.max(2, 4 * this.gameScale));
           }
       }
   }
@@ -1213,8 +1333,9 @@ export class MainScene extends Phaser.Scene {
 
   update() {
     if (!this.player || !this.player.body) return;
+    this.recoverPlayerIfCorrupted();
 
-    const isOnGround = this.player.body.touching.down;
+    const isOnGround = this.player.body.touching.down || this.player.body.blocked.down || this.player.y >= this.floorSurfaceY - 1;
 
     const motionState = motionController.state;
     if (isOnGround) {
@@ -1239,7 +1360,7 @@ export class MainScene extends Phaser.Scene {
         this.targetLaneIndex = newLane;
         
         // Smooth visual movement
-        const targetX = this.LANE_X_POSITIONS[this.targetLaneIndex];
+        const targetX = this.getLaneXPosition(this.targetLaneIndex);
         this.player.x = Phaser.Math.Linear(this.player.x, targetX, 0.28);
         
         if (this.player.anims.currentAnim?.key !== 'p1_walk') {
@@ -1264,11 +1385,9 @@ export class MainScene extends Phaser.Scene {
 
     this.player.setVelocityX(0);
 
-    const targetXForAngle = this.LANE_X_POSITIONS[this.targetLaneIndex];
+    const targetXForAngle = this.getLaneXPosition(this.targetLaneIndex);
     const diff = targetXForAngle - this.player.x;
-    const laneSpacing = this.LANE_X_POSITIONS.length > 1
-      ? Math.abs(this.LANE_X_POSITIONS[1] - this.LANE_X_POSITIONS[0])
-      : Math.max(this.scale.width * 0.3, 1);
+    const laneSpacing = this.getLaneSpacing();
     const normalizedDiff = Phaser.Math.Clamp(diff / Math.max(laneSpacing, 1), -1, 1);
     const targetLeanAngle = normalizedDiff * this.PLAYER_MAX_LEAN_ANGLE;
     const nextLeanAngle = Phaser.Math.Linear(this.player.angle, targetLeanAngle, this.PLAYER_LEAN_LERP);
@@ -1433,8 +1552,11 @@ export class MainScene extends Phaser.Scene {
     const stagger = 80;
     const totalSetupTime = entranceDuration + (stagger * 2);
 
-    const { width, height } = this.cameras.main;
+    const viewport = this.getCurrentViewportSize();
+    const width = viewport.width;
+    const height = viewport.height;
     this.recalcLayout(width, height);
+    this.updateSceneBounds(width, height);
     const blockY = this.blockCenterY;
 
     this.currentAnswerKeys = [...this.currentQuestion.answers];
@@ -1445,7 +1567,7 @@ export class MainScene extends Phaser.Scene {
     this.refreshThemeFrameMode();
     this.activeCardLayouts = this.computeAnswerCardLayouts(this.currentAnswerRatios, width, height);
     this.LANE_X_POSITIONS = this.activeCardLayouts.map((layout) => layout.centerX);
-    this.targetLaneIndex = Phaser.Math.Clamp(this.targetLaneIndex, 0, this.LANE_X_POSITIONS.length - 1);
+    this.targetLaneIndex = Phaser.Math.Clamp(this.targetLaneIndex, 0, Math.max(0, this.LANE_X_POSITIONS.length - 1));
     if (this.activeCardLayouts.length > 0) {
         this.updateJumpVelocityByCardHeight(this.getMaxCardHeight(this.activeCardLayouts));
     }
@@ -1453,7 +1575,7 @@ export class MainScene extends Phaser.Scene {
     this.currentQuestion.answers.forEach((answerKey, i) => {
         const rawLayout = this.activeCardLayouts[i];
         const layout = rawLayout ? this.constrainCardLayout(rawLayout, width, height) : undefined;
-        const x = Math.round(layout?.centerX ?? this.LANE_X_POSITIONS[i] ?? this.LANE_X_POSITIONS[1]);
+        const x = Math.round(layout?.centerX ?? this.LANE_X_POSITIONS[i] ?? this.getLaneXPosition(1));
         const cardWidth = Math.round(layout?.cardWidth ?? this.blockHeight);
         const cardHeight = Math.round(layout?.cardHeight ?? this.blockHeight);
         const imageKey = this.getImageTextureKeyByAnswer(answerKey);
@@ -1764,7 +1886,9 @@ export class MainScene extends Phaser.Scene {
     this.currentAnswerRatios = [];
     this.currentAnswerKeys = [];
     this.activeCardLayouts = [];
-    this.recalcLayout(this.scale.width, this.scale.height);
+    const viewport = this.getCurrentViewportSize();
+    this.recalcLayout(viewport.width, viewport.height);
+    this.updateSceneBounds(viewport.width, viewport.height);
 
     // RESUME background preloading during the completion screen
     // This gives us ~8 seconds to load the next theme while user watches animations
@@ -1923,7 +2047,8 @@ export class MainScene extends Phaser.Scene {
     // 调整：蜜蜂和文字大小调小，适配长句子
     const visualBeeSize = 80 * this.gameScale;
     const fontSize = Math.round(40 * this.gameScale);
-    const textOffsetY = this.getBeeTextOffsetY(this.scale.width, this.scale.height); // 非全屏横屏时减小文字下偏移，避免贴近卡片
+    const viewport = this.getCurrentViewportSize();
+    const textOffsetY = this.getBeeTextOffsetY(viewport.width, viewport.height); // 非全屏横屏时减小文字下偏移，避免贴近卡片
     
     if (this.beeSprite) {
         this.beeSprite.setDisplaySize(visualBeeSize, visualBeeSize);

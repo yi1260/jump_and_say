@@ -8,6 +8,7 @@ import { LoadingScreen } from './components/LoadingScreen';
 import { MainScene } from './game/scenes/MainScene';
 import { isCoverFailed, isCoverPreloaded, loadThemes, markCoverFailed, markCoverPreloaded, pauseBackgroundPreloading, preloadCoverImages, startBackgroundPreloading } from './gameConfig';
 import { preloadAllGameAssets } from './services/assetLoader';
+import { BgmController, ensurePhaserAudioUnlocked, primePhaserAudioContext } from './services/audioController';
 import { CameraSessionManager, isCameraPipelineError } from './services/cameraSessionManager';
 import { loggerService } from './services/logger';
 import { motionController } from './services/motionController';
@@ -153,7 +154,7 @@ const ThemeCardImage = ({ src, alt, index }: { src: string; alt: string; index: 
 };
 
 export default function App() {
-  const BGM_VOLUME_PLAYING = 0.015;
+  const BGM_VOLUME_PLAYING = 0.003;
   const BGM_VOLUME_IDLE = 0.015;
   const THEME_SWITCH_REST_SECONDS = 15;
   const [score, setScore] = useState(0);
@@ -204,10 +205,8 @@ export default function App() {
   const [hasShownEmoji, setHasShownEmoji] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isFullscreenApiSupported, setIsFullscreenApiSupported] = useState(true);
-  const bgmRef = useRef<HTMLAudioElement>(null);
-  const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
+  const bgmControllerRef = useRef<BgmController | null>(null);
   const isBgmEnabledRef = useRef<boolean>(isBgmEnabled);
-  const isBgmPlayingRef = useRef<boolean>(false);
   const poseCanvasRef = useRef<HTMLCanvasElement>(null);
   const poseLoopRef = useRef<number | null>(null);
   const appRootRef = useRef<HTMLDivElement>(null);
@@ -302,44 +301,22 @@ export default function App() {
     return targetPhase === GamePhase.PLAYING ? BGM_VOLUME_PLAYING : BGM_VOLUME_IDLE;
   };
 
-  const applyBgmState = (enabled: boolean): void => {
-    const audio = bgmAudioRef.current;
-    if (!audio) return;
-
-    const shouldPlay = enabled;
-    if (shouldPlay) {
-      audio.muted = false;
-      audio.volume = getBgmTargetVolume(phaseRef.current);
-      audio.play().then(() => {
-        isBgmPlayingRef.current = true;
-      }).catch(() => {});
-    } else {
-      audio.pause();
-      audio.muted = true;
-      audio.volume = 0;
-      isBgmPlayingRef.current = false;
-    }
+  const applyBgmState = (): void => {
+    bgmControllerRef.current?.syncState();
   };
 
   const setBgmEnabled = (enabled: boolean): void => {
     isBgmEnabledRef.current = enabled;
     setIsBgmEnabled(enabled);
-    applyBgmState(enabled);
+    applyBgmState();
   };
   
   const setPhase = (newPhase: GamePhase) => {
-    const prevPhase = phaseRef.current;
-    if (newPhase === GamePhase.PLAYING) {
-      setBgmEnabled(false);
-    } else if (prevPhase === GamePhase.PLAYING) {
-      setBgmEnabled(true);
-    }
-
     phaseRef.current = newPhase;
     setPhaseState(newPhase);
     
     // Update BGM volume based on phase (e.g. might be different in MENU vs PLAYING)
-    applyBgmState(isBgmEnabledRef.current);
+    applyBgmState();
   };
 
   const clearRestCountdown = useCallback((): void => {
@@ -653,162 +630,27 @@ export default function App() {
   }, [phase, requestFullscreenSafely]);
 
   useEffect(() => {
-    let bgmAudio: HTMLAudioElement | null = null;
-    let hasTriedFallback = false;
-    let htmlAudioUnlocked = false;
-    
-    const updateVolume = (vol: number) => {
-      if (bgmAudio) {
-        if (!isBgmEnabledRef.current) {
-          bgmAudio.volume = 0;
-          return;
-        }
-        bgmAudio.volume = vol;
-      }
+    const controller = new BgmController({
+      getTargetVolume: () => getBgmTargetVolume(phaseRef.current),
+      isEnabled: () => isBgmEnabledRef.current
+    });
+
+    bgmControllerRef.current = controller;
+    window.setBGMVolume = (vol: number) => {
+      controller.setBgmVolume(vol);
     };
-    
-    window.setBGMVolume = updateVolume;
     window.restoreBGMVolume = () => {
-      updateVolume(isBgmEnabledRef.current ? getBgmTargetVolume(phaseRef.current) : 0);
+      controller.restoreBgmVolume();
     };
+    window.ensureAudioUnlocked = () => controller.ensureAudioUnlocked();
 
-    const ensureAudioUnlocked = async (): Promise<boolean> => {
-      if (!bgmAudio) return false;
-      if (htmlAudioUnlocked || isBgmPlayingRef.current || !bgmAudio.paused) {
-        htmlAudioUnlocked = true;
-        return true;
-      }
+    const bgmCdnUrl = getR2AssetUrl('assets/kenney/Sounds/funny-kids-video-322163.mp3');
+    const bgmLocalUrl = getLocalAssetUrl(bgmCdnUrl);
+    void controller.init(bgmCdnUrl, bgmLocalUrl);
 
-      const previousMuted = bgmAudio.muted;
-      try {
-        bgmAudio.muted = true;
-        bgmAudio.volume = 0;
-        await bgmAudio.play();
-        bgmAudio.pause();
-        try {
-          bgmAudio.currentTime = 0;
-        } catch {
-          // Ignore currentTime reset failures on some mobile browsers.
-        }
-        htmlAudioUnlocked = true;
-        console.log('[Audio] HTMLMedia playback unlocked by user interaction.');
-        return true;
-      } catch (error) {
-        console.warn('[Audio] HTMLMedia unlock attempt failed:', error);
-        return false;
-      } finally {
-        if (!bgmAudio) return;
-        const shouldPlayBgm = isBgmEnabledRef.current;
-        if (!shouldPlayBgm && !bgmAudio.paused) {
-          bgmAudio.pause();
-        }
-        if (!shouldPlayBgm) {
-          bgmAudio.muted = true;
-          bgmAudio.volume = 0;
-        } else {
-          bgmAudio.muted = previousMuted;
-          bgmAudio.volume = getBgmTargetVolume(phaseRef.current);
-        }
-      }
-    };
-
-    window.ensureAudioUnlocked = ensureAudioUnlocked;
-    
-    const initBGM = async () => {
-      if (isBgmPlayingRef.current) return;
-      
-      const bgmCdnUrl = getR2AssetUrl('assets/kenney/Sounds/funny-kids-video-322163.mp3');
-      const bgmLocalUrl = getLocalAssetUrl(bgmCdnUrl);
-      bgmAudio = new Audio(bgmCdnUrl);
-      bgmAudioRef.current = bgmAudio;
-      bgmAudio.loop = true;
-      const shouldPlay = isBgmEnabledRef.current;
-      bgmAudio.volume = shouldPlay ? getBgmTargetVolume(phaseRef.current) : 0;
-      bgmAudio.muted = !shouldPlay;
-      bgmAudio.preload = 'auto';
-      bgmAudio.addEventListener('play', () => {
-        isBgmPlayingRef.current = true;
-      });
-      bgmAudio.addEventListener('pause', () => {
-        isBgmPlayingRef.current = false;
-      });
-      bgmAudio.addEventListener('ended', () => {
-        isBgmPlayingRef.current = false;
-      });
-      bgmAudio.addEventListener('error', () => {
-        if (!bgmAudio || hasTriedFallback) return;
-        hasTriedFallback = true;
-        bgmAudio.src = bgmLocalUrl;
-        bgmAudio.load();
-        if (isBgmPlayingRef.current) {
-          bgmAudio.play().catch(() => {});
-        }
-      });
-      
-      if (isBgmEnabledRef.current) {
-        try {
-          await bgmAudio.play();
-          isBgmPlayingRef.current = true;
-          htmlAudioUnlocked = true;
-          console.log('BGM started playing');
-        } catch (e) {
-          console.log('BGM play failed, waiting for user interaction:', e);
-        }
-      }
-    };
-    
-    initBGM();
-    
-    const handleInteraction = () => {
-      if (!bgmAudio) return;
-      void ensureAudioUnlocked();
-      if (!isBgmEnabledRef.current) return;
-      if (!isBgmPlayingRef.current) {
-        bgmAudio.play().then(() => {
-          isBgmPlayingRef.current = true;
-          htmlAudioUnlocked = true;
-        }).catch(() => {});
-      }
-    };
-    
-    // Handle page visibility change (browser minimized/tab hidden)
-    const handleVisibilityChange = () => {
-      if (!bgmAudio) return;
-      
-      if (document.hidden) {
-        // Page is hidden (browser minimized or tab switched)
-        if (!bgmAudio.paused) {
-          bgmAudio.pause();
-          console.log('[BGM] Paused due to page visibility change');
-        }
-      } else {
-        // Page is visible again
-        if (isBgmEnabledRef.current && bgmAudio.paused) {
-          bgmAudio.play().then(() => {
-            isBgmPlayingRef.current = true;
-            console.log('[BGM] Resumed after page visibility change');
-          }).catch(() => {});
-        }
-      }
-    };
-    
-    document.addEventListener('click', handleInteraction, true);
-    document.addEventListener('touchstart', handleInteraction, true);
-    document.addEventListener('keydown', handleInteraction, true);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    
     return () => {
-      document.removeEventListener('click', handleInteraction, true);
-      document.removeEventListener('touchstart', handleInteraction, true);
-      document.removeEventListener('keydown', handleInteraction, true);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      if (bgmAudio) {
-        bgmAudio.pause();
-        bgmAudio.src = '';
-        bgmAudio = null;
-      }
-      bgmAudioRef.current = null;
-      isBgmPlayingRef.current = false;
+      controller.destroy();
+      bgmControllerRef.current = null;
       window.setBGMVolume = undefined;
       window.restoreBGMVolume = undefined;
       window.ensureAudioUnlocked = undefined;
@@ -1176,10 +1018,6 @@ export default function App() {
         inset: 0;
         pointer-events: none;
         z-index: 1;
-      }
-      
-      #bgm-audio {
-        display: none;
       }
       
       .scrollbar-hide {
@@ -2293,12 +2131,25 @@ export default function App() {
   const handleEnterPlaying = useCallback(async (): Promise<void> => {
     setBgIndex(0);
     setHasShownEmoji(true);
+    const primeAudioPromise = Promise.allSettled([
+      primePhaserAudioContext(),
+      bgmControllerRef.current?.ensureAudioUnlocked() ?? Promise.resolve(false)
+    ]);
     try {
       await requestFullscreenSafely('manual');
     } catch (error) {
       console.warn('[Fullscreen] Unexpected error before entering PLAYING:', error);
     }
+    await primeAudioPromise;
     setPhase(GamePhase.PLAYING);
+    window.setTimeout(() => {
+      void ensurePhaserAudioUnlocked();
+      bgmControllerRef.current?.syncState();
+    }, 0);
+    window.setTimeout(() => {
+      void ensurePhaserAudioUnlocked();
+      bgmControllerRef.current?.syncState();
+    }, 180);
   }, [requestFullscreenSafely]);
 
   const handleReplay = useCallback(() => {
@@ -2411,14 +2262,6 @@ export default function App() {
       className="relative w-full overflow-hidden bg-kenney-blue font-sans select-none text-kenney-dark"
       style={{ height: 'var(--app-height, 100dvh)' }}
     >
-      <audio 
-        ref={bgmRef}
-        id="bgm-audio"
-        preload="auto"
-        playsInline
-        muted={false}
-      />
-      
       {/* 0. Portrait Warning Overlay */}
       {isPortrait && (
           <div 
@@ -2893,6 +2736,10 @@ export default function App() {
 
                         <div className="flex flex-col items-center gap-2">
                             <button 
+                                onTouchStart={() => {
+                                  void primePhaserAudioContext();
+                                  void bgmControllerRef.current?.ensureAudioUnlocked();
+                                }}
                                 onClick={() => {
                                     void handleEnterPlaying();
                                 }}
