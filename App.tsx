@@ -334,6 +334,14 @@ export default function App() {
     })
   );
 
+  const waitForNextPaint = (): Promise<void> => (
+    new Promise((resolve) => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => resolve());
+      });
+    })
+  );
+
   const isPromiseLike = (value: unknown): value is PromiseLike<unknown> => {
     if (!value || (typeof value !== 'object' && typeof value !== 'function')) return false;
     const maybeThen = (value as { then?: unknown }).then;
@@ -2022,6 +2030,7 @@ export default function App() {
 
     // 1. Request camera first to avoid permission prompt conflicts on mobile browsers
     try {
+        await waitForNextPaint();
         const cameraSuccess = await initializeCamera();
         if (!isCurrentLoadingRequest()) return;
         if (!cameraSuccess) {
