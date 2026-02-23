@@ -552,6 +552,7 @@ export default function App() {
   const streamRef = useRef<MediaStream | null>(null);
   const cameraSessionManagerRef = useRef<CameraSessionManager>(new CameraSessionManager());
   const initializeCameraRef = useRef<() => Promise<boolean>>(async () => false);
+  const initializeCameraInFlightRef = useRef<Promise<boolean> | null>(null);
   const startPoseOverlayLoopRef = useRef<() => void>(() => undefined);
   const isForegroundRecoveryInFlightRef = useRef<boolean>(false);
   const lastForegroundRecoveryAtRef = useRef<number>(0);
@@ -1458,7 +1459,7 @@ export default function App() {
     ].join('\n');
   };
 
-  const initializeCamera = async (): Promise<boolean> => {
+  const initializeCameraInternal = async (): Promise<boolean> => {
     const cameraSessionManager = cameraSessionManagerRef.current;
 
     const waitForPoseDetection = async (timeoutMs: number, sinceTimestampMs: number): Promise<boolean> => {
@@ -1754,6 +1755,20 @@ export default function App() {
     }
   };
 
+  const initializeCamera = async (): Promise<boolean> => {
+    if (initializeCameraInFlightRef.current) {
+      return initializeCameraInFlightRef.current;
+    }
+
+    const initTask = initializeCameraInternal().finally(() => {
+      if (initializeCameraInFlightRef.current === initTask) {
+        initializeCameraInFlightRef.current = null;
+      }
+    });
+    initializeCameraInFlightRef.current = initTask;
+    return initTask;
+  };
+
   const simplifyLoadingStatus = (status: string): string => {
     if (!status) return '正在加载中...';
     if (/camera|permission|摄像头|授权/i.test(status)) return '正在准备摄像头...';
@@ -1866,8 +1881,15 @@ export default function App() {
     const recoverAfterForeground = async (reason: string): Promise<void> => {
       if (disposed) return;
       if (document.visibilityState !== 'visible') return;
-      if (phaseRef.current === GamePhase.MENU || phaseRef.current === GamePhase.THEME_SELECTION) return;
+      if (
+        phaseRef.current === GamePhase.MENU ||
+        phaseRef.current === GamePhase.THEME_SELECTION ||
+        phaseRef.current === GamePhase.LOADING
+      ) {
+        return;
+      }
       if (isForegroundRecoveryInFlightRef.current) return;
+      if (initializeCameraInFlightRef.current) return;
       const now = Date.now();
       if (now - lastForegroundRecoveryAtRef.current < 800) return;
       lastForegroundRecoveryAtRef.current = now;

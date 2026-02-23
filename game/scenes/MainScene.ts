@@ -204,7 +204,8 @@ export class MainScene extends Phaser.Scene {
 
   private updateSceneBounds(width: number, height: number): void {
     if (!this.physics?.world) return;
-    this.physics.world.setBounds(0, 0, width, height);
+    const physicsBottom = Math.max(1, Math.round(this.floorSurfaceY));
+    this.physics.world.setBounds(0, 0, width, physicsBottom);
     this.cameras.main.setBounds(0, 0, width, height);
   }
 
@@ -243,6 +244,28 @@ export class MainScene extends Phaser.Scene {
     body.reset(safeX, safeY);
     body.setVelocity(0, 0);
     this.player.setAngle(0);
+  }
+
+  private stabilizePlayerOnFloor(): void {
+    if (!this.player || !this.player.body) return;
+    const body = this.player.body as Phaser.Physics.Arcade.Body;
+    const clampedX = Phaser.Math.Clamp(
+      this.player.x,
+      this.getLaneXPosition(0) - this.getLaneSpacing(),
+      this.getLaneXPosition(2) + this.getLaneSpacing()
+    );
+
+    const hardOutOfBounds =
+      !Number.isFinite(this.player.y) ||
+      !Number.isFinite(body.bottom) ||
+      this.player.y > this.floorSurfaceY + Math.max(this.playerHeight, 36 * this.gameScale) ||
+      body.top > this.stableViewportHeight + Math.max(this.playerHeight, 36 * this.gameScale);
+    if (hardOutOfBounds) {
+      this.player.setPosition(clampedX, this.floorSurfaceY);
+      body.reset(clampedX, this.floorSurfaceY);
+      body.setVelocity(0, 0);
+      this.player.setAngle(0);
+    }
   }
 
   private getBeeTextOffsetY(width: number, height: number): number {
@@ -1059,8 +1082,7 @@ export class MainScene extends Phaser.Scene {
     this.player.setDisplaySize(visualPlayerSize, visualPlayerSize);
     this.player.setOrigin(0.5, 1.0);
     this.player.setDepth(20);
-    // Keep lane control deterministic; avoid temporary world-bounds glitches snapping player to (0,0).
-    this.player.setCollideWorldBounds(false);
+    this.player.setCollideWorldBounds(true);
     this.player.setGravityY(this.getScaledPhysicsValue(this.GRAVITY_Y));
     
     const bodyWidth = visualPlayerSize * 0.6;
@@ -1219,12 +1241,12 @@ export class MainScene extends Phaser.Scene {
           const laneTargetX = this.getLaneXPosition(this.targetLaneIndex);
           const shouldSnapToFloor =
             !Number.isFinite(this.player.y) ||
-            this.player.y > this.floorSurfaceY ||
-            this.player.y < 0 ||
-            this.player.body.touching.down ||
-            this.player.body.blocked.down;
+            this.player.y > this.floorSurfaceY + Math.max(2, 8 * this.gameScale) ||
+            this.player.y < -visualPlayerSize;
           if (shouldSnapToFloor) {
-              this.player.y = this.floorSurfaceY;
+              const playerBody = this.player.body as Phaser.Physics.Arcade.Body;
+              playerBody.reset(this.player.x, this.floorSurfaceY);
+              playerBody.setVelocityY(0);
           }
 
           if (!Number.isFinite(this.player.x) || this.player.x < -safeWidth || this.player.x > safeWidth * 2) {
@@ -1334,8 +1356,16 @@ export class MainScene extends Phaser.Scene {
   update() {
     if (!this.player || !this.player.body) return;
     this.recoverPlayerIfCorrupted();
+    this.stabilizePlayerOnFloor();
 
-    const isOnGround = this.player.body.touching.down || this.player.body.blocked.down || this.player.y >= this.floorSurfaceY - 1;
+    const body = this.player.body as Phaser.Physics.Arcade.Body;
+    const nearFloor = Math.abs(this.player.y - this.floorSurfaceY) <= Math.max(1.5, 4 * this.gameScale);
+    const isSlowVertical = Math.abs(body.velocity.y) <= this.getScaledPhysicsValue(30);
+    const isOnGround =
+      body.touching.down ||
+      body.blocked.down ||
+      body.wasTouching.down ||
+      (nearFloor && isSlowVertical);
 
     const motionState = motionController.state;
     if (isOnGround) {
@@ -1378,7 +1408,7 @@ export class MainScene extends Phaser.Scene {
             this.jumpBurstEmitter.explode(20, this.player.x, this.player.y);
         }
     } else {
-        if (this.player.body.velocity.y > 0) {
+        if (body.velocity.y > 0) {
             this.player.setTexture('p1_stand');
         }
     }
@@ -1687,11 +1717,17 @@ export class MainScene extends Phaser.Scene {
     this.isInteractionActive = false;
     
     const recoilForce = this.getScaledPhysicsValue(400);
-    player.setVelocityY(recoilForce);
-    
+    const playerBody = player.body as Phaser.Physics.Arcade.Body;
+
     const pushDownPadding = Math.max(2, 6 * this.gameScale);
     const safePlayerY = blockBottomY + player.displayHeight + pushDownPadding;
-    player.y = Math.min(safePlayerY, this.floorSurfaceY);
+    const clampedY = Math.min(safePlayerY, this.floorSurfaceY);
+    playerBody.reset(player.x, clampedY);
+    if (clampedY >= this.floorSurfaceY - Math.max(1, 3 * this.gameScale)) {
+      playerBody.setVelocityY(0);
+    } else {
+      playerBody.setVelocityY(recoilForce);
+    }
     player.setAngle(0);
     
     const idx = block.getData('answerIndex');
