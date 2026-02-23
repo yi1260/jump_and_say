@@ -606,11 +606,31 @@ export class MainScene extends Phaser.Scene {
     this.jumpVelocity = Math.sqrt(2 * this.getScaledPhysicsValue(this.GRAVITY_Y) * requiredJumpHeight);
   }
 
+  private destroyBlockVisual(visuals: Phaser.GameObjects.Container | undefined): void {
+    if (!visuals || !visuals.active) return;
+    this.tweens.killTweensOf(visuals);
+    visuals.destroy();
+  }
+
+  private forceDestroyAllBlockVisuals(): void {
+    if (!this.blocks) return;
+    this.blocks.children.iterate((b: any) => {
+      if (!b) return true;
+      const visuals = b.getData('visuals') as Phaser.GameObjects.Container | undefined;
+      this.destroyBlockVisual(visuals);
+      b.setData('visuals', undefined);
+      b.setData('isCleaningUp', false);
+      return true;
+    });
+  }
+
   private applyBlockVisualLayout(
     block: Phaser.Physics.Arcade.Sprite,
     visuals: Phaser.GameObjects.Container | undefined,
     layout: AnswerCardLayout
   ): void {
+    if (block.getData('isCleaningUp')) return;
+
     const constrainedLayout = this.constrainCardLayout(layout, this.cameras.main.width, this.cameras.main.height);
     const snappedX = Math.round(constrainedLayout.centerX);
     const snappedY = Math.round(this.blockCenterY);
@@ -1259,6 +1279,7 @@ export class MainScene extends Phaser.Scene {
       if (this.blocks) {
           this.blocks.children.iterate((b: any) => {
               if (!b || !b.active) return true;
+              if (b.getData('isCleaningUp')) return true;
 
               const answerIndex = b.getData('answerIndex');
               const visuals = b.getData('visuals') as Phaser.GameObjects.Container | undefined;
@@ -1562,13 +1583,7 @@ export class MainScene extends Phaser.Scene {
     this.updateBeeWord(this.currentQuestion.question);
 
     // 清理旧的方块及其视觉容器
-    this.blocks.children.iterate((b: any) => {
-        const visuals = b.getData('visuals');
-        if (visuals) {
-            visuals.destroy();
-        }
-        return true;
-    });
+    this.forceDestroyAllBlockVisuals();
     this.blocks.clear(true, true);
 
     // 如果小蜜蜂容器已经存在但被销毁了（比如场景重启），需要重置引用
@@ -1623,6 +1638,7 @@ export class MainScene extends Phaser.Scene {
         block.setData('answerIndex', i);
         block.setData('answerKey', answerKey);
         block.setData('imageKey', textureKey);
+        block.setData('isCleaningUp', false);
 
         const container = this.add.container(x, blockY);
         const frameShadow = this.add
@@ -1868,7 +1884,10 @@ export class MainScene extends Phaser.Scene {
                 scaleY: 1.5,
                 alpha: 0,
                 duration: 200, 
-                onComplete: () => visuals.destroy()
+                onComplete: () => {
+                    this.destroyBlockVisual(visuals);
+                    block.setData('visuals', undefined);
+                }
             });
         }
 
@@ -2137,21 +2156,26 @@ export class MainScene extends Phaser.Scene {
 
     // 2. 木箱消失
     this.blocks.children.iterate((b: any) => {
-        if (b.active) {
-            const v = b.getData('visuals');
-            if(v) {
-                this.tweens.add({
-                    targets: v,
-                    scaleX: 0,
-                    scaleY: 0,
-                    duration: 300,
-                    onComplete: () => v.destroy()
-                });
-            }
+        if (!b) return true;
+
+        b.setData('isCleaningUp', true);
+        const v = b.getData('visuals') as Phaser.GameObjects.Container | undefined;
+        if (v && v.active) {
+            this.tweens.add({
+                targets: v,
+                scaleX: 0,
+                scaleY: 0,
+                duration: 300,
+                onComplete: () => {
+                    this.destroyBlockVisual(v);
+                    b.setData('visuals', undefined);
+                }
+            });
         }
         return true;
     });
     this.time.delayedCall(350, () => {
+        this.forceDestroyAllBlockVisuals();
         this.blocks.clear(true, true);
     });
   }
