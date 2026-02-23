@@ -67,6 +67,8 @@ export const isCameraPipelineError = (value: unknown): value is CameraPipelineEr
 );
 
 export class CameraSessionManager {
+  private acquireStreamInFlight: Promise<MediaStream> | null = null;
+
   public resolvePlatformInfo(): CameraPlatformInfo {
     const ua = navigator.userAgent;
     const isTouchMac = /Macintosh/i.test(ua) && 'ontouchend' in document;
@@ -169,6 +171,18 @@ export class CameraSessionManager {
   }
 
   public async acquireRenderableStream(options: AcquireRenderableStreamOptions): Promise<MediaStream> {
+    if (this.acquireStreamInFlight) {
+      return this.acquireStreamInFlight;
+    }
+
+    this.acquireStreamInFlight = this.acquireRenderableStreamInternal(options).finally(() => {
+      this.acquireStreamInFlight = null;
+    });
+
+    return this.acquireStreamInFlight;
+  }
+
+  private async acquireRenderableStreamInternal(options: AcquireRenderableStreamOptions): Promise<MediaStream> {
     const {
       videoElement,
       existingStream,
@@ -177,10 +191,11 @@ export class CameraSessionManager {
     } = options;
     const platformInfo = this.resolvePlatformInfo();
     const profiles = this.buildConstraintProfiles(platformInfo);
+    await this.waitForStableCameraStartWindow(platformInfo);
 
     if (existingStream && existingStream.active) {
       try {
-        await this.ensureRenderablePreview(videoElement, existingStream, {
+        await this.ensureRenderablePreviewWithRebind(videoElement, existingStream, {
           stage: 'reuse-existing-stream'
         });
         return existingStream;
@@ -198,9 +213,18 @@ export class CameraSessionManager {
     for (let attempt = 0; attempt <= renderRetryCount; attempt += 1) {
       const stream = await this.requestCameraStreamWithTimeout(profiles, permissionTimeoutMs);
       try {
-        await this.ensureRenderablePreview(videoElement, stream, {
-          stage: `fresh-stream-attempt-${attempt + 1}`
-        });
+        if (platformInfo.platform === 'ios') {
+          await this.ensureRenderablePreviewWithRebind(videoElement, stream, {
+            stage: `fresh-stream-attempt-${attempt + 1}`
+          });
+        } else {
+          await this.ensureStreamRenderableWithProbe(stream, {
+            stage: `fresh-stream-attempt-${attempt + 1}`
+          });
+          await this.ensureRenderablePreviewWithRebind(videoElement, stream, {
+            stage: `fresh-stream-attempt-${attempt + 1}:bind-preview`
+          });
+        }
         return stream;
       } catch (error) {
         lastRenderError = error;
@@ -224,7 +248,7 @@ export class CameraSessionManager {
         if (platformInfo.platform === 'ios') {
           await this.performIosCameraKick();
         }
-        await waitMs(350);
+        await waitMs(platformInfo.platform === 'ios' ? 520 : 350);
       }
     }
 
@@ -234,8 +258,47 @@ export class CameraSessionManager {
     throw new CameraPipelineError('VIDEO_STREAM_NOT_RENDERING', 'Video stream is not renderable');
   }
 
+  private async waitForStableCameraStartWindow(platformInfo: CameraPlatformInfo): Promise<void> {
+    if (document.visibilityState !== 'visible') {
+      const becameVisible = await new Promise<boolean>((resolve) => {
+        let settled = false;
+        const timeoutId = window.setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          document.removeEventListener('visibilitychange', onVisibilityChange);
+          resolve(false);
+        }, 1600);
+        const onVisibilityChange = () => {
+          if (settled || document.visibilityState !== 'visible') return;
+          settled = true;
+          window.clearTimeout(timeoutId);
+          document.removeEventListener('visibilitychange', onVisibilityChange);
+          resolve(true);
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+      });
+      if (!becameVisible) {
+        return;
+      }
+    }
+
+    const waitReadyStateUntil = performance.now() + 1800;
+    while (document.readyState === 'loading' && performance.now() < waitReadyStateUntil) {
+      await waitMs(80);
+    }
+
+    if (platformInfo.platform === 'ios') {
+      await waitMs(220);
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => resolve());
+        });
+      });
+    }
+  }
+
   public async recoverForegroundPreview(videoElement: HTMLVideoElement, stream: MediaStream): Promise<void> {
-    await this.ensureRenderablePreview(videoElement, stream, {
+    await this.ensureRenderablePreviewWithRebind(videoElement, stream, {
       stage: 'foreground-recover',
       metadataTimeoutMs: 2200,
       playTimeoutMs: 3500,
@@ -363,7 +426,7 @@ export class CameraSessionManager {
   ): Promise<void> {
     this.configureVideoElement(videoElement);
     if (videoElement.srcObject !== stream) {
-      this.detachVideoElement(videoElement, false);
+      this.detachVideoElement(videoElement, true);
       videoElement.srcObject = stream;
     }
 
@@ -397,6 +460,64 @@ export class CameraSessionManager {
     if (!hasFrameProgress) {
       this.logVideoRenderDiagnostics(`${options.stage}:frame-timeout`, videoElement, stream);
       throw new CameraPipelineError('VIDEO_STREAM_NOT_RENDERING', 'VIDEO_STREAM_NOT_RENDERING');
+    }
+  }
+
+  private async ensureRenderablePreviewWithRebind(
+    videoElement: HTMLVideoElement,
+    stream: MediaStream,
+    options: EnsureRenderableOptions
+  ): Promise<void> {
+    try {
+      await this.ensureRenderablePreview(videoElement, stream, options);
+    } catch (error) {
+      const isRenderError =
+        (error instanceof CameraPipelineError && error.code === 'VIDEO_STREAM_NOT_RENDERING') ||
+        (error instanceof Error && error.message === 'VIDEO_STREAM_NOT_RENDERING');
+      if (!isRenderError) {
+        throw error;
+      }
+
+      console.warn('[Camera] Preview render probe failed, trying hard rebind once.', {
+        stage: options.stage,
+        tracks: this.getVideoTrackDiagnostics(stream)
+      });
+
+      this.detachVideoElement(videoElement, true);
+      await waitMs(140);
+      await this.ensureRenderablePreview(videoElement, stream, {
+        ...options,
+        stage: `${options.stage}:hard-rebind`
+      });
+    }
+  }
+
+  private async ensureStreamRenderableWithProbe(stream: MediaStream, options: EnsureRenderableOptions): Promise<void> {
+    const probeVideo = document.createElement('video');
+    this.configureVideoElement(probeVideo);
+    probeVideo.style.position = 'fixed';
+    probeVideo.style.width = '1px';
+    probeVideo.style.height = '1px';
+    probeVideo.style.opacity = '0';
+    probeVideo.style.pointerEvents = 'none';
+    probeVideo.style.left = '-9999px';
+    probeVideo.style.top = '-9999px';
+    document.body.appendChild(probeVideo);
+
+    try {
+      await this.ensureRenderablePreview(probeVideo, stream, {
+        ...options,
+        stage: `${options.stage}:probe`,
+        metadataTimeoutMs: options.metadataTimeoutMs ?? 3200,
+        playTimeoutMs: options.playTimeoutMs ?? 3600,
+        frameTimeoutMs: options.frameTimeoutMs ?? 3600,
+        waitUnmuteMs: options.waitUnmuteMs ?? 1800
+      });
+    } finally {
+      this.detachVideoElement(probeVideo, true);
+      if (probeVideo.parentNode) {
+        probeVideo.parentNode.removeChild(probeVideo);
+      }
     }
   }
 
@@ -447,15 +568,28 @@ export class CameraSessionManager {
       }
 
       let resolved = false;
+      const checkReady = (): void => {
+        if (resolved) return;
+        if (videoElement.readyState >= 1 || (videoElement.videoWidth > 0 && videoElement.videoHeight > 0)) {
+          resolved = true;
+          cleanup();
+          resolve('ready');
+        }
+      };
+
       const timeoutId = window.setTimeout(() => {
         if (resolved) return;
         resolved = true;
         cleanup();
         resolve('timeout');
       }, timeoutMs);
+      const pollId = window.setInterval(() => {
+        checkReady();
+      }, 120);
 
       const cleanup = () => {
         window.clearTimeout(timeoutId);
+        window.clearInterval(pollId);
         videoElement.removeEventListener('loadedmetadata', onReady);
         videoElement.removeEventListener('loadeddata', onReady);
         videoElement.removeEventListener('canplay', onReady);
@@ -539,9 +673,6 @@ export class CameraSessionManager {
       while (performance.now() - startedAt < maxWaitMs) {
         const videoTracks = stream.getVideoTracks();
         const hasLiveTrack = videoTracks.some((track) => track.readyState === 'live' && track.enabled);
-        const hasUnmutedLiveTrack = videoTracks.some(
-          (track) => track.readyState === 'live' && track.enabled && !track.muted
-        );
         const hasUsableVideoSize = videoElement.videoWidth > 0 && videoElement.videoHeight > 0;
         const isVideoElementActive = !videoElement.paused && !videoElement.ended;
         const currentTime = Number.isFinite(videoElement.currentTime) ? videoElement.currentTime : baselineCurrentTime;
@@ -561,8 +692,7 @@ export class CameraSessionManager {
           hasLiveTrack &&
           hasUsableVideoSize &&
           isVideoElementActive &&
-          hasFrameProgress &&
-          (hasUnmutedLiveTrack || hasDecodedFrameCountProgress || hasFrameCallbackPresentedFramesProgress)
+          hasFrameProgress
         ) {
           return true;
         }
