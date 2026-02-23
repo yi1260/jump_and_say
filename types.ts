@@ -12,6 +12,16 @@ export interface MotionState {
   smoothedState?: MotionState; // Optional recursive reference for smoothed state
 }
 
+export type JumpReadinessStatus = 'no_pose' | 'adjusting' | 'stabilizing' | 'ready';
+
+export interface JumpReadinessState {
+  status: JumpReadinessStatus;
+  isReady: boolean;
+  message: string;
+  requirements: string;
+  stableProgress: number;
+}
+
 export interface PoseLandmark {
   x: number;
   y: number;

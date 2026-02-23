@@ -1,4 +1,4 @@
-import { MotionState, PoseLandmark } from '../types';
+import { JumpReadinessState, MotionState, PoseLandmark } from '../types';
 
 const LOG_LEVEL = {
   DEBUG: 0,
@@ -57,6 +57,15 @@ interface Point2D {
   y: number;
 }
 
+type JumpReadinessIssue =
+  | 'no_pose'
+  | 'upper_body_missing'
+  | 'too_far'
+  | 'too_close'
+  | 'off_center'
+  | 'head_out_of_frame'
+  | 'too_unstable';
+
 declare global {
   interface Window {
     Pose?: PoseConstructor;
@@ -78,7 +87,14 @@ export class MotionController {
   private readonly MAX_MISSED_DETECTIONS = 12;
 
   private readonly REF_SHOULDER_WIDTH = 0.22;
-  private readonly REF_TORSO_HEIGHT = 0.25;
+  private readonly JUMP_READY_REQUIREMENTS = '请露出头部到髋部、站在画面中间，距离镜头约0.6~1.2米';
+  private readonly JUMP_READY_STABLE_MS = 700;
+  private readonly JUMP_READY_HOLD_MS = 700;
+  private readonly JUMP_MIN_UPPER_BODY_HEIGHT = 0.1;
+  private readonly JUMP_MAX_UPPER_BODY_HEIGHT = 0.95;
+  private readonly JUMP_MAX_CENTER_OFFSET = 0.28;
+  private readonly JUMP_MIN_NOSE_Y = 0.04;
+  private readonly JUMP_MAX_NOSE_Y = 0.6;
 
   private xThreshold: number = 0.12;
 
@@ -124,6 +140,14 @@ export class MotionController {
   public isStarted: boolean = false;
   public onMotionDetected: ((type: 'jump' | 'move') => void) | null = null;
   public poseLandmarks: PoseLandmark[] | null = null;
+  private filteredPoseLandmarks: PoseLandmark[] | null = null;
+  public jumpReadiness: JumpReadinessState = {
+    status: 'no_pose',
+    isReady: false,
+    message: '请站到镜头前并露出头部到髋部',
+    requirements: this.JUMP_READY_REQUIREMENTS,
+    stableProgress: 0
+  };
 
   public isActuallyRunning(): boolean {
     return this.isRunning && this.requestRef !== null;
@@ -135,6 +159,8 @@ export class MotionController {
   private neutralX: number = 0.5;
   private smoothedBodyY: number = 0.5;
   private smoothedHeadY: number = 0.5;
+  private smoothedShoulderY: number = 0.5;
+  private smoothedHipY: number = 0.62;
   private smoothedNoseX: number = 0.5;
   private smoothedNoseY: number = 0.5;
   private smoothedBoxCenterX: number = 0.5;
@@ -146,9 +172,38 @@ export class MotionController {
   private jumpCandidateFrames: number = 0;
   private jumpArmed: boolean = true;
   private lastPoseLandmarksAt: number = 0;
+  private jumpReadyStableStartAt: number | null = null;
+  private jumpNoiseVelocity: number = 1;
+  private jumpNoiseBodyDy: number = 0.03;
+  private jumpNoiseHeadDy: number = 0.025;
+  private jumpNoiseShoulderDy: number = 0.025;
+  private jumpNoiseHipDy: number = 0.025;
+  private jumpNoiseShoulderVelocity: number = 0.9;
+  private jumpNoiseHorizontalVelocity: number = 0.35;
+  private jumpNoiseLift: number = 0.02;
+  private jumpNoiseVerticalDisagreement: number = 0.09;
+  private jumpLiftSignalPrev: number = 0;
+  private jumpLateralCoupling: number = 0.035;
+  private jumpIntentScore: number = 0;
+  private lastJumpReadyAt: number = 0;
+  private jumpBaselineBodyY: number = 0.5;
+  private jumpBaselineHeadY: number = 0.5;
+  private jumpBaselineShoulderY: number = 0.5;
+  private jumpBaselineHipY: number = 0.62;
+  private jumpBaselineShoulderWidth: number = 0.22;
+  private jumpBaselineTorsoHeight: number = 0.25;
+  private jumpCalibrationFrames: number = 0;
+  private jumpHasCalibration: boolean = false;
+  private smoothedUpperBodyHeight: number = 0.24;
+  private jumpQuietFrames: number = 0;
+  private jumpStableFrames: number = 0;
+  private jumpReliabilityScore: number = 1;
+  private missingHipFrames: number = 0;
+  private lastReliablePoseAt: number = 0;
+  private jumpSuppressUntil: number = 0;
 
   private lastJumpTime: number = 0;
-  private readonly JUMP_COOLDOWN = 800;
+  private readonly JUMP_COOLDOWN = 500;
 
   private async prewarmPoseAssets(base: string): Promise<void> {
     if (!('caches' in window)) return;
@@ -294,7 +349,7 @@ export class MotionController {
 
       pose.setOptions({
         modelComplexity: 0,
-        smoothLandmarks: false,
+        smoothLandmarks: true,
         minDetectionConfidence: 0.5,
         minTrackingConfidence: 0.5,
         selfieMode: false
@@ -464,6 +519,8 @@ export class MotionController {
     this.neutralX = 0.5;
     this.smoothedBodyY = 0.5;
     this.smoothedHeadY = 0.5;
+    this.smoothedShoulderY = 0.5;
+    this.smoothedHipY = 0.62;
     this.smoothedNoseX = 0.5;
     this.smoothedNoseY = 0.5;
     this.smoothedBoxCenterX = 0.5;
@@ -474,6 +531,35 @@ export class MotionController {
     this.smoothedTorsoHeight = 0.25;
     this.jumpCandidateFrames = 0;
     this.jumpArmed = true;
+    this.jumpReadyStableStartAt = null;
+    this.jumpNoiseVelocity = 1;
+    this.jumpNoiseBodyDy = 0.03;
+    this.jumpNoiseHeadDy = 0.025;
+    this.jumpNoiseShoulderDy = 0.025;
+    this.jumpNoiseHipDy = 0.025;
+    this.jumpNoiseShoulderVelocity = 0.9;
+    this.jumpNoiseHorizontalVelocity = 0.35;
+    this.jumpNoiseLift = 0.02;
+    this.jumpNoiseVerticalDisagreement = 0.09;
+    this.jumpLiftSignalPrev = 0;
+    this.jumpLateralCoupling = 0.035;
+    this.jumpIntentScore = 0;
+    this.lastJumpReadyAt = 0;
+    this.jumpBaselineBodyY = 0.5;
+    this.jumpBaselineHeadY = 0.5;
+    this.jumpBaselineShoulderY = 0.5;
+    this.jumpBaselineHipY = 0.62;
+    this.jumpBaselineShoulderWidth = 0.22;
+    this.jumpBaselineTorsoHeight = 0.25;
+    this.jumpCalibrationFrames = 0;
+    this.jumpHasCalibration = false;
+    this.smoothedUpperBodyHeight = 0.24;
+    this.jumpQuietFrames = 0;
+    this.jumpStableFrames = 0;
+    this.jumpReliabilityScore = 1;
+    this.missingHipFrames = 0;
+    this.lastReliablePoseAt = 0;
+    this.jumpSuppressUntil = 0;
     this.state.isJumping = false;
     this.state.bodyX = 0.5;
     this.state.rawNoseX = 0.5;
@@ -484,7 +570,9 @@ export class MotionController {
     this.state.rawFaceHeight = 0.24;
     this.state.rawShoulderY = 0.5;
     this.poseLandmarks = null;
+    this.filteredPoseLandmarks = null;
     this.lastPoseLandmarksAt = 0;
+    this.resetJumpReadiness();
 
     log(1, 'START', 'Loop starting');
     this.processFrame();
@@ -494,7 +582,34 @@ export class MotionController {
     this.isRunning = false;
     this.isStarted = false;
     this.poseLandmarks = null;
+    this.filteredPoseLandmarks = null;
     this.lastPoseLandmarksAt = 0;
+    this.jumpCandidateFrames = 0;
+    this.jumpArmed = true;
+    this.lastJumpReadyAt = 0;
+    this.jumpBaselineBodyY = 0.5;
+    this.jumpBaselineHeadY = 0.5;
+    this.jumpBaselineShoulderY = 0.5;
+    this.jumpBaselineHipY = 0.62;
+    this.jumpBaselineShoulderWidth = 0.22;
+    this.jumpBaselineTorsoHeight = 0.25;
+    this.jumpCalibrationFrames = 0;
+    this.jumpHasCalibration = false;
+    this.jumpNoiseShoulderVelocity = 0.9;
+    this.jumpNoiseHorizontalVelocity = 0.35;
+    this.jumpNoiseLift = 0.02;
+    this.jumpNoiseVerticalDisagreement = 0.09;
+    this.jumpLiftSignalPrev = 0;
+    this.jumpLateralCoupling = 0.035;
+    this.jumpIntentScore = 0;
+    this.jumpQuietFrames = 0;
+    this.jumpStableFrames = 0;
+    this.jumpReliabilityScore = 1;
+    this.missingHipFrames = 0;
+    this.smoothedUpperBodyHeight = 0.24;
+    this.lastReliablePoseAt = 0;
+    this.jumpSuppressUntil = 0;
+    this.resetJumpReadiness();
     if (this.requestRef !== null) {
       cancelAnimationFrame(this.requestRef);
       this.requestRef = null;
@@ -514,17 +629,230 @@ export class MotionController {
     return false;
   }
 
+  private setJumpReadiness(next: JumpReadinessState): void {
+    this.jumpReadiness = next;
+  }
+
+  private getJumpReadinessMessage(issues: JumpReadinessIssue[]): string {
+    if (issues.includes('no_pose')) return '请站到镜头前并露出头部到髋部';
+    if (issues.includes('upper_body_missing')) return '请露出头部、肩膀和髋部（可把设备稍放低）';
+    if (issues.includes('too_far')) return '离镜头太远，请前进半步（建议约0.6~1.2米）';
+    if (issues.includes('too_close')) return '离镜头太近，请后退半步（建议约0.6~1.2米）';
+    if (issues.includes('off_center')) return '请站到画面中间';
+    if (issues.includes('head_out_of_frame')) return '请让头部完整出现在画面内';
+    if (issues.includes('too_unstable')) return '请先站稳，再开始跳';
+    return '请按提示调整站位';
+  }
+
+  private resetJumpReadiness(message = '请站到镜头前并露出头部到髋部'): void {
+    this.jumpReadyStableStartAt = null;
+    this.setJumpReadiness({
+      status: 'no_pose',
+      isReady: false,
+      message,
+      requirements: this.JUMP_READY_REQUIREMENTS,
+      stableProgress: 0
+    });
+  }
+
+  private updateJumpReadiness(
+    now: number,
+    issues: JumpReadinessIssue[],
+    isStableForCalibration: boolean,
+    bodyCenterY: number,
+    shoulderCenterY: number,
+    hipCenterY: number,
+    rawNoseY: number,
+    shoulderWidth: number,
+    torsoHeight: number,
+    normalizedVelocityAbs: number,
+    normalizedBodyDyAbs: number,
+    normalizedHeadDyAbs: number,
+    normalizedShoulderDyAbs: number,
+    normalizedHipDyAbs: number
+  ): void {
+    const hadReady = this.jumpReadiness.isReady;
+    if (issues.length > 0) {
+      const hasPositionIssue = issues.some((issue) =>
+        issue === 'upper_body_missing' ||
+        issue === 'too_far' ||
+        issue === 'too_close' ||
+        issue === 'off_center' ||
+        issue === 'head_out_of_frame'
+      );
+      const shouldHoldReady =
+        hadReady &&
+        now - this.lastJumpReadyAt <= this.JUMP_READY_HOLD_MS &&
+        !issues.includes('no_pose') &&
+        !hasPositionIssue;
+      if (shouldHoldReady) {
+        this.setJumpReadiness({
+          status: 'ready',
+          isReady: true,
+          message: '跳跃检测已就绪',
+          requirements: this.JUMP_READY_REQUIREMENTS,
+          stableProgress: 1
+        });
+        return;
+      }
+      this.jumpReadyStableStartAt = null;
+      this.setJumpReadiness({
+        status: issues.includes('no_pose') ? 'no_pose' : 'adjusting',
+        isReady: false,
+        message: this.getJumpReadinessMessage(issues),
+        requirements: this.JUMP_READY_REQUIREMENTS,
+        stableProgress: 0
+      });
+      return;
+    }
+
+    if (!isStableForCalibration) {
+      this.jumpReadyStableStartAt = null;
+      this.setJumpReadiness({
+        status: 'adjusting',
+        isReady: false,
+        message: this.getJumpReadinessMessage(['too_unstable']),
+        requirements: this.JUMP_READY_REQUIREMENTS,
+        stableProgress: 0
+      });
+      return;
+    }
+
+    if (this.jumpReadyStableStartAt === null) {
+      this.jumpReadyStableStartAt = now;
+    }
+
+    const stableProgress = this.clamp((now - this.jumpReadyStableStartAt) / this.JUMP_READY_STABLE_MS, 0, 1);
+    const isReady = stableProgress >= 1;
+    if (isReady) {
+      this.lastJumpReadyAt = now;
+    }
+
+    this.setJumpReadiness({
+      status: isReady ? 'ready' : 'stabilizing',
+      isReady,
+      message: isReady ? '跳跃检测已就绪' : `保持站稳 ${Math.max(1, Math.ceil((1 - stableProgress) * 2))} 秒`,
+      requirements: this.JUMP_READY_REQUIREMENTS,
+      stableProgress
+    });
+
+    if (!hadReady && isReady) {
+      this.neutralX = this.currentBodyX;
+      this.smoothedBodyY = bodyCenterY;
+      this.smoothedShoulderY = shoulderCenterY;
+      this.smoothedHipY = hipCenterY;
+      this.smoothedHeadY = rawNoseY;
+      this.jumpBaselineBodyY = bodyCenterY;
+      this.jumpBaselineHeadY = rawNoseY;
+      this.jumpBaselineShoulderY = shoulderCenterY;
+      this.jumpBaselineHipY = hipCenterY;
+      this.jumpBaselineShoulderWidth = Math.max(shoulderWidth, this.jumpBaselineShoulderWidth);
+      this.jumpBaselineTorsoHeight = Math.max(torsoHeight, this.jumpBaselineTorsoHeight);
+      this.jumpCandidateFrames = 0;
+      this.jumpArmed = true;
+      this.jumpNoiseVelocity = this.clamp(Math.max(0.7, normalizedVelocityAbs), 0.7, 2.2);
+      this.jumpNoiseBodyDy = this.clamp(Math.max(0.02, normalizedBodyDyAbs), 0.02, 0.09);
+      this.jumpNoiseHeadDy = this.clamp(Math.max(0.02, normalizedHeadDyAbs), 0.02, 0.09);
+      this.jumpNoiseShoulderDy = this.clamp(Math.max(0.018, normalizedShoulderDyAbs), 0.018, 0.1);
+      this.jumpNoiseHipDy = this.clamp(Math.max(0.018, normalizedHipDyAbs), 0.018, 0.1);
+      this.jumpNoiseShoulderVelocity = this.clamp(Math.max(0.7, normalizedVelocityAbs), 0.7, 2.6);
+      this.jumpNoiseLift = 0.02;
+      this.jumpNoiseVerticalDisagreement = 0.09;
+      this.jumpLiftSignalPrev = 0;
+      this.jumpIntentScore = 0;
+      this.jumpCalibrationFrames = 1;
+      this.jumpHasCalibration = true;
+    } else if (isReady && isStableForCalibration) {
+      const calibrationAlpha = 0.08;
+      this.jumpBaselineBodyY = this.jumpBaselineBodyY * (1 - calibrationAlpha) + bodyCenterY * calibrationAlpha;
+      this.jumpBaselineShoulderY = this.jumpBaselineShoulderY * (1 - calibrationAlpha) + shoulderCenterY * calibrationAlpha;
+      this.jumpBaselineHipY = this.jumpBaselineHipY * (1 - calibrationAlpha) + hipCenterY * calibrationAlpha;
+      this.jumpBaselineHeadY = this.jumpBaselineHeadY * (1 - calibrationAlpha) + rawNoseY * calibrationAlpha;
+      this.jumpBaselineShoulderWidth = this.jumpBaselineShoulderWidth * (1 - calibrationAlpha) + shoulderWidth * calibrationAlpha;
+      this.jumpBaselineTorsoHeight = this.jumpBaselineTorsoHeight * (1 - calibrationAlpha) + torsoHeight * calibrationAlpha;
+      this.jumpCalibrationFrames = Math.min(80, this.jumpCalibrationFrames + 1);
+      this.jumpHasCalibration = this.jumpCalibrationFrames >= 3;
+    }
+  }
+
   private clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value));
   }
 
-  private toPoint(landmark?: PoseLandmark): Point2D | null {
+  private stabilizePoseLandmarks(landmarks: PoseLandmark[], now: number): PoseLandmark[] {
+    if (!this.filteredPoseLandmarks || this.filteredPoseLandmarks.length !== landmarks.length) {
+      this.filteredPoseLandmarks = landmarks.map((landmark) => ({ ...landmark }));
+      return this.filteredPoseLandmarks;
+    }
+
+    const elapsed = now - this.lastPoseLandmarksAt;
+    const dtSec = Math.max(0.016, elapsed > 0 && elapsed < 500 ? elapsed / 1000 : 0.033);
+    const baseAlpha = this.clamp(1 - Math.exp(-dtSec / 0.085), 0.16, 0.58);
+    const previous = this.filteredPoseLandmarks;
+
+    const stabilized = landmarks.map((landmark, index) => {
+      const prev = previous[index] || landmark;
+      const hasFiniteRaw =
+        Number.isFinite(landmark.x) &&
+        Number.isFinite(landmark.y) &&
+        Number.isFinite(prev.x) &&
+        Number.isFinite(prev.y);
+      if (!hasFiniteRaw) {
+        return {
+          ...prev,
+          visibility: landmark.visibility,
+          presence: landmark.presence
+        };
+      }
+
+      const confidence = this.getLandmarkConfidence(landmark);
+      const dx = landmark.x - prev.x;
+      const dy = landmark.y - prev.y;
+      const motion = Math.abs(dx) + Math.abs(dy);
+
+      let alpha = baseAlpha * (0.38 + confidence * 0.95);
+      if (motion > 0.22 && confidence < 0.45) {
+        alpha *= 0.35;
+      } else if (motion > 0.08 && confidence > 0.6) {
+        alpha *= 1.18;
+      }
+      alpha = this.clamp(alpha, 0.08, 0.82);
+
+      const nextX = prev.x + dx * alpha;
+      const nextY = prev.y + dy * alpha;
+      const rawZ = typeof landmark.z === 'number' ? landmark.z : prev.z;
+      const prevZ = typeof prev.z === 'number' ? prev.z : rawZ;
+      const hasFiniteZ = Number.isFinite(rawZ) && Number.isFinite(prevZ);
+      const nextZ = hasFiniteZ ? (prevZ as number) + ((rawZ as number) - (prevZ as number)) * alpha : rawZ;
+
+      return {
+        x: nextX,
+        y: nextY,
+        z: nextZ,
+        visibility: landmark.visibility,
+        presence: landmark.presence
+      };
+    });
+
+    this.filteredPoseLandmarks = stabilized;
+    return stabilized;
+  }
+
+  private toPoint(landmark?: PoseLandmark, minConfidence: number = 0.35): Point2D | null {
     if (!landmark) return null;
     if (!Number.isFinite(landmark.x) || !Number.isFinite(landmark.y)) return null;
     const visibility = typeof landmark.visibility === 'number' ? landmark.visibility : 1;
     const presence = typeof landmark.presence === 'number' ? landmark.presence : 1;
-    if (visibility < 0.35 || presence < 0.35) return null;
+    if (visibility < minConfidence || presence < minConfidence) return null;
     return { x: landmark.x, y: landmark.y };
+  }
+
+  private getLandmarkConfidence(landmark?: PoseLandmark): number {
+    if (!landmark) return 0;
+    const visibility = typeof landmark.visibility === 'number' ? landmark.visibility : 1;
+    const presence = typeof landmark.presence === 'number' ? landmark.presence : 1;
+    if (!Number.isFinite(visibility) || !Number.isFinite(presence)) return 0;
+    return Math.min(visibility, presence);
   }
 
   private resolveCenter(a: Point2D | null, b: Point2D | null, fallback: Point2D): Point2D {
@@ -538,25 +866,30 @@ export class MotionController {
 
   private onResults(results: PoseResults) {
     const now = performance.now();
-    const landmarks = Array.isArray(results.poseLandmarks) ? results.poseLandmarks : null;
-    if (!landmarks || landmarks.length === 0) {
+    const rawLandmarks = Array.isArray(results.poseLandmarks) ? results.poseLandmarks : null;
+    if (!rawLandmarks || rawLandmarks.length === 0) {
       this.missedDetections += 1;
       this.jumpCandidateFrames = 0;
+      this.jumpIntentScore = 0;
+      this.jumpStableFrames = 0;
       this.poseLandmarks = null;
+      this.filteredPoseLandmarks = null;
       this.lastPoseLandmarksAt = 0;
+      this.resetJumpReadiness('请站到镜头前并露出头部到髋部');
       this.lastResultTime = now;
       return;
     }
 
+    const landmarks = this.stabilizePoseLandmarks(rawLandmarks, now);
     this.missedDetections = 0;
     this.poseLandmarks = landmarks;
     this.lastPoseLandmarksAt = now;
 
-    const nose = this.toPoint(landmarks[0]);
-    const leftShoulder = this.toPoint(landmarks[11]);
-    const rightShoulder = this.toPoint(landmarks[12]);
-    const leftHip = this.toPoint(landmarks[23]);
-    const rightHip = this.toPoint(landmarks[24]);
+    const nose = this.toPoint(landmarks[0], 0.3);
+    const leftShoulder = this.toPoint(landmarks[11], 0.33);
+    const rightShoulder = this.toPoint(landmarks[12], 0.33);
+    const leftHip = this.toPoint(landmarks[23], 0.22);
+    const rightHip = this.toPoint(landmarks[24], 0.22);
 
     const fallbackCenter: Point2D = nose || { x: 0.5, y: 0.5 };
     const shoulderCenter = this.resolveCenter(leftShoulder, rightShoulder, fallbackCenter);
@@ -566,8 +899,8 @@ export class MotionController {
       y: (shoulderCenter.y + hipCenter.y) / 2
     };
 
-    const rawNoseX = nose?.x ?? shoulderCenter.x;
-    const rawNoseY = nose?.y ?? shoulderCenter.y;
+    const rawNoseX = nose?.x ?? this.smoothedNoseX;
+    const rawNoseY = nose?.y ?? this.smoothedNoseY;
 
     const boxPoints = [nose, leftShoulder, rightShoulder, leftHip, rightHip].filter(
       (point): point is Point2D => !!point
@@ -606,11 +939,9 @@ export class MotionController {
 
     const torsoHeight = Math.abs(hipCenter.y - shoulderCenter.y);
     const torsoHeightCandidate = torsoHeight > 0.02 ? torsoHeight : this.smoothedTorsoHeight;
-    const torsoHeightRatio = this.smoothedTorsoHeight > 0
-      ? Math.abs(torsoHeightCandidate - this.smoothedTorsoHeight) / this.smoothedTorsoHeight
-      : 0;
     this.smoothedTorsoHeight = this.smoothedTorsoHeight * 0.92 + torsoHeightCandidate * 0.08;
 
+    const prevBodyX = this.currentBodyX;
     const mirroredBodyX = 1 - bodyCenter.x;
     this.currentBodyX = this.currentBodyX * 0.55 + mirroredBodyX * 0.45;
     this.state.bodyX = this.currentBodyX;
@@ -646,51 +977,440 @@ export class MotionController {
       this.neutralX = this.neutralX * 0.98 + this.currentBodyX * 0.02;
     }
 
-    if (this.state.x !== targetLane) {
+    const laneChanged = this.state.x !== targetLane;
+    if (laneChanged) {
       this.onMotionDetected?.('move');
     }
     this.state.x = targetLane;
+    const horizontalVelocityNorm =
+      Math.abs(this.currentBodyX - prevBodyX) /
+      Math.max(dtSec, 0.016) /
+      Math.max(this.smoothedShoulderWidth, 0.08);
+    this.jumpNoiseHorizontalVelocity =
+      this.jumpNoiseHorizontalVelocity * 0.92 + this.clamp(horizontalVelocityNorm, 0, 3.5) * 0.08;
+    const horizontalGateThreshold = this.clamp(
+      Math.max(0.62, this.jumpNoiseHorizontalVelocity * 1.75 + 0.12),
+      0.6,
+      2.6
+    );
+    const hasStrongLateralMotion = horizontalVelocityNorm > horizontalGateThreshold * 1.08;
+    const lateralIntensity = horizontalVelocityNorm / Math.max(horizontalGateThreshold, 0.01);
+    if (laneChanged || hasStrongLateralMotion) {
+      this.jumpSuppressUntil = now + this.clamp(220 + lateralIntensity * 120, 220, 520);
+      this.jumpStableFrames = 0;
+    }
 
     const bodyDy = this.smoothedBodyY - bodyCenter.y;
+    const shoulderDy = this.smoothedShoulderY - shoulderCenter.y;
+    const hipDy = this.smoothedHipY - hipCenter.y;
     const headDy = this.smoothedHeadY - rawNoseY;
     const velocity = bodyDy / dtSec;
+    const shoulderVelocity = shoulderDy / dtSec;
+    const torsoNorm = Math.max(this.smoothedTorsoHeight, 0.1);
+    const normalizedBodyDy = bodyDy / torsoNorm;
+    const normalizedHeadDy = headDy / torsoNorm;
+    const normalizedShoulderDy = shoulderDy / torsoNorm;
+    const normalizedHipDy = hipDy / torsoNorm;
+    const normalizedVelocity = velocity / torsoNorm;
+    const normalizedShoulderVelocity = shoulderVelocity / torsoNorm;
+    const normalizedVelocityAbs = Math.abs(normalizedVelocity);
+    const normalizedShoulderVelocityAbs = Math.abs(normalizedShoulderVelocity);
+    const normalizedBodyDyAbs = Math.abs(normalizedBodyDy);
+    const normalizedHeadDyAbs = Math.abs(normalizedHeadDy);
+    const normalizedShoulderDyAbs = Math.abs(normalizedShoulderDy);
+    const normalizedHipDyAbs = Math.abs(normalizedHipDy);
 
     this.smoothedBodyY = this.smoothedBodyY * 0.9 + bodyCenter.y * 0.1;
+    this.smoothedShoulderY = this.smoothedShoulderY * 0.9 + shoulderCenter.y * 0.1;
+    this.smoothedHipY = this.smoothedHipY * 0.9 + hipCenter.y * 0.1;
     this.smoothedHeadY = this.smoothedHeadY * 0.9 + rawNoseY * 0.1;
+    const hasShoulders = !!(leftShoulder && rightShoulder);
+    const hasAnyHip = !!(leftHip || rightHip);
+    this.missingHipFrames = hasAnyHip ? 0 : Math.min(180, this.missingHipFrames + 1);
+    const hasCoreBody = hasShoulders && hasAnyHip;
+    const hasJumpTrackUpperBody = hasShoulders && !!nose;
+    const hasUpperBody = hasCoreBody && !!nose;
+    const upperBodyHeightRaw = nose ? hipCenter.y - nose.y : this.smoothedUpperBodyHeight;
+    const prevUpperBodyHeight = this.smoothedUpperBodyHeight;
+    this.smoothedUpperBodyHeight = this.smoothedUpperBodyHeight * 0.88 + upperBodyHeightRaw * 0.12;
+    const upperBodyHeight = this.smoothedUpperBodyHeight;
+    const centerOffset = Math.abs(this.smoothedBoxCenterX - 0.5);
+    const noseYForReadiness = this.smoothedNoseY;
+    const leftHipConfidence = this.getLandmarkConfidence(landmarks[23]);
+    const rightHipConfidence = this.getLandmarkConfidence(landmarks[24]);
+    const shoulderConfidence = (this.getLandmarkConfidence(landmarks[11]) + this.getLandmarkConfidence(landmarks[12])) / 2;
+    const hipConfidence = leftHip && rightHip ? (leftHipConfidence + rightHipConfidence) / 2 : Math.max(leftHipConfidence, rightHipConfidence);
+    const noseConfidence = this.getLandmarkConfidence(landmarks[0]);
+    const coreConfidence = hasAnyHip
+      ? shoulderConfidence * 0.48 + hipConfidence * 0.34 + noseConfidence * 0.18
+      : shoulderConfidence * 0.72 + noseConfidence * 0.28;
+    const torsoShoulderRatio = torsoHeight / Math.max(shoulderWidth, 0.02);
+    const isGeometryReasonable = hasAnyHip
+      ? (
+          shoulderWidth > 0.022 &&
+          torsoHeight > 0.03 &&
+          torsoShoulderRatio > 0.42 &&
+          torsoShoulderRatio < 3.6
+        )
+      : shoulderWidth > 0.022;
+    const hasReliableCore =
+      (hasAnyHip ? hasCoreBody : hasJumpTrackUpperBody) &&
+      coreConfidence >= (hasAnyHip ? 0.34 : 0.38) &&
+      isGeometryReasonable;
+    const verticalDisagreement = hasAnyHip
+      ? Math.abs(normalizedShoulderDy - normalizedHipDy) * 0.7 + Math.abs(normalizedHeadDy - normalizedShoulderDy) * 0.3
+      : Math.abs(normalizedHeadDy - normalizedShoulderDy);
+    const shoulderTiltRatio =
+      leftShoulder && rightShoulder
+        ? Math.abs(leftShoulder.y - rightShoulder.y) / Math.max(shoulderWidth, 0.04)
+        : 0;
+    let isOutlierFrame = false;
+    if (this.lastReliablePoseAt > 0) {
+      const upperBodyDrift = Math.abs(upperBodyHeightRaw - prevUpperBodyHeight) / Math.max(prevUpperBodyHeight, 0.12);
+      const centerDrift = Math.abs(boxCenterX - this.smoothedBoxCenterX);
+      const shoulderWidthDrift = shoulderWidth > 0 ? Math.abs(shoulderWidth - this.smoothedShoulderWidth) / Math.max(this.smoothedShoulderWidth, 0.08) : 0;
+      const torsoDrift = torsoHeight > 0 ? Math.abs(torsoHeight - this.smoothedTorsoHeight) / Math.max(this.smoothedTorsoHeight, 0.08) : 0;
+      const verticalConflict = hasAnyHip && (
+        normalizedShoulderDy * normalizedHipDy < -0.01 &&
+        normalizedShoulderDyAbs + normalizedHipDyAbs > 0.18
+      );
+      const structureConflict = verticalDisagreement > 0.28 && normalizedVelocityAbs < 2.3;
+      const tiltConflict = shoulderTiltRatio > 0.98 && normalizedVelocityAbs > 0.82;
+      isOutlierFrame =
+        verticalConflict ||
+        structureConflict ||
+        tiltConflict ||
+        upperBodyDrift > 0.58 ||
+        shoulderWidthDrift > 0.62 ||
+        torsoDrift > 0.7 ||
+        (centerDrift > 0.22 && normalizedVelocityAbs < 0.95);
+    }
+    const isReliableFrame = hasReliableCore && !isOutlierFrame;
+    this.jumpReliabilityScore = this.jumpReliabilityScore * 0.9 + (isReliableFrame ? 1 : 0) * 0.1;
+    if (isReliableFrame) {
+      this.lastReliablePoseAt = now;
+    }
+    const issues: JumpReadinessIssue[] = [];
 
-    const torsoScale = this.clamp(this.smoothedTorsoHeight / this.REF_TORSO_HEIGHT, 0.35, 1.6);
-    const velocityThreshold = 1.4 * torsoScale;
-    const displacementThreshold = 0.045 * torsoScale;
-    const headDisplacementThreshold = 0.03 * torsoScale;
+    if (!hasUpperBody || coreConfidence < 0.3) {
+      issues.push('upper_body_missing');
+    }
+    if (centerOffset > this.JUMP_MAX_CENTER_OFFSET) {
+      issues.push('off_center');
+    }
+    if (noseYForReadiness < this.JUMP_MIN_NOSE_Y || noseYForReadiness > this.JUMP_MAX_NOSE_Y) {
+      issues.push('head_out_of_frame');
+    }
+    const shoulderTooFar = shoulderWidth > 0 && shoulderWidth < 0.08;
+    const shoulderTooClose = shoulderWidth > 0.5;
+    if (upperBodyHeight !== null) {
+      if (upperBodyHeight < this.JUMP_MIN_UPPER_BODY_HEIGHT || shoulderTooFar) {
+        issues.push('too_far');
+      } else if (upperBodyHeight > this.JUMP_MAX_UPPER_BODY_HEIGHT || shoulderTooClose) {
+        issues.push('too_close');
+      }
+    }
+    if (!isReliableFrame) {
+      issues.push('too_unstable');
+    }
 
-    if (torsoHeightRatio < 0.25) {
-      if (!this.jumpArmed && bodyDy < -0.015 * torsoScale) {
+    const isStableForCalibration =
+      normalizedVelocityAbs < 2.7 &&
+      normalizedBodyDyAbs < 0.18 &&
+      normalizedShoulderDyAbs < 0.15 &&
+      normalizedHipDyAbs < 0.15;
+    this.updateJumpReadiness(
+      now,
+      issues,
+      isStableForCalibration,
+      bodyCenter.y,
+      shoulderCenter.y,
+      hipCenter.y,
+      rawNoseY,
+      shoulderWidth,
+      torsoHeight,
+      normalizedVelocityAbs,
+      normalizedBodyDyAbs,
+      normalizedHeadDyAbs,
+      normalizedShoulderDyAbs,
+      normalizedHipDyAbs
+    );
+
+    const allowHipFallback = !hasAnyHip && this.jumpHasCalibration && this.missingHipFrames <= 45;
+    const jumpTrackStructureOk = hasJumpTrackUpperBody && (hasAnyHip || allowHipFallback);
+    const canTrackJump =
+      jumpTrackStructureOk &&
+      (isReliableFrame || now - this.lastReliablePoseAt <= 260) &&
+      upperBodyHeight >= this.JUMP_MIN_UPPER_BODY_HEIGHT * 0.5 &&
+      upperBodyHeight <= this.clamp(this.JUMP_MAX_UPPER_BODY_HEIGHT * 1.04, 0.78, 1);
+    const hasCalibratedJump =
+      this.jumpHasCalibration ||
+      this.jumpCalibrationFrames >= 2 ||
+      this.lastJumpReadyAt > 0 ||
+      this.jumpReadiness.isReady;
+    const jumpSuppressedByLateral =
+      now < this.jumpSuppressUntil ||
+      horizontalVelocityNorm > horizontalGateThreshold * 0.96;
+
+    if (!canTrackJump || !hasCalibratedJump || jumpSuppressedByLateral) {
+      this.jumpCandidateFrames = 0;
+      this.jumpIntentScore = 0;
+      this.jumpArmed = true;
+      this.jumpQuietFrames = 0;
+      this.jumpLiftSignalPrev = 0;
+      this.jumpStableFrames = Math.max(0, this.jumpStableFrames - 1);
+      this.state.isJumping = false;
+    } else {
+      const stableFrameLimit = this.clamp(this.jumpNoiseVerticalDisagreement * 2.1 + 0.08, 0.12, 0.28);
+      const isStableTrackingFrame =
+        isReliableFrame &&
+        !hasStrongLateralMotion &&
+        horizontalVelocityNorm < horizontalGateThreshold * 0.88 &&
+        verticalDisagreement < stableFrameLimit;
+      this.jumpStableFrames = isStableTrackingFrame
+        ? Math.min(16, this.jumpStableFrames + 1)
+        : Math.max(0, this.jumpStableFrames - 1);
+
+      const isLikelyIdle =
+        normalizedVelocityAbs < 1 &&
+        normalizedBodyDyAbs < 0.065 &&
+        normalizedHeadDyAbs < 0.065 &&
+        normalizedShoulderDyAbs < 0.06 &&
+        normalizedHipDyAbs < 0.06 &&
+        horizontalVelocityNorm < horizontalGateThreshold * 0.72 &&
+        verticalDisagreement < stableFrameLimit * 0.88;
+      if (isLikelyIdle) {
+        this.jumpNoiseVelocity = this.jumpNoiseVelocity * 0.9 + normalizedVelocityAbs * 0.1;
+        this.jumpNoiseBodyDy = this.jumpNoiseBodyDy * 0.9 + normalizedBodyDyAbs * 0.1;
+        this.jumpNoiseHeadDy = this.jumpNoiseHeadDy * 0.9 + normalizedHeadDyAbs * 0.1;
+        this.jumpNoiseShoulderDy = this.jumpNoiseShoulderDy * 0.9 + normalizedShoulderDyAbs * 0.1;
+        this.jumpNoiseHipDy = this.jumpNoiseHipDy * 0.9 + normalizedHipDyAbs * 0.1;
+        this.jumpNoiseShoulderVelocity = this.jumpNoiseShoulderVelocity * 0.9 + normalizedShoulderVelocityAbs * 0.1;
+        this.jumpNoiseLift = this.jumpNoiseLift * 0.9 + Math.abs(this.jumpLiftSignalPrev) * 0.1;
+        this.jumpNoiseVerticalDisagreement =
+          this.jumpNoiseVerticalDisagreement * 0.9 + verticalDisagreement * 0.1;
+        this.jumpQuietFrames = Math.min(8, this.jumpQuietFrames + 1);
+        this.jumpIntentScore = this.jumpIntentScore * 0.7;
+        this.jumpBaselineBodyY = this.jumpBaselineBodyY * 0.94 + bodyCenter.y * 0.06;
+        this.jumpBaselineHeadY = this.jumpBaselineHeadY * 0.94 + rawNoseY * 0.06;
+        this.jumpBaselineShoulderY = this.jumpBaselineShoulderY * 0.94 + shoulderCenter.y * 0.06;
+        this.jumpBaselineHipY = this.jumpBaselineHipY * 0.94 + hipCenter.y * 0.06;
+        this.jumpBaselineShoulderWidth = this.jumpBaselineShoulderWidth * 0.95 + shoulderWidth * 0.05;
+        this.jumpBaselineTorsoHeight = this.jumpBaselineTorsoHeight * 0.95 + torsoHeight * 0.05;
+        this.jumpCalibrationFrames = Math.min(120, this.jumpCalibrationFrames + 1);
+        this.jumpHasCalibration = this.jumpCalibrationFrames >= 3;
+      } else {
+        this.jumpQuietFrames = Math.max(0, this.jumpQuietFrames - 1);
+        this.jumpNoiseVerticalDisagreement =
+          this.jumpNoiseVerticalDisagreement * 0.97 + verticalDisagreement * 0.03;
+        if (normalizedVelocity < -0.18) {
+          this.jumpBaselineBodyY = this.jumpBaselineBodyY * 0.975 + bodyCenter.y * 0.025;
+          this.jumpBaselineHeadY = this.jumpBaselineHeadY * 0.975 + rawNoseY * 0.025;
+          this.jumpBaselineShoulderY = this.jumpBaselineShoulderY * 0.975 + shoulderCenter.y * 0.025;
+          this.jumpBaselineHipY = this.jumpBaselineHipY * 0.975 + hipCenter.y * 0.025;
+        }
+      }
+
+      const scaleBias = this.clamp((this.jumpBaselineShoulderWidth - 0.22) / 0.12, -1, 1);
+      const thresholdScale = 1 + scaleBias * 0.22;
+      const velocityThreshold = this.clamp(Math.max(0.9, this.jumpNoiseVelocity * 1.58 + 0.14), 0.82, 2.6) * thresholdScale;
+      const shoulderVelocityThreshold = this.clamp(
+        Math.max(0.85, this.jumpNoiseShoulderVelocity * 1.45 + 0.09),
+        0.82,
+        2.8
+      ) * thresholdScale;
+      const displacementThreshold = this.clamp(Math.max(0.03, this.jumpNoiseBodyDy * 1.9 + 0.01), 0.03, 0.13) * thresholdScale;
+      const headDisplacementThreshold = this.clamp(Math.max(0.02, this.jumpNoiseHeadDy * 1.75 + 0.006), 0.018, 0.085) * thresholdScale;
+      const shoulderDisplacementThreshold = this.clamp(Math.max(0.02, this.jumpNoiseShoulderDy * 1.75 + 0.006), 0.018, 0.085) * thresholdScale;
+      const hipDisplacementThreshold = this.clamp(Math.max(0.02, this.jumpNoiseHipDy * 1.75 + 0.006), 0.018, 0.085) * thresholdScale;
+      const baselineBodyLift = (this.jumpBaselineBodyY - bodyCenter.y) / torsoNorm;
+      const baselineHeadLift = (this.jumpBaselineHeadY - rawNoseY) / torsoNorm;
+      const baselineShoulderLift = (this.jumpBaselineShoulderY - shoulderCenter.y) / torsoNorm;
+      const baselineHipLift = (this.jumpBaselineHipY - hipCenter.y) / torsoNorm;
+      const coherentLift = hasAnyHip ? Math.min(baselineShoulderLift, baselineHipLift) : baselineShoulderLift;
+      const liftSignal = coherentLift * 0.7 + baselineBodyLift * 0.3;
+      const liftVelocity = liftSignal - this.jumpLiftSignalPrev;
+      const lateralLeak =
+        Math.max(0, horizontalVelocityNorm - this.jumpNoiseHorizontalVelocity * 0.65) * this.jumpLateralCoupling;
+      const compensatedLiftSignal = liftSignal - lateralLeak;
+      const compensatedLiftVelocity = liftVelocity - lateralLeak * 0.3;
+      this.jumpLiftSignalPrev = liftSignal;
+      const baselineBodyLiftThreshold = Math.max(displacementThreshold * 0.7, 0.026);
+      const baselineHeadLiftThreshold = Math.max(headDisplacementThreshold * 0.58, 0.012);
+      const baselineCoherentLiftThreshold = Math.max(Math.max(shoulderDisplacementThreshold, hipDisplacementThreshold) * 0.78, 0.018);
+      const liftSignalThreshold = this.clamp(Math.max(0.026, this.jumpNoiseLift * 3.2 + 0.012), 0.022, 0.11);
+
+      const rearmBodyThreshold = Math.max(0.02, displacementThreshold * 0.4);
+      if (
+        !this.jumpArmed &&
+        (
+          normalizedBodyDy < -rearmBodyThreshold ||
+          normalizedVelocity < -0.3 ||
+          (compensatedLiftSignal < liftSignalThreshold * 0.45 && normalizedVelocity < 0.2)
+        )
+      ) {
         this.jumpArmed = true;
       }
 
-      const isCandidate = velocity > velocityThreshold && bodyDy > displacementThreshold && headDy > headDisplacementThreshold;
-      this.jumpCandidateFrames = isCandidate
-        ? Math.min(4, this.jumpCandidateFrames + 1)
-        : Math.max(0, this.jumpCandidateFrames - 1);
+      const coherentUpperBodyCandidate = hasAnyHip
+        ? (
+            normalizedShoulderDy > shoulderDisplacementThreshold * 0.76 &&
+            normalizedHipDy > hipDisplacementThreshold * 0.76 &&
+            coherentLift > baselineCoherentLiftThreshold
+          )
+        : (
+            normalizedShoulderDy > shoulderDisplacementThreshold * 0.84 &&
+            normalizedShoulderVelocity > shoulderVelocityThreshold * 0.84 &&
+            baselineShoulderLift > baselineCoherentLiftThreshold * 0.9
+          );
+      const bodyLiftCandidate =
+        normalizedBodyDy > displacementThreshold ||
+        baselineBodyLift > baselineBodyLiftThreshold ||
+        (!hasAnyHip && baselineShoulderLift > baselineCoherentLiftThreshold * 0.85);
+      const headConfirmed =
+        (
+          normalizedHeadDy > headDisplacementThreshold &&
+          baselineHeadLift > baselineHeadLiftThreshold
+        ) ||
+        (
+          normalizedBodyDy > displacementThreshold * 1.32 &&
+          baselineHeadLift > baselineHeadLiftThreshold * 0.62
+        );
+      const triggerVelocity = hasAnyHip ? normalizedVelocity : normalizedShoulderVelocity;
+      const triggerVelocityThreshold = hasAnyHip ? velocityThreshold : shoulderVelocityThreshold;
+      const strongBodyCandidate =
+        triggerVelocity > triggerVelocityThreshold * 0.72 &&
+        bodyLiftCandidate &&
+        coherentUpperBodyCandidate;
+      const upperBodyFallbackCandidate =
+        triggerVelocity > triggerVelocityThreshold * 0.62 &&
+        coherentUpperBodyCandidate &&
+        (
+          headConfirmed ||
+          baselineHeadLift > baselineHeadLiftThreshold * 0.72 ||
+          compensatedLiftSignal > liftSignalThreshold
+        );
+      const ratioToBaselineShoulder = shoulderWidth / Math.max(this.jumpBaselineShoulderWidth, 0.08);
+      const ratioToBaselineTorso = torsoHeight / Math.max(this.jumpBaselineTorsoHeight, 0.1);
+      const geometryCloseToCalibration = hasAnyHip
+        ? (
+            ratioToBaselineShoulder > 0.56 &&
+            ratioToBaselineShoulder < 1.78 &&
+            ratioToBaselineTorso > 0.52 &&
+            ratioToBaselineTorso < 1.75
+          )
+        : (
+            ratioToBaselineShoulder > 0.48 &&
+            ratioToBaselineShoulder < 2.05
+          );
+      const lateralMotionRatio = horizontalVelocityNorm / Math.max(horizontalGateThreshold, 0.01);
+      const verticalIntentRatio = Math.max(
+        triggerVelocity / Math.max(triggerVelocityThreshold, 0.01),
+        compensatedLiftSignal / Math.max(liftSignalThreshold, 0.01),
+        coherentLift / Math.max(baselineCoherentLiftThreshold, 0.01)
+      );
+      const disagreementPenalty =
+        verticalDisagreement / Math.max(this.jumpNoiseVerticalDisagreement * 1.8 + 0.08, 0.12);
+      const geometryPenalty =
+        Math.abs(ratioToBaselineShoulder - 1) * 0.85 +
+        (hasAnyHip ? Math.abs(ratioToBaselineTorso - 1) * 0.75 : 0);
+      const reliabilityPenalty = Math.max(0, 0.68 - this.jumpReliabilityScore) * 1.3;
+      const intentSupport = this.clamp(
+        (verticalIntentRatio - 0.56) * 0.78 +
+          (headConfirmed ? 0.18 : 0) -
+          lateralMotionRatio * 0.58 -
+          disagreementPenalty * 0.55 -
+          geometryPenalty * 0.32 -
+          reliabilityPenalty,
+        -1,
+        1.45
+      );
+      if (intentSupport >= 0) {
+        this.jumpIntentScore = this.clamp(this.jumpIntentScore * 0.72 + intentSupport * 0.88, 0, 3.6);
+      } else {
+        this.jumpIntentScore = this.clamp(this.jumpIntentScore * 0.55 + intentSupport * 0.22, 0, 3.6);
+      }
+      const intentScoreThreshold = this.clamp(
+        (hasAnyHip ? 0.92 : 1.05) +
+          Math.max(0, lateralMotionRatio - 0.72) * 0.26 +
+          Math.max(0, 0.62 - this.jumpReliabilityScore) * 0.28,
+        0.86,
+        1.65
+      );
+      const requiredStableFrames = hasAnyHip ? 2 : 3;
+      const hasStablePrecondition = this.jumpStableFrames >= requiredStableFrames;
+      const verticalDominatesLateral =
+        verticalIntentRatio > lateralMotionRatio * 1.08 || lateralMotionRatio < 0.76;
+      const intentDominantCandidate =
+        this.jumpIntentScore >= intentScoreThreshold &&
+        intentSupport > 0 &&
+        verticalDominatesLateral;
 
       if (
+        horizontalVelocityNorm > horizontalGateThreshold * 0.72 &&
+        normalizedVelocity > 0 &&
+        liftSignal > 0 &&
+        !intentDominantCandidate
+      ) {
+        const observedCoupling = liftSignal / Math.max(horizontalVelocityNorm, 0.05);
+        this.jumpLateralCoupling = this.clamp(this.jumpLateralCoupling * 0.94 + observedCoupling * 0.06, 0.02, 0.14);
+      } else if (this.jumpQuietFrames >= 2 && horizontalVelocityNorm < horizontalGateThreshold * 0.55) {
+        this.jumpLateralCoupling = this.clamp(this.jumpLateralCoupling * 0.985 + 0.03 * 0.015, 0.02, 0.14);
+      }
+
+      const isCandidate =
+        geometryCloseToCalibration &&
+        hasStablePrecondition &&
+        (strongBodyCandidate || upperBodyFallbackCandidate || intentDominantCandidate) &&
+        compensatedLiftSignal > baselineBodyLiftThreshold * 0.82 &&
+        (
+          compensatedLiftVelocity > liftSignalThreshold * 0.03 ||
+          (
+            this.jumpCandidateFrames > 0 &&
+            compensatedLiftSignal > baselineBodyLiftThreshold * 0.96
+          )
+        );
+
+      this.jumpCandidateFrames = isCandidate
+        ? Math.min(5, this.jumpCandidateFrames + 1)
+        : Math.max(0, this.jumpCandidateFrames - (intentSupport < 0 ? 2 : 1));
+
+      const isStrongSingleFrameCandidate =
+        intentDominantCandidate &&
+        triggerVelocity > triggerVelocityThreshold * 1.02 &&
+        coherentLift > baselineCoherentLiftThreshold * 1.08 &&
+        compensatedLiftSignal > liftSignalThreshold * 1.06 &&
+        hasStablePrecondition;
+      const hasNoisyTracking =
+        this.jumpNoiseHorizontalVelocity > 0.65 ||
+        this.jumpNoiseVerticalDisagreement > 0.11 ||
+        this.jumpReliabilityScore < 0.55;
+      const requiredFrames = isStrongSingleFrameCandidate && !hasNoisyTracking ? 1 : (hasNoisyTracking || !hasAnyHip ? 3 : 2);
+      if (
         this.jumpArmed &&
-        this.jumpCandidateFrames >= 2 &&
+        this.jumpCandidateFrames >= requiredFrames &&
+        this.jumpIntentScore >= intentScoreThreshold * 0.95 &&
         !this.state.isJumping &&
         now - this.lastJumpTime > this.JUMP_COOLDOWN
       ) {
-        log(1, 'JUMP', `Jump! Vel: ${velocity.toFixed(2)}, Dy: ${bodyDy.toFixed(3)}`);
+        log(
+          1,
+          'JUMP',
+          `Jump! TVel: ${triggerVelocity.toFixed(2)}>${triggerVelocityThreshold.toFixed(2)}, Lift: ${compensatedLiftSignal.toFixed(3)}, Intent: ${this.jumpIntentScore.toFixed(2)}>=${intentScoreThreshold.toFixed(2)}`
+        );
         this.state.isJumping = true;
         this.lastJumpTime = now;
         this.jumpCandidateFrames = 0;
+        this.jumpIntentScore = 0;
+        this.jumpLiftSignalPrev = 0;
         this.jumpArmed = false;
+        this.jumpQuietFrames = 0;
+        this.jumpSuppressUntil = Math.max(this.jumpSuppressUntil, now + 180);
         this.onMotionDetected?.('jump');
         setTimeout(() => {
           this.state.isJumping = false;
-        }, 450);
+        }, 320);
       }
-    } else {
-      this.jumpCandidateFrames = 0;
     }
 
     if (!this.state.smoothedState) {
@@ -737,7 +1457,9 @@ export class MotionController {
 
   public resetPoseObservation(): void {
     this.poseLandmarks = null;
+    this.filteredPoseLandmarks = null;
     this.lastPoseLandmarksAt = 0;
+    this.resetJumpReadiness();
   }
 
   public hasFreshPoseLandmarks(sinceTimestampMs: number): boolean {

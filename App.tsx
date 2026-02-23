@@ -13,7 +13,7 @@ import { CameraSessionManager, isCameraPipelineError } from './services/cameraSe
 import { loggerService } from './services/logger';
 import { motionController } from './services/motionController';
 import { getLocalAssetUrl, getR2AssetUrl, getR2ImageUrl } from './src/config/r2Config';
-import { PoseLandmark, Theme, ThemeId } from './types';
+import { JumpReadinessState, PoseLandmark, Theme, ThemeId } from './types';
 
 declare global {
   interface Window {
@@ -29,6 +29,7 @@ export enum GamePhase {
   THEME_SELECTION = 'THEME_SELECTION',
   LOADING = 'LOADING',
   TUTORIAL = 'TUTORIAL',
+  MOTION_CHECK = 'MOTION_CHECK',
   PLAYING = 'PLAYING'
 }
 
@@ -59,6 +60,14 @@ const QUALITY_MODE_OPTIONS: Array<{ value: QualityMode; label: string }> = [
   { value: 'low', label: '最低' },
   { value: 'adaptive', label: '自适应' }
 ];
+
+const DEFAULT_JUMP_READINESS: JumpReadinessState = {
+  status: 'no_pose',
+  isReady: false,
+  message: '请站到镜头前并露出头部到髋部',
+  requirements: '请露出头部到髋部、站在画面中间，距离镜头约0.6~1.2米',
+  stableProgress: 0
+};
 
 const ThemeCardImage = ({ src, alt, index }: { src: string; alt: string; index: number }) => {
     const [loaded, setLoaded] = useState<boolean>(() => isCoverPreloaded(src));
@@ -157,6 +166,7 @@ export default function App() {
   const BGM_VOLUME_PLAYING = 0.003;
   const BGM_VOLUME_IDLE = 0.015;
   const THEME_SWITCH_REST_SECONDS = 15;
+  const MOTION_CHECK_HOLD_SECONDS = 4;
   const [score, setScore] = useState(0);
   const [totalQuestions, setTotalQuestions] = useState(0);
   const [selectedThemes, setSelectedThemes] = useState<ThemeId[]>([]);
@@ -251,7 +261,24 @@ export default function App() {
   const [loadingStatus, setLoadingStatus] = useState('正在准备...');
   const [cameraIssueMessage, setCameraIssueMessage] = useState('');
   const [isPoseDetected, setIsPoseDetected] = useState(false);
+  const [jumpReadiness, setJumpReadiness] = useState<JumpReadinessState>(motionController.jumpReadiness ?? DEFAULT_JUMP_READINESS);
+  const [stableJumpReadinessMessage, setStableJumpReadinessMessage] = useState<string>(
+    motionController.jumpReadiness?.message ?? DEFAULT_JUMP_READINESS.message
+  );
+  const [motionCheckHoldProgress, setMotionCheckHoldProgress] = useState<number | null>(null);
+  const [motionCheckInterruptHint, setMotionCheckInterruptHint] = useState<string>('');
   const isPoseDetectedRef = useRef<boolean>(false);
+  const jumpReadinessKeyRef = useRef<string>('');
+  const motionCheckHoldTimerRef = useRef<number | null>(null);
+  const motionCheckHoldStartedAtRef = useRef<number>(0);
+  const motionCheckInterruptHintTimerRef = useRef<number | null>(null);
+  const motionHintLastSpokenAtRef = useRef<number>(0);
+  const motionHintLastMessageRef = useRef<string>('');
+  const motionHintCandidateMessageRef = useRef<string>('');
+  const motionHintCandidateSinceRef = useRef<number>(0);
+  const motionCheckReadyAnnouncedRef = useRef<boolean>(false);
+  const motionCheckAudioContextRef = useRef<AudioContext | null>(null);
+  const motionCheckTransitioningRef = useRef<boolean>(false);
   const lastPoseSeenAtRef = useRef<number>(0);
   const hasCalibratedPoseRef = useRef<boolean>(false);
 
@@ -276,14 +303,37 @@ export default function App() {
     setIsPoseDetected(nextDetected);
   }, []);
 
+  const syncJumpReadinessState = useCallback((): void => {
+    const latest = motionController.jumpReadiness ?? DEFAULT_JUMP_READINESS;
+    const progressPercent = Math.round((latest.stableProgress ?? 0) * 100);
+    const nextKey = `${latest.status}|${latest.isReady ? 1 : 0}|${latest.message}|${progressPercent}`;
+    if (jumpReadinessKeyRef.current === nextKey) {
+      return;
+    }
+    jumpReadinessKeyRef.current = nextKey;
+    setJumpReadiness({
+      status: latest.status,
+      isReady: latest.isReady,
+      message: latest.message,
+      requirements: latest.requirements,
+      stableProgress: latest.stableProgress
+    });
+    if (latest.isReady) {
+      setStableJumpReadinessMessage(latest.message);
+      motionHintCandidateMessageRef.current = latest.message;
+      motionHintCandidateSinceRef.current = Date.now();
+    }
+  }, []);
+
   const markPoseObserved = useCallback((observedAtMs: number): void => {
     lastPoseSeenAtRef.current = observedAtMs;
     setPoseDetectedState(true);
+    syncJumpReadinessState();
     if (!hasCalibratedPoseRef.current) {
       hasCalibratedPoseRef.current = true;
       motionController.calibrate();
     }
-  }, [setPoseDetectedState]);
+  }, [setPoseDetectedState, syncJumpReadinessState]);
 
   const refreshPoseDetectedState = useCallback((nowMs: number): boolean => {
     const hasFreshPose = motionController.hasFreshPoseLandmarks(nowMs - 1200);
@@ -291,11 +341,12 @@ export default function App() {
       markPoseObserved(nowMs);
       return true;
     }
+    syncJumpReadinessState();
     if (isPoseDetectedRef.current && nowMs - lastPoseSeenAtRef.current > 2200) {
       setPoseDetectedState(false);
     }
     return false;
-  }, [markPoseObserved, setPoseDetectedState]);
+  }, [markPoseObserved, setPoseDetectedState, syncJumpReadinessState]);
 
   const getBgmTargetVolume = (targetPhase: GamePhase): number => {
     return targetPhase === GamePhase.PLAYING ? BGM_VOLUME_PLAYING : BGM_VOLUME_IDLE;
@@ -319,6 +370,105 @@ export default function App() {
     applyBgmState();
   };
 
+  const clearMotionCheckCountdown = useCallback((): void => {
+    if (motionCheckHoldTimerRef.current !== null) {
+      window.clearInterval(motionCheckHoldTimerRef.current);
+      motionCheckHoldTimerRef.current = null;
+    }
+    motionCheckHoldStartedAtRef.current = 0;
+    setMotionCheckHoldProgress(null);
+    motionCheckTransitioningRef.current = false;
+  }, []);
+
+  const clearMotionCheckInterruptHint = useCallback((): void => {
+    if (motionCheckInterruptHintTimerRef.current !== null) {
+      window.clearTimeout(motionCheckInterruptHintTimerRef.current);
+      motionCheckInterruptHintTimerRef.current = null;
+    }
+    setMotionCheckInterruptHint('');
+  }, []);
+
+  const showMotionCheckInterruptHint = useCallback((message: string): void => {
+    if (motionCheckInterruptHintTimerRef.current !== null) {
+      window.clearTimeout(motionCheckInterruptHintTimerRef.current);
+      motionCheckInterruptHintTimerRef.current = null;
+    }
+    setMotionCheckInterruptHint(message);
+    motionCheckInterruptHintTimerRef.current = window.setTimeout(() => {
+      setMotionCheckInterruptHint('');
+      motionCheckInterruptHintTimerRef.current = null;
+    }, 1800);
+  }, []);
+
+  const resetMotionCheckFeedbackState = useCallback((): void => {
+    motionHintLastSpokenAtRef.current = 0;
+    motionHintLastMessageRef.current = '';
+    motionHintCandidateMessageRef.current = '';
+    motionHintCandidateSinceRef.current = 0;
+    motionCheckReadyAnnouncedRef.current = false;
+    clearMotionCheckInterruptHint();
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+  }, [clearMotionCheckInterruptHint]);
+
+  const ensureMotionCheckAudioContext = useCallback(async (): Promise<AudioContext | null> => {
+    if (motionCheckAudioContextRef.current) {
+      const existingCtx = motionCheckAudioContextRef.current;
+      if (existingCtx.state === 'suspended') {
+        try {
+          await existingCtx.resume();
+        } catch {
+          // Ignore resume errors and keep best-effort behavior.
+        }
+      }
+      return existingCtx;
+    }
+
+    const audioContextCtor = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!audioContextCtor) return null;
+    const ctx = new audioContextCtor();
+    if (ctx.state === 'suspended') {
+      try {
+        await ctx.resume();
+      } catch {
+        // Ignore resume errors and keep best-effort behavior.
+      }
+    }
+    motionCheckAudioContextRef.current = ctx;
+    return ctx;
+  }, []);
+
+  const playMotionCheckTone = useCallback(async (frequency: number, durationMs: number, gainValue = 0.05): Promise<void> => {
+    const ctx = await ensureMotionCheckAudioContext();
+    if (!ctx) return;
+    const oscillator = ctx.createOscillator();
+    const gainNode = ctx.createGain();
+    oscillator.frequency.value = frequency;
+    oscillator.type = 'sine';
+    const now = ctx.currentTime;
+    gainNode.gain.setValueAtTime(0.0001, now);
+    gainNode.gain.exponentialRampToValueAtTime(gainValue, now + 0.02);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, now + durationMs / 1000);
+    oscillator.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    oscillator.start(now);
+    oscillator.stop(now + durationMs / 1000 + 0.02);
+  }, [ensureMotionCheckAudioContext]);
+
+  const speakMotionCheckHint = useCallback((message: string): void => {
+    if (!message || !('speechSynthesis' in window) || typeof window.SpeechSynthesisUtterance === 'undefined') {
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(message);
+    utterance.lang = 'zh-CN';
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    utterance.volume = 0.9;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  }, []);
+
   const clearRestCountdown = useCallback((): void => {
     if (restCountdownTimerRef.current !== null) {
       window.clearInterval(restCountdownTimerRef.current);
@@ -331,6 +481,14 @@ export default function App() {
   const waitMs = (ms: number): Promise<void> => (
     new Promise((resolve) => {
       window.setTimeout(resolve, ms);
+    })
+  );
+
+  const waitForNextPaint = (): Promise<void> => (
+    new Promise((resolve) => {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => resolve());
+      });
     })
   );
 
@@ -569,6 +727,26 @@ export default function App() {
       if (poseLoopRef.current !== null) {
         cancelAnimationFrame(poseLoopRef.current);
         poseLoopRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (motionCheckHoldTimerRef.current !== null) {
+        window.clearInterval(motionCheckHoldTimerRef.current);
+        motionCheckHoldTimerRef.current = null;
+      }
+      if (motionCheckInterruptHintTimerRef.current !== null) {
+        window.clearTimeout(motionCheckInterruptHintTimerRef.current);
+        motionCheckInterruptHintTimerRef.current = null;
+      }
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+      if (motionCheckAudioContextRef.current) {
+        void motionCheckAudioContextRef.current.close();
+        motionCheckAudioContextRef.current = null;
       }
     };
   }, []);
@@ -1225,6 +1403,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    syncJumpReadinessState();
+  }, [syncJumpReadinessState]);
+
+  useEffect(() => {
     const initThemes = async () => {
       const loadedThemes = await loadThemes();
       setThemes(loadedThemes);
@@ -1251,7 +1433,12 @@ export default function App() {
     hasCalibratedPoseRef.current = false;
     lastPoseSeenAtRef.current = 0;
     setPoseDetectedState(false);
-  }, [setPoseDetectedState]);
+    jumpReadinessKeyRef.current = '';
+    setJumpReadiness(motionController.jumpReadiness ?? DEFAULT_JUMP_READINESS);
+    setStableJumpReadinessMessage(motionController.jumpReadiness?.message ?? DEFAULT_JUMP_READINESS.message);
+    clearMotionCheckCountdown();
+    resetMotionCheckFeedbackState();
+  }, [clearMotionCheckCountdown, resetMotionCheckFeedbackState, setPoseDetectedState]);
 
   const handleStartProcess = async () => {
     setCameraIssueMessage('');
@@ -1782,7 +1969,7 @@ export default function App() {
   const startPoseOverlayLoop = () => {
         if (poseLoopRef.current !== null) return;
 
-        const minVisibility = 0.4;
+        const minVisibility = 0.35;
         const resolvePoint = (landmarks: PoseLandmark[], index: number): { x: number; y: number } | null => {
             const landmark = landmarks[index];
             if (!landmark) return null;
@@ -1866,6 +2053,49 @@ export default function App() {
   useEffect(() => {
     startPoseOverlayLoopRef.current = startPoseOverlayLoop;
   });
+
+  useEffect(() => {
+    const shouldBindActiveVideo =
+      phase === GamePhase.TUTORIAL ||
+      phase === GamePhase.MOTION_CHECK ||
+      phase === GamePhase.PLAYING;
+    if (!shouldBindActiveVideo) return;
+
+    let cancelled = false;
+    let attemptTimer: number | null = null;
+
+    const bindActiveVideo = async (attempt: number): Promise<void> => {
+      if (cancelled) return;
+      const videoElement = videoRef.current;
+      const stream = streamRef.current;
+      if (!videoElement || !stream) {
+        if (attempt >= 12) return;
+        attemptTimer = window.setTimeout(() => {
+          void bindActiveVideo(attempt + 1);
+        }, 80);
+        return;
+      }
+
+      try {
+        await cameraSessionManagerRef.current.recoverForegroundPreview(videoElement, stream);
+        await motionController.start(videoElement);
+        if (poseLoopRef.current === null) {
+          startPoseOverlayLoopRef.current();
+        }
+      } catch (error) {
+        console.warn('[Camera] Rebind active video failed:', error);
+      }
+    };
+
+    void bindActiveVideo(0);
+
+    return () => {
+      cancelled = true;
+      if (attemptTimer !== null) {
+        window.clearTimeout(attemptTimer);
+      }
+    };
+  }, [phase]);
 
   useEffect(() => {
     let disposed = false;
@@ -2014,6 +2244,9 @@ export default function App() {
     hasCalibratedPoseRef.current = false;
     lastPoseSeenAtRef.current = 0;
     setPoseDetectedState(false);
+    jumpReadinessKeyRef.current = '';
+    setJumpReadiness(motionController.jumpReadiness ?? DEFAULT_JUMP_READINESS);
+    setStableJumpReadinessMessage(motionController.jumpReadiness?.message ?? DEFAULT_JUMP_READINESS.message);
     
     // 0. Enter Loading Phase
     setPhase(GamePhase.LOADING);
@@ -2022,6 +2255,7 @@ export default function App() {
 
     // 1. Request camera first to avoid permission prompt conflicts on mobile browsers
     try {
+        await waitForNextPaint();
         const cameraSuccess = await initializeCamera();
         if (!isCurrentLoadingRequest()) return;
         if (!cameraSuccess) {
@@ -2150,7 +2384,17 @@ export default function App() {
     setBgIndex(0);
   }, []);
 
-  const handleEnterPlaying = useCallback(async (): Promise<void> => {
+  const enterPlaying = useCallback(async (options?: { skipFullscreen?: boolean; requireReadiness?: boolean }): Promise<void> => {
+    const skipFullscreen = options?.skipFullscreen ?? false;
+    const requireReadiness = options?.requireReadiness ?? false;
+    if (requireReadiness && !motionController.jumpReadiness?.isReady) {
+      syncJumpReadinessState();
+      return;
+    }
+    if (motionCheckTransitioningRef.current) return;
+    motionCheckTransitioningRef.current = true;
+    clearMotionCheckCountdown();
+    resetMotionCheckFeedbackState();
     setBgIndex(0);
     setHasShownEmoji(true);
     const primeAudioPromise = Promise.allSettled([
@@ -2158,21 +2402,146 @@ export default function App() {
       bgmControllerRef.current?.ensureAudioUnlocked() ?? Promise.resolve(false)
     ]);
     try {
+      if (!skipFullscreen) {
+        await requestFullscreenSafely('manual');
+      }
+      await primeAudioPromise;
+      setPhase(GamePhase.PLAYING);
+      window.setTimeout(() => {
+        void ensurePhaserAudioUnlocked();
+        bgmControllerRef.current?.syncState();
+      }, 0);
+      window.setTimeout(() => {
+        void ensurePhaserAudioUnlocked();
+        bgmControllerRef.current?.syncState();
+      }, 180);
+    } catch (error) {
+      console.warn('[Phase] Failed while entering PLAYING:', error);
+    } finally {
+      motionCheckTransitioningRef.current = false;
+    }
+  }, [clearMotionCheckCountdown, requestFullscreenSafely, resetMotionCheckFeedbackState, syncJumpReadinessState]);
+
+  const handleEnterMotionCheck = useCallback(async (): Promise<void> => {
+    if (!motionController.isStarted || !themeImagesLoaded) {
+      return;
+    }
+    clearMotionCheckCountdown();
+    resetMotionCheckFeedbackState();
+    syncJumpReadinessState();
+    setPhase(GamePhase.MOTION_CHECK);
+    const primeAudioPromise = Promise.allSettled([
+      primePhaserAudioContext(),
+      bgmControllerRef.current?.ensureAudioUnlocked() ?? Promise.resolve(false)
+    ]);
+    try {
       await requestFullscreenSafely('manual');
     } catch (error) {
-      console.warn('[Fullscreen] Unexpected error before entering PLAYING:', error);
+      console.warn('[Fullscreen] Unexpected error before entering MOTION_CHECK:', error);
     }
     await primeAudioPromise;
-    setPhase(GamePhase.PLAYING);
-    window.setTimeout(() => {
-      void ensurePhaserAudioUnlocked();
-      bgmControllerRef.current?.syncState();
-    }, 0);
-    window.setTimeout(() => {
-      void ensurePhaserAudioUnlocked();
-      bgmControllerRef.current?.syncState();
-    }, 180);
-  }, [requestFullscreenSafely]);
+  }, [clearMotionCheckCountdown, requestFullscreenSafely, resetMotionCheckFeedbackState, syncJumpReadinessState, themeImagesLoaded]);
+
+  useEffect(() => {
+    if (phase === GamePhase.MOTION_CHECK) return;
+    clearMotionCheckCountdown();
+    resetMotionCheckFeedbackState();
+  }, [clearMotionCheckCountdown, phase, resetMotionCheckFeedbackState]);
+
+  useEffect(() => {
+    if (jumpReadiness.isReady) {
+      setStableJumpReadinessMessage(jumpReadiness.message);
+      motionHintCandidateMessageRef.current = jumpReadiness.message;
+      motionHintCandidateSinceRef.current = Date.now();
+      return;
+    }
+
+    const now = Date.now();
+    if (motionHintCandidateMessageRef.current !== jumpReadiness.message) {
+      motionHintCandidateMessageRef.current = jumpReadiness.message;
+      motionHintCandidateSinceRef.current = now;
+      return;
+    }
+    if (now - motionHintCandidateSinceRef.current >= 450) {
+      setStableJumpReadinessMessage(jumpReadiness.message);
+    }
+  }, [jumpReadiness.isReady, jumpReadiness.message]);
+
+  useEffect(() => {
+    if (phase !== GamePhase.MOTION_CHECK) return;
+    const isHoldActive =
+      motionCheckHoldTimerRef.current !== null ||
+      motionCheckHoldProgress !== null;
+
+    if (isHoldActive && !jumpReadiness.isReady) {
+      clearMotionCheckCountdown();
+      motionCheckReadyAnnouncedRef.current = false;
+      showMotionCheckInterruptHint('站位变化，读条已中断，请重新保持不动');
+      const now = Date.now();
+      if (now - motionHintLastSpokenAtRef.current > 1600) {
+        speakMotionCheckHint('站位变化了，请回到中间并保持不动');
+        motionHintLastSpokenAtRef.current = now;
+        motionHintLastMessageRef.current = 'hold_lost';
+        void playMotionCheckTone(420, 130, 0.05);
+      }
+      return;
+    }
+
+    if (!isHoldActive && jumpReadiness.isReady) {
+      if (!motionCheckReadyAnnouncedRef.current) {
+        motionCheckReadyAnnouncedRef.current = true;
+        speakMotionCheckHint('站位已命中，请保持不动，正在确认');
+        void playMotionCheckTone(860, 160, 0.08);
+      }
+
+      if (motionCheckHoldTimerRef.current === null) {
+        motionCheckHoldStartedAtRef.current = performance.now();
+        setMotionCheckHoldProgress(0);
+        motionCheckHoldTimerRef.current = window.setInterval(() => {
+          const elapsedSeconds = Math.max(0, (performance.now() - motionCheckHoldStartedAtRef.current) / 1000);
+          const progress = Math.min(1, elapsedSeconds / MOTION_CHECK_HOLD_SECONDS);
+          setMotionCheckHoldProgress(progress);
+          if (progress >= 1) {
+            if (motionCheckHoldTimerRef.current !== null) {
+              window.clearInterval(motionCheckHoldTimerRef.current);
+              motionCheckHoldTimerRef.current = null;
+            }
+            void enterPlaying({ skipFullscreen: true, requireReadiness: false });
+          }
+        }, 100);
+      }
+      return;
+    }
+
+    motionCheckReadyAnnouncedRef.current = false;
+    const now = Date.now();
+    const latestHint = stableJumpReadinessMessage;
+    const shouldAnnounceByStatus = jumpReadiness.status === 'adjusting' || jumpReadiness.status === 'no_pose';
+    const shouldSpeakHint =
+      shouldAnnounceByStatus &&
+      latestHint.length > 0 &&
+      now - motionHintCandidateSinceRef.current >= 900 &&
+      (latestHint !== motionHintLastMessageRef.current || now - motionHintLastSpokenAtRef.current > 5200);
+
+    if (shouldSpeakHint) {
+      speakMotionCheckHint(latestHint);
+      motionHintLastSpokenAtRef.current = now;
+      motionHintLastMessageRef.current = latestHint;
+      void playMotionCheckTone(420, 140, 0.05);
+    }
+  }, [
+    MOTION_CHECK_HOLD_SECONDS,
+    clearMotionCheckCountdown,
+    enterPlaying,
+    jumpReadiness.isReady,
+    jumpReadiness.status,
+    motionCheckHoldProgress,
+    phase,
+    playMotionCheckTone,
+    showMotionCheckInterruptHint,
+    stableJumpReadinessMessage,
+    speakMotionCheckHint
+  ]);
 
   const handleReplay = useCallback(() => {
     clearRestCountdown();
@@ -2277,6 +2646,14 @@ export default function App() {
   }, [showCompletion, phase, handleNextLevel]);
 
   const isPlayingFullscreen = phase === GamePhase.PLAYING && isFullscreen;
+  const isMotionCheckPhase = phase === GamePhase.MOTION_CHECK;
+  const readinessProgressPercent = Math.round((jumpReadiness.stableProgress ?? 0) * 100);
+  const canEnterMotionCheck = motionController.isStarted && themeImagesLoaded;
+  const isMotionCheckHoldActive = isMotionCheckPhase && motionCheckHoldProgress !== null;
+  const motionCheckHoldProgressPercent = Math.max(
+    0,
+    Math.min(100, Math.round((motionCheckHoldProgress ?? 0) * 100))
+  );
 
   return (
     <div
@@ -2323,50 +2700,62 @@ export default function App() {
       />
 
       {/* 1. Camera HUD */}
-      <div className={`fixed z-[60] transition-all duration-500 ease-in-out mobile-landscape-camera ${isPlayingFullscreen ? 'top-2 md:top-3 right-2 md:right-3' : 'top-4 md:top-6 right-4 md:right-6'} ${phase === GamePhase.MENU || phase === GamePhase.THEME_SELECTION ? 'translate-x-[200%] opacity-0 pointer-events-none' : 'translate-x-0 opacity-100'}`}>
-        <div className={`bg-white border-[2px] md:border-[4px] border-kenney-dark rounded-kenney shadow-lg scale-75 md:scale-100 origin-top-right ${isPlayingFullscreen ? 'p-1 md:p-1.5' : 'p-1 md:p-2'}`}>
-           <div className={`${isPlayingFullscreen ? 'w-28 h-20 sm:w-32 sm:h-24 md:w-40 md:h-28' : 'w-20 h-15 sm:w-24 sm:h-18 md:w-32 md:h-24'} overflow-hidden relative bg-kenney-dark/10 rounded-lg md:rounded-xl`}>
-               <video 
-                 ref={videoRef} 
-                 className="w-full h-full object-cover transform scale-x-[-1] live-view-video" 
-                 playsInline 
-                 muted 
-                 autoPlay 
-                 webkit-playsinline="true"
-               />
-               <div className="live-view-texture" />
-                <canvas
-                  ref={poseCanvasRef}
-                  className="absolute inset-0 w-full h-full pointer-events-none"
-                />
-             </div>
+      {!isMotionCheckPhase && (
+        <div className={`fixed z-[60] transition-all duration-500 ease-in-out mobile-landscape-camera ${isPlayingFullscreen ? 'top-2 md:top-3 right-2 md:right-3' : 'top-4 md:top-6 right-4 md:right-6'} ${phase === GamePhase.MENU || phase === GamePhase.THEME_SELECTION ? 'translate-x-[200%] opacity-0 pointer-events-none' : 'translate-x-0 opacity-100'}`}>
+          <div className={`bg-white border-[2px] md:border-[4px] border-kenney-dark rounded-kenney shadow-lg scale-75 md:scale-100 origin-top-right ${isPlayingFullscreen ? 'p-1 md:p-1.5' : 'p-1 md:p-2'}`}>
+             <div className={`${isPlayingFullscreen ? 'w-28 h-20 sm:w-32 sm:h-24 md:w-40 md:h-28' : 'w-20 h-15 sm:w-24 sm:h-18 md:w-32 md:h-24'} overflow-hidden relative bg-kenney-dark/10 rounded-lg md:rounded-xl`}>
+                 <video 
+                   ref={videoRef} 
+                   className="w-full h-full object-cover transform scale-x-[-1] live-view-video" 
+                   playsInline 
+                   muted 
+                   autoPlay 
+                   webkit-playsinline="true"
+                 />
+                 <div className="live-view-texture" />
+		                  <canvas
+		                    ref={poseCanvasRef}
+		                    className="absolute inset-0 w-full h-full pointer-events-none"
+		                  />
+		               </div>
 
+          </div>
         </div>
-      </div>
+      )}
 
       {/* 2.5 Unified Back Button */}
       {(phase !== GamePhase.MENU) && (
           <div className={`fixed top-4 md:top-6 left-4 md:left-6 z-[999] flex items-center gap-2 md:gap-3 mobile-landscape-control ${isFullscreen ? 'fullscreen-hud-match-windowed' : ''}`}>
             <div className="flex items-center gap-1 md:gap-1.5">
             <button 
-              onTouchStart={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                if (phase === GamePhase.THEME_SELECTION) {
-                  handleExitToMenu();
-                } else {
-                  handleBackToMenu();
-                }
-              }}
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                if (phase === GamePhase.THEME_SELECTION) {
-                  handleExitToMenu();
-                } else {
-                  handleBackToMenu();
-                }
-              }}
+	              onTouchStart={(e) => {
+	                e.preventDefault();
+	                e.stopPropagation();
+	                if (phase === GamePhase.THEME_SELECTION) {
+	                  handleExitToMenu();
+	                } else if (phase === GamePhase.MOTION_CHECK) {
+	                  clearMotionCheckCountdown();
+	                  resetMotionCheckFeedbackState();
+	                  void exitFullscreenSafely('manual');
+	                  setPhase(GamePhase.TUTORIAL);
+	                } else {
+	                  handleBackToMenu();
+	                }
+	              }}
+	              onClick={(e) => {
+	                e.preventDefault();
+	                e.stopPropagation();
+	                if (phase === GamePhase.THEME_SELECTION) {
+	                  handleExitToMenu();
+	                } else if (phase === GamePhase.MOTION_CHECK) {
+	                  clearMotionCheckCountdown();
+	                  resetMotionCheckFeedbackState();
+	                  void exitFullscreenSafely('manual');
+	                  setPhase(GamePhase.TUTORIAL);
+	                } else {
+	                  handleBackToMenu();
+	                }
+	              }}
               style={{ pointerEvents: 'auto', touchAction: 'none' }}
               className="kenney-button-circle kenney-button-red group scale-90 md:scale-100 flex-shrink-0"
             >
@@ -2763,11 +3152,11 @@ export default function App() {
                                   void bgmControllerRef.current?.ensureAudioUnlocked();
                                 }}
                                 onClick={() => {
-                                    void handleEnterPlaying();
+                                    void handleEnterMotionCheck();
                                 }}
-                                disabled={!motionController.isStarted || !themeImagesLoaded}
-                                className={`kenney-button kenney-button-handdrawn px-6 sm:px-12 md:px-24 py-2 sm:py-4 md:py-8 text-base sm:text-2xl md:text-4xl hover:scale-110 transition-transform shadow-2xl mobile-landscape-button landscape-compact-button flex items-center justify-center gap-3 md:gap-4 ${(!motionController.isStarted || !themeImagesLoaded) ? 'opacity-100 bg-gray-400 border-gray-600 cursor-wait' : 'bg-kenney-green border-kenney-dark'}`}>
-                                {(motionController.isStarted && themeImagesLoaded) ? (
+                                disabled={!canEnterMotionCheck}
+                                className={`kenney-button kenney-button-handdrawn px-6 sm:px-12 md:px-24 py-2 sm:py-4 md:py-8 text-base sm:text-2xl md:text-4xl hover:scale-110 transition-transform shadow-2xl mobile-landscape-button landscape-compact-button flex items-center justify-center gap-3 md:gap-4 ${(!canEnterMotionCheck) ? 'opacity-100 bg-gray-400 border-gray-600 cursor-wait' : 'bg-kenney-green border-kenney-dark'}`}>
+                                {canEnterMotionCheck ? (
                                     <>
                                         <span className="font-black leading-none pb-1 text-base sm:text-2xl md:text-4xl">开始！</span>
                                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-4 h-4 sm:w-5 sm:h-5 md:w-7 md:h-7 animate-pulse filter drop-shadow-md">
@@ -2786,9 +3175,62 @@ export default function App() {
                 </div>
             )}
 
+            {phase === GamePhase.MOTION_CHECK && (
+              <div className="non-game-scale w-full h-full max-h-screen flex flex-col items-center justify-center gap-2 md:gap-4 px-2 md:px-4 py-2 md:py-3">
+                <div className="w-[98vw] md:w-[96vw] max-w-[1700px] text-center space-y-1">
+                  <h2 className="text-[5vw] sm:text-[4vw] md:text-[3vw] font-black text-white tracking-[0.03em] leading-none">
+                    站位检测
+                  </h2>
+                  <p className="text-xs sm:text-sm md:text-base font-bold text-white/90">
+                    {isMotionCheckHoldActive ? '请保持不动，正在确认站位' : stableJumpReadinessMessage}
+                  </p>
+                </div>
 
-        </div>
-      )}
+                <div className="relative w-[98vw] md:w-[96vw] max-w-[1700px] h-[66vh] sm:h-[69vh] md:h-[72vh] rounded-3xl overflow-hidden border-[4px] md:border-[6px] border-kenney-dark shadow-[0_10px_0_#333333] bg-black/45">
+                  <video
+                    ref={videoRef}
+                    className="absolute inset-0 w-full h-full object-cover transform scale-x-[-1] live-view-video"
+                    playsInline
+                    muted
+                    autoPlay
+                    webkit-playsinline="true"
+                  />
+                  <div className="live-view-texture" />
+                  <canvas
+                    ref={poseCanvasRef}
+                    className="absolute inset-0 w-full h-full pointer-events-none"
+                  />
+                </div>
+
+                <div className="w-[98vw] md:w-[96vw] max-w-[1700px]">
+                  <div className="rounded-2xl border border-white/55 bg-black/65 px-3 md:px-5 py-3 md:py-4 text-white shadow-[0_4px_0_#2f2f2f]">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm sm:text-base md:text-lg font-black">
+                        {isMotionCheckHoldActive ? '读条进行中，请保持不动' : '请按提示站位，命中后会自动读条开始游戏'}
+                      </p>
+                      <span className="text-xs sm:text-sm md:text-base font-black tabular-nums text-kenney-green">
+                        {isMotionCheckHoldActive ? `${motionCheckHoldProgressPercent}%` : `${readinessProgressPercent}%`}
+                      </span>
+                    </div>
+                    <div className="mt-2.5 h-2.5 md:h-3 w-full rounded-full bg-white/20 overflow-hidden">
+                      <div
+                        className="h-full transition-all duration-150 bg-kenney-green"
+                        style={{ width: `${Math.max(6, isMotionCheckHoldActive ? motionCheckHoldProgressPercent : readinessProgressPercent)}%` }}
+                      />
+                    </div>
+                    {motionCheckInterruptHint && (
+                      <p className="mt-2 text-xs sm:text-sm md:text-base font-black text-kenney-yellow text-center">
+                        {motionCheckInterruptHint}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+
+	        </div>
+	      )}
 
       <BugReportButton />
     </div>
