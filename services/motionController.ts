@@ -134,6 +134,7 @@ export class MotionController {
   private currentBodyX: number = 0.5;
   private neutralX: number = 0.5;
   private smoothedBodyY: number = 0.5;
+  private smoothedShoulderY: number = 0.5;
   private smoothedHeadY: number = 0.5;
   private smoothedNoseX: number = 0.5;
   private smoothedNoseY: number = 0.5;
@@ -144,6 +145,8 @@ export class MotionController {
   private smoothedShoulderWidth: number = 0.22;
   private smoothedTorsoHeight: number = 0.25;
   private jumpCandidateFrames: number = 0;
+  private hipVisibleFrames: number = 0;
+  private hipMissingFrames: number = 0;
   private jumpArmed: boolean = true;
   private lastPoseLandmarksAt: number = 0;
 
@@ -463,6 +466,7 @@ export class MotionController {
     this.currentBodyX = 0.5;
     this.neutralX = 0.5;
     this.smoothedBodyY = 0.5;
+    this.smoothedShoulderY = 0.5;
     this.smoothedHeadY = 0.5;
     this.smoothedNoseX = 0.5;
     this.smoothedNoseY = 0.5;
@@ -473,6 +477,8 @@ export class MotionController {
     this.smoothedShoulderWidth = 0.22;
     this.smoothedTorsoHeight = 0.25;
     this.jumpCandidateFrames = 0;
+    this.hipVisibleFrames = 0;
+    this.hipMissingFrames = 0;
     this.jumpArmed = true;
     this.state.isJumping = false;
     this.state.bodyX = 0.5;
@@ -504,6 +510,7 @@ export class MotionController {
   calibrate() {
     this.neutralX = this.currentBodyX;
     this.smoothedBodyY = this.smoothedBodyY * 0.7 + this.state.rawShoulderY * 0.3;
+    this.smoothedShoulderY = this.smoothedShoulderY * 0.7 + this.state.rawShoulderY * 0.3;
   }
 
   getCalibrationProgress() {
@@ -542,6 +549,8 @@ export class MotionController {
     if (!landmarks || landmarks.length === 0) {
       this.missedDetections += 1;
       this.jumpCandidateFrames = 0;
+      this.hipVisibleFrames = 0;
+      this.hipMissingFrames = 0;
       this.poseLandmarks = null;
       this.lastPoseLandmarksAt = 0;
       this.lastResultTime = now;
@@ -611,6 +620,19 @@ export class MotionController {
       : 0;
     this.smoothedTorsoHeight = this.smoothedTorsoHeight * 0.92 + torsoHeightCandidate * 0.08;
 
+    const hasBothHips = !!leftHip && !!rightHip;
+    if (hasBothHips) {
+      this.hipVisibleFrames = Math.min(30, this.hipVisibleFrames + 1);
+      this.hipMissingFrames = Math.max(0, this.hipMissingFrames - 1);
+    } else {
+      this.hipMissingFrames = Math.min(30, this.hipMissingFrames + 1);
+      this.hipVisibleFrames = Math.max(0, this.hipVisibleFrames - 1);
+    }
+
+    const hipModeReady = this.hipVisibleFrames >= 2 && this.hipMissingFrames <= 2;
+    const hipGeometryReliable = torsoHeight > 0.04 && torsoHeightRatio < 0.8;
+    const useHipChannel = hipModeReady && hipGeometryReliable;
+
     const mirroredBodyX = 1 - bodyCenter.x;
     this.currentBodyX = this.currentBodyX * 0.55 + mirroredBodyX * 0.45;
     this.state.bodyX = this.currentBodyX;
@@ -652,45 +674,63 @@ export class MotionController {
     this.state.x = targetLane;
 
     const bodyDy = this.smoothedBodyY - bodyCenter.y;
+    const shoulderDy = this.smoothedShoulderY - shoulderCenter.y;
     const headDy = this.smoothedHeadY - rawNoseY;
-    const velocity = bodyDy / dtSec;
+    const bodyVelocity = bodyDy / dtSec;
+    const shoulderVelocity = shoulderDy / dtSec;
 
-    this.smoothedBodyY = this.smoothedBodyY * 0.9 + bodyCenter.y * 0.1;
-    this.smoothedHeadY = this.smoothedHeadY * 0.9 + rawNoseY * 0.1;
+    this.smoothedBodyY = this.smoothedBodyY * 0.88 + bodyCenter.y * 0.12;
+    this.smoothedShoulderY = this.smoothedShoulderY * 0.88 + shoulderCenter.y * 0.12;
+    this.smoothedHeadY = this.smoothedHeadY * 0.88 + rawNoseY * 0.12;
 
     const torsoScale = this.clamp(this.smoothedTorsoHeight / this.REF_TORSO_HEIGHT, 0.35, 1.6);
-    const velocityThreshold = 1.4 * torsoScale;
-    const displacementThreshold = 0.045 * torsoScale;
-    const headDisplacementThreshold = 0.03 * torsoScale;
+    const bodyVelocityThreshold = 1.05 * torsoScale;
+    const bodyDisplacementThreshold = 0.032 * torsoScale;
+    const shoulderVelocityThreshold = 0.95 * torsoScale;
+    const shoulderDisplacementThreshold = 0.026 * torsoScale;
+    const headDisplacementThreshold = 0.018 * torsoScale;
 
-    if (torsoHeightRatio < 0.25) {
-      if (!this.jumpArmed && bodyDy < -0.015 * torsoScale) {
-        this.jumpArmed = true;
-      }
+    const hipChannelCandidate =
+      bodyVelocity > bodyVelocityThreshold &&
+      bodyDy > bodyDisplacementThreshold &&
+      headDy > headDisplacementThreshold;
 
-      const isCandidate = velocity > velocityThreshold && bodyDy > displacementThreshold && headDy > headDisplacementThreshold;
-      this.jumpCandidateFrames = isCandidate
-        ? Math.min(4, this.jumpCandidateFrames + 1)
-        : Math.max(0, this.jumpCandidateFrames - 1);
+    const shoulderChannelCandidate =
+      shoulderVelocity > shoulderVelocityThreshold &&
+      shoulderDy > shoulderDisplacementThreshold &&
+      headDy > headDisplacementThreshold * 1.1;
 
-      if (
-        this.jumpArmed &&
-        this.jumpCandidateFrames >= 2 &&
-        !this.state.isJumping &&
-        now - this.lastJumpTime > this.JUMP_COOLDOWN
-      ) {
-        log(1, 'JUMP', `Jump! Vel: ${velocity.toFixed(2)}, Dy: ${bodyDy.toFixed(3)}`);
-        this.state.isJumping = true;
-        this.lastJumpTime = now;
-        this.jumpCandidateFrames = 0;
-        this.jumpArmed = false;
-        this.onMotionDetected?.('jump');
-        setTimeout(() => {
-          this.state.isJumping = false;
-        }, 450);
-      }
-    } else {
+    const isCandidate = useHipChannel
+      ? (hipChannelCandidate || shoulderChannelCandidate)
+      : shoulderChannelCandidate;
+
+    const rearmDrop = useHipChannel ? bodyDy : shoulderDy;
+    if (!this.jumpArmed && rearmDrop < -0.012 * torsoScale) {
+      this.jumpArmed = true;
+    }
+
+    this.jumpCandidateFrames = isCandidate
+      ? Math.min(5, this.jumpCandidateFrames + 1)
+      : Math.max(0, this.jumpCandidateFrames - 1);
+
+    if (
+      this.jumpArmed &&
+      this.jumpCandidateFrames >= 2 &&
+      !this.state.isJumping &&
+      now - this.lastJumpTime > this.JUMP_COOLDOWN
+    ) {
+      const channel = useHipChannel ? (hipChannelCandidate ? 'hip' : 'shoulder-fallback') : 'shoulder';
+      const triggerVelocity = useHipChannel ? bodyVelocity : shoulderVelocity;
+      const triggerDy = useHipChannel ? bodyDy : shoulderDy;
+      log(1, 'JUMP', `Jump(${channel}) Vel: ${triggerVelocity.toFixed(2)}, Dy: ${triggerDy.toFixed(3)}, HeadDy: ${headDy.toFixed(3)}`);
+      this.state.isJumping = true;
+      this.lastJumpTime = now;
       this.jumpCandidateFrames = 0;
+      this.jumpArmed = false;
+      this.onMotionDetected?.('jump');
+      setTimeout(() => {
+        this.state.isJumping = false;
+      }, 450);
     }
 
     if (!this.state.smoothedState) {
