@@ -211,9 +211,11 @@ export class CameraSessionManager {
 
     let lastRenderError: unknown = null;
     for (let attempt = 0; attempt <= renderRetryCount; attempt += 1) {
-      const stream = await this.requestCameraStreamWithTimeout(profiles, permissionTimeoutMs);
+      const profileStartIndex = profiles.length > 0 ? attempt % profiles.length : 0;
+      const stream = await this.requestCameraStreamWithTimeout(profiles, permissionTimeoutMs, profileStartIndex);
       try {
         if (platformInfo.platform === 'ios') {
+          await this.waitForVideoElementVisible(videoElement, 1800, `fresh-stream-attempt-${attempt + 1}`);
           await this.ensureRenderablePreviewWithRebind(videoElement, stream, {
             stage: `fresh-stream-attempt-${attempt + 1}`
           });
@@ -298,6 +300,7 @@ export class CameraSessionManager {
   }
 
   public async recoverForegroundPreview(videoElement: HTMLVideoElement, stream: MediaStream): Promise<void> {
+    await this.waitForVideoElementVisible(videoElement, 1000, 'foreground-recover');
     await this.ensureRenderablePreviewWithRebind(videoElement, stream, {
       stage: 'foreground-recover',
       metadataTimeoutMs: 2200,
@@ -332,14 +335,15 @@ export class CameraSessionManager {
 
   private async requestCameraStreamWithTimeout(
     profiles: MediaTrackConstraints[],
-    permissionTimeoutMs: number
+    permissionTimeoutMs: number,
+    profileStartIndex = 0
   ): Promise<MediaStream> {
     if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
       throw new CameraPipelineError('CAMERA_API_MISSING', 'navigator.mediaDevices.getUserMedia is unavailable');
     }
 
     let shouldDiscardLateStream = false;
-    const streamRequest = this.requestCameraStream(profiles).then((stream) => {
+    const streamRequest = this.requestCameraStream(profiles, profileStartIndex).then((stream) => {
       if (shouldDiscardLateStream) {
         stream.getTracks().forEach((track) => track.stop());
         throw new CameraPipelineError('CAMERA_LATE_STREAM_DISCARDED', 'Late stream discarded after timeout');
@@ -368,10 +372,14 @@ export class CameraSessionManager {
     }
   }
 
-  private async requestCameraStream(profiles: MediaTrackConstraints[]): Promise<MediaStream> {
+  private async requestCameraStream(
+    profiles: MediaTrackConstraints[],
+    profileStartIndex: number
+  ): Promise<MediaStream> {
     let lastError: unknown = null;
     for (let attempt = 0; attempt < profiles.length; attempt += 1) {
-      const constraints = profiles[attempt];
+      const profileIndex = (profileStartIndex + attempt) % profiles.length;
+      const constraints = profiles[profileIndex];
       try {
         return await navigator.mediaDevices.getUserMedia({ video: constraints });
       } catch (error) {
@@ -380,6 +388,7 @@ export class CameraSessionManager {
         console.warn('[Camera] getUserMedia attempt failed', {
           attempt: attempt + 1,
           totalAttempts: profiles.length,
+          profileIndex: profileIndex + 1,
           errorName,
           constraints
         });
@@ -618,6 +627,49 @@ export class CameraSessionManager {
       videoElement.addEventListener('playing', onReady, { once: true });
       videoElement.addEventListener('resize', onReady, { once: true });
       videoElement.addEventListener('error', onError, { once: true });
+    });
+  }
+
+  private async waitForVideoElementVisible(
+    videoElement: HTMLVideoElement,
+    timeoutMs: number,
+    stage: string
+  ): Promise<void> {
+    const startedAt = performance.now();
+    while (performance.now() - startedAt < timeoutMs) {
+      if (document.visibilityState !== 'visible') {
+        await waitMs(80);
+        continue;
+      }
+
+      const style = window.getComputedStyle(videoElement);
+      const parentElement = videoElement.parentElement;
+      const parentStyle = parentElement ? window.getComputedStyle(parentElement) : null;
+      const rect = videoElement.getBoundingClientRect();
+      const isVisible =
+        videoElement.isConnected &&
+        rect.width >= 24 &&
+        rect.height >= 24 &&
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        Number.parseFloat(style.opacity || '1') > 0.01 &&
+        (!parentStyle ||
+          (parentStyle.display !== 'none' &&
+            parentStyle.visibility !== 'hidden' &&
+            Number.parseFloat(parentStyle.opacity || '1') > 0.01));
+      if (isVisible) {
+        return;
+      }
+
+      await waitMs(80);
+    }
+
+    console.warn('[Camera] Video element visibility precheck timed out, proceeding.', {
+      stage,
+      isConnected: videoElement.isConnected,
+      clientWidth: videoElement.clientWidth,
+      clientHeight: videoElement.clientHeight,
+      visibilityState: document.visibilityState
     });
   }
 
