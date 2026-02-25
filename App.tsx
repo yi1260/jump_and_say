@@ -5,15 +5,15 @@ import CompletionOverlay from './components/CompletionOverlay';
 import GameBackground from './components/GameBackground';
 import { GameCanvas, type QualityMode } from './components/GameCanvas';
 import { LoadingScreen } from './components/LoadingScreen';
-import { MainScene } from './game/scenes/MainScene';
 import { isCoverFailed, isCoverPreloaded, loadThemes, markCoverFailed, markCoverPreloaded, pauseBackgroundPreloading, preloadCoverImages, startBackgroundPreloading } from './gameConfig';
 import { preloadAllGameAssets } from './services/assetLoader';
 import { BgmController, ensurePhaserAudioUnlocked, primePhaserAudioContext } from './services/audioController';
 import { CameraSessionManager, isCameraPipelineError } from './services/cameraSessionManager';
 import { loggerService } from './services/logger';
 import { motionController } from './services/motionController';
+import { speechScoringService } from './services/speechScoring';
 import { getLocalAssetUrl, getR2AssetUrl, getR2ImageUrl } from './src/config/r2Config';
-import { PoseLandmark, Theme, ThemeId } from './types';
+import { GameplayMode, PoseLandmark, PronunciationSummary, Theme, ThemeId } from './types';
 
 declare global {
   interface Window {
@@ -156,10 +156,14 @@ const ThemeCardImage = ({ src, alt, index }: { src: string; alt: string; index: 
 export default function App() {
   const BGM_VOLUME_PLAYING = 0.003;
   const BGM_VOLUME_IDLE = 0.015;
-  const THEME_SWITCH_REST_SECONDS = 15;
   const [score, setScore] = useState(0);
   const [totalQuestions, setTotalQuestions] = useState(0);
   const [selectedThemes, setSelectedThemes] = useState<ThemeId[]>([]);
+  const [gameplayMode, setGameplayMode] = useState<GameplayMode>('QUIZ');
+  const [sessionThemeIndex, setSessionThemeIndex] = useState(0);
+  const [roundIntroMode, setRoundIntroMode] = useState<GameplayMode | null>(null);
+  const [roundCountdownSeconds, setRoundCountdownSeconds] = useState<number | null>(null);
+  const [isLoadingReadyToStart, setIsLoadingReadyToStart] = useState(false);
   const [isPortrait, setIsPortrait] = useState(false);
   const [showCompletion, setShowCompletion] = useState(false);
   const [restCountdownSeconds, setRestCountdownSeconds] = useState<number | null>(null);
@@ -169,6 +173,10 @@ export default function App() {
   const [selectedLevel, setSelectedLevel] = useState<string>('AA');
   const [qualityMode, setQualityMode] = useState<QualityMode>('adaptive');
   const [isQualityPickerOpen, setIsQualityPickerOpen] = useState<boolean>(false);
+  const [isSpeechRecognitionSupported, setIsSpeechRecognitionSupported] = useState<boolean>(false);
+  const [gameplayModeIssue, setGameplayModeIssue] = useState<string>('');
+  const [pronunciationAverageScore, setPronunciationAverageScore] = useState<number>(0);
+  const [pronunciationSummary, setPronunciationSummary] = useState<PronunciationSummary | null>(null);
 
   const levels = React.useMemo(() => {
     const allLevels = Array.from(new Set(themes.map(t => t.level).filter(Boolean))) as string[];
@@ -191,6 +199,9 @@ export default function App() {
   const activeQualityLabel = React.useMemo(() => (
     QUALITY_MODE_OPTIONS.find((option) => option.value === qualityMode)?.label ?? '自适应'
   ), [qualityMode]);
+  const isBlindBoxMode = gameplayMode === 'BLIND_BOX_PRONUNCIATION';
+  const currentThemeId = selectedThemes[sessionThemeIndex] || '';
+  const isThemeStartDisabled = selectedThemes.length === 0 || !isSpeechRecognitionSupported;
 
   useEffect(() => {
     if (levels.length > 0 && !levels.includes(selectedLevel)) {
@@ -220,7 +231,6 @@ export default function App() {
   const completionCycleRef = useRef(0);
   const completionAutoAdvanceHandledCycleRef = useRef<number | null>(null);
   const restCountdownTimerRef = useRef<number | null>(null);
-  const isCompletionTransitioningRef = useRef<boolean>(false);
 
   useEffect(() => {
     if (phase !== GamePhase.MENU) {
@@ -245,6 +255,12 @@ export default function App() {
       window.removeEventListener('pointerdown', handlePointerDown);
     };
   }, [isQualityPickerOpen]);
+
+  useEffect(() => {
+    const supported = speechScoringService.isSupported();
+    setIsSpeechRecognitionSupported(supported);
+    console.info('[Pronounce] SpeechRecognition support:', supported);
+  }, []);
   
   // Loading State
   const [loadingProgress, setLoadingProgress] = useState(0);
@@ -325,7 +341,6 @@ export default function App() {
       restCountdownTimerRef.current = null;
     }
     setRestCountdownSeconds(null);
-    isCompletionTransitioningRef.current = false;
   }, []);
 
   const waitMs = (ms: number): Promise<void> => (
@@ -616,27 +631,6 @@ export default function App() {
       document.removeEventListener('MSFullscreenError', handleFullscreenError);
     };
   }, [syncFullscreenState]);
-
-  useEffect(() => {
-    if (phase !== GamePhase.PLAYING) {
-      return;
-    }
-
-    let cancelled = false;
-    const autoEnterTimer = window.setTimeout(() => {
-      if (cancelled) return;
-      void requestFullscreenSafely('auto').then((entered) => {
-        if (!entered) {
-          console.info('[Fullscreen] Auto-enter skipped or rejected. Continue windowed mode.');
-        }
-      });
-    }, 80);
-
-    return () => {
-      cancelled = true;
-      window.clearTimeout(autoEnterTimer);
-    };
-  }, [phase, requestFullscreenSafely]);
 
   useEffect(() => {
     const controller = new BgmController({
@@ -1263,6 +1257,12 @@ export default function App() {
 
   const handleStartProcess = async () => {
     setCameraIssueMessage('');
+    setGameplayModeIssue('');
+    setIsLoadingReadyToStart(false);
+    setRoundIntroMode(null);
+    setRoundCountdownSeconds(null);
+    setSessionThemeIndex(0);
+    setGameplayMode('QUIZ');
     setPhase(GamePhase.THEME_SELECTION);
   };
 
@@ -1315,6 +1315,14 @@ export default function App() {
     setScore(0);
     setTotalQuestions(0);
     setShowCompletion(false);
+    setIsLoadingReadyToStart(false);
+    setRoundIntroMode(null);
+    setRoundCountdownSeconds(null);
+    setSessionThemeIndex(0);
+    setGameplayMode('QUIZ');
+    setPronunciationAverageScore(0);
+    setPronunciationSummary(null);
+    setGameplayModeIssue('');
     setSelectedThemes([]); // Clear selected themes
     setPhase(GamePhase.THEME_SELECTION);
   }, [cleanupCameraAndMotion, clearRestCountdown, exitFullscreenSafely]);
@@ -1326,6 +1334,14 @@ export default function App() {
     cleanupCameraAndMotion();
 
     setSelectedThemes([]); // Clear selected themes
+    setIsLoadingReadyToStart(false);
+    setRoundIntroMode(null);
+    setRoundCountdownSeconds(null);
+    setSessionThemeIndex(0);
+    setGameplayMode('QUIZ');
+    setPronunciationAverageScore(0);
+    setPronunciationSummary(null);
+    setGameplayModeIssue('');
     setPhase(GamePhase.MENU);
   };
 
@@ -1465,6 +1481,50 @@ export default function App() {
       '请在浏览器设置里允许摄像头后重试。',
       ...tips
     ].join('\n');
+  };
+
+  const ensureMicrophonePermissionForPronunciation = async (): Promise<{ ok: true } | { ok: false; message: string }> => {
+    if (!speechScoringService.isSupported()) {
+      return {
+        ok: false,
+        message: '当前浏览器不支持语音评分，请切换到“经典答题”模式。'
+      };
+    }
+
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      return {
+        ok: false,
+        message: '当前浏览器不支持麦克风权限请求，请切换到“经典答题”模式。'
+      };
+    }
+
+    try {
+      const permissions = navigator.permissions;
+      if (permissions && typeof permissions.query === 'function') {
+        const status = await permissions.query({ name: 'microphone' as PermissionName });
+        if (status.state === 'denied') {
+          return {
+            ok: false,
+            message: '麦克风权限被拒绝，请在浏览器设置中允许麦克风后再试。'
+          };
+        }
+      }
+    } catch (error) {
+      console.warn('[Pronounce] Microphone permission query failed:', error);
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track: MediaStreamTrack) => track.stop());
+      console.info('[Pronounce] Microphone permission pre-check passed.');
+      return { ok: true };
+    } catch (error) {
+      console.warn('[Pronounce] Microphone permission pre-check failed:', error);
+      return {
+        ok: false,
+        message: '无法获取麦克风权限，请允许后再开始盲盒跟读模式。'
+      };
+    }
   };
 
   const initializeCameraInternal = async (): Promise<boolean> => {
@@ -2009,6 +2069,19 @@ export default function App() {
 
   const handleStartGame = async () => {
     if (selectedThemes.length === 0) return;
+    if (!isSpeechRecognitionSupported) {
+      setGameplayModeIssue('当前浏览器不支持语音识别，无法进行第二轮“大声读”玩法。');
+      return;
+    }
+    setGameplayModeIssue('');
+    setPronunciationSummary(null);
+    setPronunciationAverageScore(0);
+    setIsLoadingReadyToStart(false);
+    setRoundIntroMode(null);
+    setRoundCountdownSeconds(null);
+    setSessionThemeIndex(0);
+    setGameplayMode('QUIZ');
+
     clearRestCountdown();
     const loadingRequestId = loadingRequestIdRef.current + 1;
     loadingRequestIdRef.current = loadingRequestId;
@@ -2056,7 +2129,10 @@ export default function App() {
         }
 
         setThemeImagesLoaded(true);
-        setPhase(GamePhase.TUTORIAL);
+        setLoadingProgress(100);
+        setLoadingStatus('资源准备完成，点击开始游戏');
+        setIsLoadingReadyToStart(true);
+        setPhase(GamePhase.LOADING);
         setInitStatus('系统就绪');
         
     } catch (e) {
@@ -2093,6 +2169,20 @@ export default function App() {
       void (scorePanel as HTMLElement).offsetWidth; // 触发重绘
       scorePanel.classList.add('animate-bounce-short');
     }
+  }, []);
+
+  const handlePronunciationProgressUpdate = useCallback((completed: number, total: number, averageScore: number) => {
+    setScore(completed);
+    setTotalQuestions(total);
+    setPronunciationAverageScore(averageScore);
+  }, []);
+
+  const handlePronunciationComplete = useCallback((summary: PronunciationSummary) => {
+    setPronunciationSummary(summary);
+    setScore(summary.completed);
+    setTotalQuestions(summary.total);
+    setPronunciationAverageScore(summary.average);
+    console.info('[Pronounce] Completed summary:', summary);
   }, []);
 
   const syncScoreHudTarget = useCallback((): boolean => {
@@ -2150,13 +2240,11 @@ export default function App() {
     };
   }, [isFullscreen, phase, score, totalQuestions, syncScoreHudTarget]);
   
-  const handleGameOver = useCallback(() => {
-    setShowCompletion(true);
-  }, []);
-
   const handleGameRestart = useCallback(() => {
     setShowCompletion(false);
     setBgIndex(0);
+    setPronunciationSummary(null);
+    setPronunciationAverageScore(0);
   }, []);
 
   const handleEnterPlaying = useCallback(async (): Promise<void> => {
@@ -2166,11 +2254,6 @@ export default function App() {
       primePhaserAudioContext(),
       bgmControllerRef.current?.ensureAudioUnlocked() ?? Promise.resolve(false)
     ]);
-    try {
-      await requestFullscreenSafely('manual');
-    } catch (error) {
-      console.warn('[Fullscreen] Unexpected error before entering PLAYING:', error);
-    }
     await primeAudioPromise;
     setPhase(GamePhase.PLAYING);
     window.setTimeout(() => {
@@ -2181,86 +2264,92 @@ export default function App() {
       void ensurePhaserAudioUnlocked();
       bgmControllerRef.current?.syncState();
     }, 180);
-  }, [requestFullscreenSafely]);
+  }, []);
+
+  const startRoundIntro = useCallback(async (mode: GameplayMode): Promise<void> => {
+    setShowCompletion(false);
+    setRoundIntroMode(mode);
+    setRoundCountdownSeconds(4);
+    setGameplayMode(mode);
+    setPhase(GamePhase.TUTORIAL);
+  }, []);
+
+  const handleGameOver = useCallback(() => {
+    if (gameplayMode === 'QUIZ') {
+      void startRoundIntro('BLIND_BOX_PRONUNCIATION');
+      return;
+    }
+    setShowCompletion(true);
+  }, [gameplayMode, startRoundIntro]);
+
+  const handleStartFromLoading = useCallback(async (): Promise<void> => {
+    if (!isLoadingReadyToStart) return;
+    void requestFullscreenSafely('manual');
+    const microphoneResult = await ensureMicrophonePermissionForPronunciation();
+    if (!microphoneResult.ok && 'message' in microphoneResult) {
+      setGameplayModeIssue(microphoneResult.message);
+      return;
+    }
+
+    setGameplayModeIssue('');
+    setPronunciationAverageScore(0);
+    setPronunciationSummary(null);
+    setScore(0);
+    setTotalQuestions(0);
+    setSessionThemeIndex(0);
+    setGameplayMode('QUIZ');
+    setIsLoadingReadyToStart(false);
+    await startRoundIntro('QUIZ');
+  }, [isLoadingReadyToStart, requestFullscreenSafely, startRoundIntro]);
+
+  useEffect(() => {
+    if (phase !== GamePhase.TUTORIAL) return;
+    if (!roundIntroMode) return;
+    if (roundCountdownSeconds === null) return;
+
+    if (roundCountdownSeconds <= 0) {
+      const targetMode = roundIntroMode;
+      setRoundIntroMode(null);
+      setRoundCountdownSeconds(null);
+      setGameplayMode(targetMode);
+      void handleEnterPlaying();
+      return;
+    }
+
+    const timerId = window.setTimeout(() => {
+      setRoundCountdownSeconds((prev) => {
+        if (prev === null) return null;
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [phase, roundIntroMode, roundCountdownSeconds, handleEnterPlaying]);
 
   const handleReplay = useCallback(() => {
     clearRestCountdown();
     setShowCompletion(false);
-    const game = window.phaserGame;
-    if (!game) {
-      console.warn('[Completion] Replay skipped: Phaser game instance missing.');
-      return;
-    }
-
-    try {
-      const mainScene = game.scene.getScene('MainScene') as MainScene;
-      mainScene.restartLevel();
-    } catch (error) {
-      console.error('[Completion] Replay failed to access MainScene:', error);
-    }
-  }, [clearRestCountdown]);
+    void startRoundIntro('BLIND_BOX_PRONUNCIATION');
+  }, [clearRestCountdown, startRoundIntro]);
 
   const handleNextLevel = useCallback(() => {
-    if (isCompletionTransitioningRef.current) {
-      return;
-    }
-
     setShowCompletion(false);
+    setPronunciationSummary(null);
+    setPronunciationAverageScore(0);
+    setScore(0);
+    setTotalQuestions(0);
 
-    const game = window.phaserGame;
-    if (!game) {
-      console.warn('[Completion] Next level skipped: Phaser game instance missing.');
+    const nextIndex = sessionThemeIndex + 1;
+    if (nextIndex >= selectedThemes.length) {
+      handleBackToMenu();
       return;
     }
 
-    try {
-      const mainScene = game.scene.getScene('MainScene') as MainScene;
-      const hasNextTheme = mainScene.hasNextTheme();
-
-      if (!hasNextTheme) {
-        handleBackToMenu();
-        return;
-      }
-
-      isCompletionTransitioningRef.current = true;
-      let remainingSeconds = THEME_SWITCH_REST_SECONDS;
-      setRestCountdownSeconds(remainingSeconds);
-
-      if (restCountdownTimerRef.current !== null) {
-        window.clearInterval(restCountdownTimerRef.current);
-      }
-
-      restCountdownTimerRef.current = window.setInterval(() => {
-        remainingSeconds -= 1;
-        if (remainingSeconds <= 0) {
-          if (restCountdownTimerRef.current !== null) {
-            window.clearInterval(restCountdownTimerRef.current);
-            restCountdownTimerRef.current = null;
-          }
-          setRestCountdownSeconds(null);
-          isCompletionTransitioningRef.current = false;
-
-          try {
-            const currentGame = window.phaserGame;
-            const currentMainScene = currentGame?.scene?.getScene('MainScene') as MainScene | undefined;
-            if (!currentMainScene || !currentMainScene.nextLevel()) {
-              handleBackToMenu();
-            }
-          } catch (error) {
-            console.error('[Completion] Next level transition failed after rest:', error);
-            handleBackToMenu();
-          }
-          return;
-        }
-
-        setRestCountdownSeconds(remainingSeconds);
-      }, 1000);
-    } catch (error) {
-      console.error('[Completion] Next level failed to access MainScene:', error);
-      isCompletionTransitioningRef.current = false;
-      setRestCountdownSeconds(null);
-    }
-  }, [THEME_SWITCH_REST_SECONDS, handleBackToMenu]);
+    setSessionThemeIndex(nextIndex);
+    void startRoundIntro('QUIZ');
+  }, [handleBackToMenu, selectedThemes.length, sessionThemeIndex, startRoundIntro]);
 
   useEffect(() => {
     if (!showCompletion || phase !== GamePhase.PLAYING) {
@@ -2435,9 +2524,16 @@ export default function App() {
              {phase === GamePhase.PLAYING && (
                <div ref={scorePanelRef} className="score-panel kenney-panel h-11 md:h-14 px-3 md:px-4 flex items-center gap-2 md:gap-2.5 transition-all bg-white/90 backdrop-blur-sm shadow-[0_6px_0_#333333] border-[3px] md:border-[4px]">
                  <img src={getR2AssetUrl('assets/kenney/Vector/Tiles/star.svg')} className="w-8 h-8 md:w-10 md:h-10" alt="分数" />
-                 <span className="text-lg md:text-3xl font-black leading-none text-kenney-dark tabular-nums tracking-tight">
-                   {score} / {totalQuestions}
-                 </span>
+                 <div className="flex flex-col items-start leading-none">
+                   <span className="text-lg md:text-3xl font-black text-kenney-dark tabular-nums tracking-tight">
+                     {score} / {totalQuestions}
+                   </span>
+                   {isBlindBoxMode && (
+                     <span className="text-[10px] md:text-xs font-black text-kenney-dark/70 mt-0.5">
+                       均分 {pronunciationAverageScore}
+                     </span>
+                   )}
+                 </div>
                </div>
              )}
           </div>
@@ -2455,8 +2551,10 @@ export default function App() {
               onGameOver={handleGameOver}
               onGameRestart={handleGameRestart}
               onBackgroundUpdate={setBgIndex}
-              // @ts-ignore
-              themes={selectedThemes}
+              onPronunciationProgressUpdate={handlePronunciationProgressUpdate}
+              onPronunciationComplete={handlePronunciationComplete}
+              gameplayMode={gameplayMode}
+              themes={currentThemeId ? [currentThemeId] : []}
               allThemes={themes}
               qualityMode={qualityMode}
             />
@@ -2469,6 +2567,8 @@ export default function App() {
         isVisible={showCompletion} 
         score={score} 
         total={totalQuestions} 
+        gameplayMode={gameplayMode}
+        pronunciationSummary={pronunciationSummary}
         onRestart={handleReplay}
         onNextLevel={handleNextLevel}
       />
@@ -2494,6 +2594,27 @@ export default function App() {
             {phase === GamePhase.LOADING && (
                 <>
                   <LoadingScreen progress={loadingProgress} status={loadingStatus} />
+                  {isLoadingReadyToStart && !cameraIssueMessage && (
+                    <div className="absolute inset-x-0 bottom-8 md:bottom-12 z-[85] flex flex-col items-center gap-3">
+                      {gameplayModeIssue && (
+                        <p className="max-w-xl text-xs md:text-sm font-black text-red-100 bg-red-500/60 border border-red-200/70 rounded-xl px-3 py-2 whitespace-pre-line">
+                          {gameplayModeIssue}
+                        </p>
+                      )}
+                      <button
+                        onTouchStart={() => {
+                          void primePhaserAudioContext();
+                          void bgmControllerRef.current?.ensureAudioUnlocked();
+                        }}
+                        onClick={() => {
+                          void handleStartFromLoading();
+                        }}
+                        className="kenney-button kenney-button-handdrawn px-8 md:px-14 py-3 md:py-5 text-xl md:text-3xl shadow-2xl"
+                      >
+                        开始闯关
+                      </button>
+                    </div>
+                  )}
                   {cameraIssueMessage && (
                     <div className="absolute inset-0 z-[90] bg-black/35 backdrop-blur-md flex items-center justify-center p-4">
                       <div className="kenney-panel bg-white/95 max-w-2xl w-full px-5 md:px-8 py-5 md:py-7 shadow-2xl">
@@ -2616,6 +2737,16 @@ export default function App() {
                     <h2 className="text-lg sm:text-2xl md:text-4xl lg:text-5xl font-black text-white mb-1 md:mb-2 tracking-[0.04em] shrink-0 mobile-landscape-title pt-4 md:pt-6">
                         选择绘本
                     </h2>
+                    {!isSpeechRecognitionSupported && (
+                      <p className="text-xs md:text-sm font-black text-red-100 bg-red-500/60 border border-red-200/70 rounded-xl px-3 py-2 mb-2">
+                        当前浏览器不支持语音识别，无法进行第二轮“大声读”玩法，请更换浏览器后再开始。
+                      </p>
+                    )}
+                    {gameplayModeIssue && (
+                      <p className="text-xs md:text-sm font-black text-red-100 bg-red-500/60 border border-red-200/70 rounded-xl px-3 py-2 mb-2 whitespace-pre-line">
+                        {gameplayModeIssue}
+                      </p>
+                    )}
                     <div className="w-full overflow-y-auto overflow-x-hidden px-0.5 md:px-2 scrollbar-hide flex-1 min-h-0 will-change-transform">
                         {/* Level Selection Bar */}
                         {levels.length > 0 && (
@@ -2725,10 +2856,10 @@ export default function App() {
                     <div className="theme-start flex justify-center px-4">
                          <button 
                             onClick={handleStartGame}
-                            disabled={selectedThemes.length === 0}
-                            className={`pointer-events-auto kenney-button kenney-button-handdrawn mobile-landscape-button px-8 py-3 text-xl md:text-2xl shadow-2xl transition-all transform duration-300 ${selectedThemes.length > 0 ? 'scale-100 opacity-100 translate-y-0' : 'scale-50 opacity-0 translate-y-10'}`}
+                            disabled={isThemeStartDisabled}
+                            className={`pointer-events-auto kenney-button kenney-button-handdrawn mobile-landscape-button px-8 py-3 text-xl md:text-2xl shadow-2xl transition-all transform duration-300 ${!isThemeStartDisabled ? 'scale-100 opacity-100 translate-y-0' : 'scale-90 opacity-80 translate-y-0 bg-gray-400 border-gray-600'}`}
                         >
-                            开始游戏（{selectedThemes.length}）
+                            加载资源（{selectedThemes.length}）
                         </button>
                     </div>
                 </div>
@@ -2739,57 +2870,51 @@ export default function App() {
                 <div className="tutorial-shell non-game-scale text-center w-full max-w-6xl px-4 md:px-20 lg:px-32 flex flex-col items-center justify-center h-full max-h-screen gap-[2vh] md:gap-[4vh] overflow-y-auto scrollbar-hide py-4">
                     
                     <h2 className="tutorial-title text-[4vw] sm:text-[5vw] md:text-[6vw] font-bold text-white tracking-[0.03em] rotate-[-1deg] shrink-0 mobile-landscape-title landscape-compact-title leading-none">
-                        游戏说明
+                        {gameplayMode === 'QUIZ' ? '第一关：选图闯关' : '第二关：大声读'}
                     </h2>
                     
                     <div className="w-full flex-1 flex flex-col items-center justify-center min-h-0 gap-[2vh] md:gap-[4vh]">
-                        <div className="grid grid-cols-2 gap-[3vw] md:gap-[4vw] w-full max-w-3xl lg:max-w-4xl min-h-0 mobile-landscape-tutorial-grid">
-                            <div className="tutorial-card kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
-                                <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-4">
-                                    <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_walk_a.svg')} className="tutorial-card-img w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce-horizontal-large mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
-                                </div>
-                                <div className="shrink-0 flex flex-col items-center gap-1">
-                                    <h3 className="tutorial-card-title text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark tracking-[0.02em] mobile-landscape-card-text">左右移动</h3>
-                                    <p className="tutorial-card-subtitle hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">身体左右移动</p>
-                                </div>
-                            </div>
+                        {gameplayMode === 'QUIZ' ? (
+                          <div className="grid grid-cols-2 gap-[3vw] md:gap-[4vw] w-full max-w-3xl lg:max-w-4xl min-h-0 mobile-landscape-tutorial-grid">
+                              <div className="tutorial-card kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
+                                  <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-4">
+                                      <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_walk_a.svg')} className="tutorial-card-img w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce-horizontal-large mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
+                                  </div>
+                                  <div className="shrink-0 flex flex-col items-center gap-1">
+                                      <h3 className="tutorial-card-title text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark tracking-[0.02em] mobile-landscape-card-text">左右移动</h3>
+                                      <p className="tutorial-card-subtitle hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">身体左右移动</p>
+                                  </div>
+                              </div>
 
-                            <div className="tutorial-card kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
-                                <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-4">
-                                    <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')} className="tutorial-card-img w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
-                                </div>
-                                <div className="shrink-0 flex flex-col items-center gap-1">
-                                    <h3 className="tutorial-card-title text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark tracking-[0.02em] mobile-landscape-card-text">向上跳</h3>
-                                    <p className="tutorial-card-subtitle hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">跳起来撞击方块</p>
-                                </div>
+                              <div className="tutorial-card kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
+                                  <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-4">
+                                      <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')} className="tutorial-card-img w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
+                                  </div>
+                                  <div className="shrink-0 flex flex-col items-center gap-1">
+                                      <h3 className="tutorial-card-title text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark tracking-[0.02em] mobile-landscape-card-text">向上跳</h3>
+                                      <p className="tutorial-card-subtitle hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">跳起来撞击方块选图</p>
+                                  </div>
+                              </div>
+                          </div>
+                        ) : (
+                          <div className="w-full max-w-3xl">
+                            <div className="tutorial-card kenney-panel p-5 md:p-7 flex flex-col items-center shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
+                              <div className="flex items-center justify-center w-full bg-kenney-blue/10 rounded-xl mb-4 py-6">
+                                <img src={getR2AssetUrl('assets/kenney/Vector/Tiles/sign.svg')} className="w-20 h-20 md:w-24 md:h-24 drop-shadow-md" alt="" />
+                              </div>
+                              <h3 className="text-xl md:text-3xl font-black text-kenney-dark mb-2">听清楚后大声读出来</h3>
+                              <p className="text-sm md:text-lg font-bold text-kenney-dark/70">系统会自动倒计时后开始录音，请面向镜头清晰朗读</p>
                             </div>
-                        </div>
+                          </div>
+                        )}
 
                         <div className="flex flex-col items-center gap-2">
-                            <button 
-                                onTouchStart={() => {
-                                  void primePhaserAudioContext();
-                                  void bgmControllerRef.current?.ensureAudioUnlocked();
-                                }}
-                                onClick={() => {
-                                    void handleEnterPlaying();
-                                }}
-                                disabled={!motionController.isStarted || !themeImagesLoaded}
-                                className={`kenney-button kenney-button-handdrawn px-6 sm:px-12 md:px-24 py-2 sm:py-4 md:py-8 text-base sm:text-2xl md:text-4xl hover:scale-110 transition-transform shadow-2xl mobile-landscape-button landscape-compact-button flex items-center justify-center gap-3 md:gap-4 ${(!motionController.isStarted || !themeImagesLoaded) ? 'opacity-100 bg-gray-400 border-gray-600 cursor-wait' : 'bg-kenney-green border-kenney-dark'}`}>
-                                {(motionController.isStarted && themeImagesLoaded) ? (
-                                    <>
-                                        <span className="font-black leading-none pb-1 text-base sm:text-2xl md:text-4xl">开始！</span>
-                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-4 h-4 sm:w-5 sm:h-5 md:w-7 md:h-7 animate-pulse filter drop-shadow-md">
-                                            <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
-                                        </svg>
-                                    </>
-                                ) : (
-                                    <>
-                                        <div className="w-5 h-5 sm:w-6 sm:h-6 md:w-7 md:h-7 border-[3px] md:border-[4px] border-white/30 border-t-white rounded-full animate-spin"></div>
-                                        <span className="font-black tracking-widest leading-none">加载中...</span>
-                                    </>
-                                )}
-                            </button>
+                          <div className="kenney-panel bg-white/95 px-6 py-3 md:px-9 md:py-4 border-[3px] md:border-[4px] shadow-xl">
+                            <p className="text-sm md:text-lg font-black text-kenney-dark/70">倒计时</p>
+                            <p className="text-4xl md:text-6xl font-black text-kenney-yellow drop-shadow-[0_3px_0_#333333] tabular-nums">
+                              {roundCountdownSeconds ?? 0}
+                            </p>
+                          </div>
                         </div>
                     </div>
                 </div>

@@ -3,7 +3,7 @@ import React, { useEffect, useRef } from 'react';
 import { bindActivePhaserGame, ensurePhaserAudioUnlocked, getPhaserAudioConfig } from '../services/audioController';
 import { MainScene } from '../game/scenes/MainScene';
 import { PreloadScene } from '../game/scenes/PreloadScene';
-import { Theme, ThemeId } from '../types';
+import { GameplayMode, PronunciationSummary, Theme, ThemeId } from '../types';
 
 const isIPadDevice = (): boolean => (
   /iPad|Macintosh/i.test(navigator.userAgent) && 'ontouchend' in document
@@ -319,6 +319,9 @@ interface GameCanvasProps {
   onGameRestart?: () => void;
   onQuestionUpdate?: (question: string) => void;
   onBackgroundUpdate?: (index: number) => void;
+  onPronunciationProgressUpdate?: (completed: number, total: number, averageScore: number) => void;
+  onPronunciationComplete?: (summary: PronunciationSummary) => void;
+  gameplayMode: GameplayMode;
   themes: ThemeId[];
   allThemes: Theme[];
   qualityMode: QualityMode;
@@ -330,6 +333,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   onGameRestart,
   onQuestionUpdate,
   onBackgroundUpdate,
+  onPronunciationProgressUpdate,
+  onPronunciationComplete,
+  gameplayMode,
   themes,
   allThemes,
   qualityMode
@@ -583,10 +589,13 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               onGameOver,
               onGameRestart,
               onQuestionUpdate,
-              onBackgroundUpdate
+              onBackgroundUpdate,
+              onPronunciationProgressUpdate,
+              onPronunciationComplete
             });
             game.registry.set('initialThemes', themes);
             game.registry.set('allThemes', allThemes);
+            game.registry.set('gameplayMode', gameplayMode);
             game.registry.set('renderProfile', qualityProfile);
             game.registry.set('renderDpr', 1);
             game.registry.set('textureBoost', 1);

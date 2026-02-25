@@ -1,8 +1,18 @@
 import Phaser from 'phaser';
 import { pauseBackgroundPreloading, prioritizeThemeInQueue, resumeBackgroundPreloading } from '../../gameConfig';
 import { motionController } from '../../services/motionController';
+import { scorePronunciation, speechScoringService } from '../../services/speechScoring';
 import { getLocalAssetUrl } from '../../src/config/r2Config';
-import { QuestionData, Theme, ThemeId, ThemeList } from '../../types';
+import {
+  GameplayMode,
+  PronunciationRoundResult,
+  PronunciationSummary,
+  QuestionData,
+  Theme,
+  ThemeId,
+  ThemeList,
+  ThemeQuestion
+} from '../../types';
 
 // --- CONFIGURATION ---
 
@@ -89,6 +99,16 @@ export class MainScene extends Phaser.Scene {
   private onGameRestart: (() => void) | null = null;
   private onQuestionUpdate: ((q: string) => void) | null = null;
   private onBackgroundUpdate: ((index: number) => void) | null = null;
+  private onPronunciationProgressUpdate: ((completed: number, total: number, averageScore: number) => void) | null = null;
+  private onPronunciationComplete: ((summary: PronunciationSummary) => void) | null = null;
+  private sceneMode: GameplayMode = 'QUIZ';
+  private blindBoxRoundPhase: 'IDLE' | 'SELECTING' | 'SHOWING' | 'COUNTDOWN' | 'RECORDING' | 'RESULT' = 'IDLE';
+  private blindBoxRemainingQuestions: ThemeQuestion[] = [];
+  private currentBlindBoxRoundQuestions: ThemeQuestion[] = [];
+  private pronunciationResults: PronunciationRoundResult[] = [];
+  private blindBoxRoundToken: number = 0;
+  private blindBoxCountdownText: Phaser.GameObjects.Text | null = null;
+  private blindBoxResultText: Phaser.GameObjects.Text | null = null;
   
   // Input & Lane State
   private targetLaneIndex: number = 1; 
@@ -272,6 +292,17 @@ export class MainScene extends Phaser.Scene {
     return this.isCompressedLandscapeViewport(width, height) ? 48 * this.gameScale : 60 * this.gameScale;
   }
 
+  private destroyBlindBoxUiText(): void {
+    if (this.blindBoxCountdownText) {
+      this.blindBoxCountdownText.destroy();
+      this.blindBoxCountdownText = null;
+    }
+    if (this.blindBoxResultText) {
+      this.blindBoxResultText.destroy();
+      this.blindBoxResultText = null;
+    }
+  }
+
   private clearResizeStabilizers(): void {
     this.resizeStabilizeTimers.forEach((timer) => {
       if (timer && !timer.hasDispatched) {
@@ -291,6 +322,10 @@ export class MainScene extends Phaser.Scene {
     this.onGameRestart = callbacks.onGameRestart || null;
     this.onQuestionUpdate = callbacks.onQuestionUpdate || null;
     this.onBackgroundUpdate = callbacks.onBackgroundUpdate || null;
+    this.onPronunciationProgressUpdate = callbacks.onPronunciationProgressUpdate || null;
+    this.onPronunciationComplete = callbacks.onPronunciationComplete || null;
+    const registryMode = this.registry.get('gameplayMode');
+    this.sceneMode = registryMode === 'BLIND_BOX_PRONUNCIATION' ? 'BLIND_BOX_PRONUNCIATION' : 'QUIZ';
 
     const initialThemes = this.registry.get('initialThemes');
     const initialTheme = this.registry.get('initialTheme'); // Fallback
@@ -321,6 +356,11 @@ export class MainScene extends Phaser.Scene {
     this.currentQuestion = null;
     this.themeData = null;
     this.themeWordPool = [];
+    this.blindBoxRemainingQuestions = [];
+    this.currentBlindBoxRoundQuestions = [];
+    this.pronunciationResults = [];
+    this.blindBoxRoundPhase = 'IDLE';
+    this.blindBoxRoundToken += 1;
     this.questionCounter = 0;
     this.totalQuestions = 0;
     this.currentAnswerRatios = [];
@@ -328,6 +368,7 @@ export class MainScene extends Phaser.Scene {
     this.activeCardLayouts = [];
     this.currentThemeUsesPortraitFrames = true;
     this.pronunciationSound = null;
+    this.destroyBlindBoxUiText();
     this.clearResizeStabilizers();
     // Randomize background for each level/restart
     this.currentBgIndex = Phaser.Math.Between(0, 6);
@@ -360,6 +401,23 @@ export class MainScene extends Phaser.Scene {
 
   private setupThemeData(theme: Theme) {
     this.themeData = theme;
+    if (this.sceneMode === 'BLIND_BOX_PRONUNCIATION') {
+      this.blindBoxRemainingQuestions = [...this.themeData.questions];
+      Phaser.Utils.Array.Shuffle(this.blindBoxRemainingQuestions);
+      this.currentBlindBoxRoundQuestions = [];
+      this.pronunciationResults = [];
+      this.totalQuestions = this.blindBoxRemainingQuestions.length;
+      this.score = 0;
+      if (this.onScoreUpdate) this.onScoreUpdate(this.score, this.totalQuestions);
+      if (this.onPronunciationProgressUpdate) {
+        this.onPronunciationProgressUpdate(0, this.totalQuestions, 0);
+      }
+      this.time.delayedCall(100, () => {
+        void this.spawnBlindBoxRound();
+      });
+      return;
+    }
+
     // Store raw question strings to preserve "The"
     this.themeWordPool = this.themeData.questions.map(q => q.question);
     this.totalQuestions = this.themeWordPool.length;
@@ -1116,11 +1174,15 @@ export class MainScene extends Phaser.Scene {
     this.events.once('shutdown', () => {
       this.clearResizeStabilizers();
       this.scale.off('resize', this.handleResize, this);
+      this.blindBoxRoundToken += 1;
+      this.destroyBlindBoxUiText();
       this.stopPronunciationSound(true);
     });
     this.events.once('destroy', () => {
       this.clearResizeStabilizers();
       this.scale.off('resize', this.handleResize, this);
+      this.blindBoxRoundToken += 1;
+      this.destroyBlindBoxUiText();
       this.stopPronunciationSound(true);
     });
 
@@ -1331,6 +1393,13 @@ export class MainScene extends Phaser.Scene {
               this.beeWordText.setFontSize(`${fontSize}px`);
               this.beeWordText.y = textOffsetY;
           }
+      }
+
+      if (this.blindBoxCountdownText && this.blindBoxCountdownText.active) {
+          this.blindBoxCountdownText.setPosition(safeWidth / 2, safeHeight * 0.2);
+      }
+      if (this.blindBoxResultText && this.blindBoxResultText.active) {
+          this.blindBoxResultText.setPosition(safeWidth / 2, safeHeight * 0.22);
       }
   }
 
@@ -1548,6 +1617,363 @@ export class MainScene extends Phaser.Scene {
     };
   }
 
+  private getBlindBoxRoundQuestions(): ThemeQuestion[] {
+    if (this.blindBoxRemainingQuestions.length <= 3) {
+      return [...this.blindBoxRemainingQuestions];
+    }
+    const pool = [...this.blindBoxRemainingQuestions];
+    Phaser.Utils.Array.Shuffle(pool);
+    return pool.slice(0, 3);
+  }
+
+  private removeBlindBoxQuestionFromRemaining(selected: ThemeQuestion): void {
+    const index = this.blindBoxRemainingQuestions.findIndex((questionItem: ThemeQuestion) => (
+      questionItem === selected ||
+      (
+        questionItem.question === selected.question &&
+        questionItem.image === selected.image &&
+        questionItem.audio === selected.audio
+      )
+    ));
+    if (index >= 0) {
+      this.blindBoxRemainingQuestions.splice(index, 1);
+    }
+  }
+
+  private getPronunciationAverageScore(): number {
+    if (this.pronunciationResults.length === 0) return 0;
+    const sum = this.pronunciationResults.reduce((acc: number, item: PronunciationRoundResult) => acc + item.score, 0);
+    return Math.round(sum / this.pronunciationResults.length);
+  }
+
+  private buildPronunciationSummary(): PronunciationSummary {
+    if (this.pronunciationResults.length === 0) {
+      return {
+        average: 0,
+        min: 0,
+        max: 0,
+        completed: 0,
+        total: this.totalQuestions
+      };
+    }
+    const scores = this.pronunciationResults.map((item: PronunciationRoundResult) => item.score);
+    return {
+      average: this.getPronunciationAverageScore(),
+      min: Math.min(...scores),
+      max: Math.max(...scores),
+      completed: this.pronunciationResults.length,
+      total: this.totalQuestions
+    };
+  }
+
+  private waitForDelay(delayMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      this.time.delayedCall(delayMs, () => resolve());
+    });
+  }
+
+  private isActiveBlindBoxToken(roundToken: number): boolean {
+    return this.scene.isActive() && roundToken === this.blindBoxRoundToken;
+  }
+
+  private ensureBlindBoxCountdownLabel(): Phaser.GameObjects.Text {
+    if (this.blindBoxCountdownText && this.blindBoxCountdownText.active) {
+      return this.blindBoxCountdownText;
+    }
+    const viewport = this.getCurrentViewportSize();
+    this.blindBoxCountdownText = this.add.text(viewport.width / 2, viewport.height * 0.2, '', {
+      fontFamily: FONT_STACK,
+      fontSize: `${Math.max(42, Math.round(96 * this.gameScale))}px`,
+      fontStyle: '900',
+      color: '#ffffff',
+      stroke: '#222222',
+      strokeThickness: Math.max(4, Math.round(10 * this.gameScale))
+    }).setOrigin(0.5).setDepth(1500).setVisible(false);
+    return this.blindBoxCountdownText;
+  }
+
+  private ensureBlindBoxResultLabel(): Phaser.GameObjects.Text {
+    if (this.blindBoxResultText && this.blindBoxResultText.active) {
+      return this.blindBoxResultText;
+    }
+    const viewport = this.getCurrentViewportSize();
+    this.blindBoxResultText = this.add.text(viewport.width / 2, viewport.height * 0.22, '', {
+      fontFamily: FONT_STACK,
+      fontSize: `${Math.max(24, Math.round(52 * this.gameScale))}px`,
+      fontStyle: '900',
+      color: '#FFD700',
+      stroke: '#222222',
+      strokeThickness: Math.max(3, Math.round(8 * this.gameScale)),
+      align: 'center'
+    }).setOrigin(0.5).setDepth(1500).setVisible(false);
+    return this.blindBoxResultText;
+  }
+
+  private async runBlindBoxCountdown(roundToken: number): Promise<boolean> {
+    const label = this.ensureBlindBoxCountdownLabel();
+    this.blindBoxRoundPhase = 'COUNTDOWN';
+    label.setVisible(true);
+    label.setAlpha(1);
+    const steps = ['3', '2', '1'];
+    for (const step of steps) {
+      if (!this.isActiveBlindBoxToken(roundToken)) return false;
+      label.setText(step);
+      label.setScale(1.2);
+      this.tweens.add({
+        targets: label,
+        scaleX: 1,
+        scaleY: 1,
+        duration: 260,
+        ease: 'Back.easeOut'
+      });
+      await this.waitForDelay(700);
+    }
+    label.setVisible(false);
+    return this.isActiveBlindBoxToken(roundToken);
+  }
+
+  private async speakWithSpeechSynthesis(text: string): Promise<void> {
+    if (typeof window === 'undefined' || typeof window.speechSynthesis === 'undefined' || typeof SpeechSynthesisUtterance === 'undefined') {
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'en-US';
+      utterance.rate = 0.95;
+      utterance.pitch = 1;
+      let resolved = false;
+      const finish = (): void => {
+        if (resolved) return;
+        resolved = true;
+        resolve();
+      };
+      utterance.onend = () => finish();
+      utterance.onerror = () => finish();
+      try {
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(utterance);
+        window.setTimeout(finish, 5000);
+      } catch (error) {
+        console.warn('[Pronounce] speechSynthesis fallback failed:', error);
+        finish();
+      }
+    });
+  }
+
+  private async playQuestionAudioByItem(questionItem: ThemeQuestion): Promise<void> {
+    const audioKey = this.getAudioCacheKey(questionItem, this.currentTheme);
+    if (window.setBGMVolume) {
+      window.setBGMVolume(0);
+    }
+
+    if (audioKey && this.cache.audio.exists(audioKey)) {
+      this.stopPronunciationSound(false);
+      await new Promise<void>((resolve) => {
+        try {
+          const sound = this.sound.add(audioKey);
+          this.pronunciationSound = sound;
+
+          const finalize = (): void => {
+            if (this.pronunciationSound === sound) {
+              this.pronunciationSound = null;
+            }
+            sound.destroy();
+            resolve();
+          };
+
+          sound.once('complete', finalize);
+          sound.once('destroy', () => {
+            if (this.pronunciationSound === sound) {
+              this.pronunciationSound = null;
+            }
+          });
+
+          const played = sound.play({ volume: this.PRONUNCIATION_VOLUME });
+          if (!played) {
+            finalize();
+          }
+        } catch (error) {
+          console.warn('[Pronounce] Failed to play question audio, fallback to speech synthesis.', error);
+          resolve();
+        }
+      });
+      window.restoreBGMVolume?.();
+      return;
+    }
+
+    console.warn(`[Pronounce] Audio missing for "${questionItem.question}", using speech synthesis fallback.`);
+    await this.speakWithSpeechSynthesis(questionItem.question);
+    window.restoreBGMVolume?.();
+  }
+
+  private async spawnBlindBoxRound(): Promise<void> {
+    if (this.sceneMode !== 'BLIND_BOX_PRONUNCIATION') return;
+    const roundToken = ++this.blindBoxRoundToken;
+    this.isInteractionActive = false;
+    this.blindBoxRoundPhase = 'SELECTING';
+    this.destroyBlindBoxUiText();
+
+    if (!this.imagesLoaded) {
+      await this.loadThemeImages();
+      if (!this.isActiveBlindBoxToken(roundToken)) return;
+    }
+
+    if (!this.hasPreloadedNext) {
+      this.hasPreloadedNext = true;
+      this.preloadNextTheme();
+    }
+
+    if (this.blindBoxRemainingQuestions.length === 0) {
+      this.currentBlindBoxRoundQuestions = [];
+      this.currentQuestion = null;
+      await this.showThemeCompletion();
+      return;
+    }
+
+    this.currentBlindBoxRoundQuestions = this.getBlindBoxRoundQuestions();
+    if (this.currentBlindBoxRoundQuestions.length === 0) {
+      await this.showThemeCompletion();
+      return;
+    }
+
+    if (this.onQuestionUpdate) {
+      this.onQuestionUpdate('选择一个盲盒');
+    }
+
+    this.forceDestroyAllBlockVisuals();
+    this.blocks.clear(true, true);
+    if (this.beeContainer && this.beeContainer.active) {
+      this.beeContainer.setVisible(false);
+    }
+
+    const viewport = this.getCurrentViewportSize();
+    const width = viewport.width;
+    const height = viewport.height;
+    this.recalcLayout(width, height);
+    this.updateSceneBounds(width, height);
+
+    this.currentAnswerRatios = this.currentBlindBoxRoundQuestions.map((questionItem: ThemeQuestion) => {
+      const imageKey = this.getImageTextureKey(questionItem, this.currentTheme);
+      return this.getTextureAspectRatio(imageKey);
+    });
+    this.activeCardLayouts = this.computeAnswerCardLayouts(this.currentAnswerRatios, width, height);
+    this.LANE_X_POSITIONS = this.activeCardLayouts.map((layout) => layout.centerX);
+    this.targetLaneIndex = Phaser.Math.Clamp(this.targetLaneIndex, 0, Math.max(0, this.LANE_X_POSITIONS.length - 1));
+    if (this.activeCardLayouts.length > 0) {
+      this.updateJumpVelocityByCardHeight(this.getMaxCardHeight(this.activeCardLayouts));
+    }
+
+    const entranceDuration = 300;
+    const stagger = 80;
+    const totalSetupTime = entranceDuration + (stagger * Math.max(0, this.currentBlindBoxRoundQuestions.length - 1));
+    const blockY = this.blockCenterY;
+
+    this.currentBlindBoxRoundQuestions.forEach((questionItem: ThemeQuestion, index: number) => {
+      const rawLayout = this.activeCardLayouts[index];
+      const layout = rawLayout ? this.constrainCardLayout(rawLayout, width, height) : undefined;
+      const x = Math.round(layout?.centerX ?? this.getLaneXPosition(index));
+      const cardWidth = Math.round(layout?.cardWidth ?? this.blockHeight);
+      const cardHeight = Math.round(layout?.cardHeight ?? this.blockHeight);
+      const borderThickness = Math.max(4, Math.round(6 * this.gameScale));
+      const innerBorderThickness = Math.max(2, Math.round(3 * this.gameScale));
+      const shadowOffsetY = Math.max(4, 8 * this.gameScale);
+
+      const block = this.blocks.create(x, blockY, 'block_hitbox');
+      block.setOrigin(0.5);
+      block.setDisplaySize(cardWidth, cardHeight);
+      block.refreshBody();
+      block.setVisible(false);
+      block.setAlpha(0);
+      block.setData('answerIndex', index);
+      block.setData('questionItem', questionItem);
+      block.setData('blindBox', true);
+      block.setData('isCleaningUp', false);
+
+      const container = this.add.container(x, blockY);
+      const frameShadow = this.add
+        .rectangle(
+          0,
+          shadowOffsetY,
+          cardWidth + borderThickness * 1.4,
+          cardHeight + borderThickness * 1.6,
+          0x202432,
+          0.28
+        )
+        .setOrigin(0.5);
+      const frame = this.add
+        .rectangle(0, 0, cardWidth, cardHeight, 0xffffff, 0.98)
+        .setOrigin(0.5)
+        .setStrokeStyle(borderThickness, 0x2f3442, 1);
+      const innerFrame = this.add
+        .rectangle(
+          0,
+          0,
+          Math.max(1, cardWidth - borderThickness * 1.2),
+          Math.max(1, cardHeight - borderThickness * 1.2),
+          0xffffff,
+          0
+        )
+        .setOrigin(0.5)
+        .setStrokeStyle(innerBorderThickness, 0xd9e2f2, 0.9);
+      const icon = this.add.image(0, 0, 'tile_box');
+      if (layout) {
+        icon.setDisplaySize(layout.iconWidth, layout.iconHeight);
+      } else {
+        const fallbackInset = Math.max(2, Math.round(this.CARD_IMAGE_INSET_BASE * this.gameScale));
+        icon.setDisplaySize(
+          Math.max(1, cardWidth - fallbackInset * 2),
+          Math.max(1, cardHeight - fallbackInset * 2)
+        );
+      }
+      const questionMark = this.add.text(0, 0, '?', {
+        fontFamily: FONT_STACK,
+        fontSize: `${Math.max(24, Math.round(64 * this.gameScale))}px`,
+        fontStyle: '900',
+        color: '#ffffff',
+        stroke: '#333333',
+        strokeThickness: Math.max(3, Math.round(7 * this.gameScale))
+      }).setOrigin(0.5);
+
+      container.add([frameShadow, frame, innerFrame, icon, questionMark]);
+      block.setData('visuals', container);
+      block.setData('answerFrameShadow', frameShadow);
+      block.setData('answerFrame', frame);
+      block.setData('answerInnerFrame', innerFrame);
+      block.setData('answerIcon', icon);
+      block.setData('blindQuestionMark', questionMark);
+
+      if (!this.isMobileDevice) {
+        this.tweens.add({
+          targets: container,
+          y: Math.round(container.y - 15),
+          duration: 1500,
+          yoyo: true,
+          repeat: -1,
+          ease: 'Sine.easeInOut',
+          delay: index * 200
+        });
+      } else {
+        container.y = Math.round(container.y);
+      }
+
+      container.setScale(0);
+      this.tweens.add({
+        targets: container,
+        scaleX: 1,
+        scaleY: 1,
+        duration: entranceDuration,
+        delay: index * stagger,
+        ease: 'Back.easeOut'
+      });
+    });
+
+    this.time.delayedCall(totalSetupTime, () => {
+      if (!this.isActiveBlindBoxToken(roundToken)) return;
+      this.isInteractionActive = true;
+    });
+  }
+
   private async spawnQuestion() {
     this.isInteractionActive = false;
     
@@ -1720,7 +2146,150 @@ export class MainScene extends Phaser.Scene {
     });
   }
 
+  private hitBlindBox(player: any, block: any): void {
+    if (!block.active || !this.isInteractionActive) return;
+    if (player.body.velocity.y > this.getScaledPhysicsValue(500)) return;
+
+    const playerBodyTopY = player.y - player.body.height;
+    const blockBottomY = block.y + (block.body.height / 2);
+    if (playerBodyTopY > blockBottomY) return;
+
+    this.isInteractionActive = false;
+    const recoilForce = this.getScaledPhysicsValue(400);
+    const playerBody = player.body as Phaser.Physics.Arcade.Body;
+    const pushDownPadding = Math.max(2, 6 * this.gameScale);
+    const safePlayerY = blockBottomY + player.displayHeight + pushDownPadding;
+    const clampedY = Math.min(safePlayerY, this.floorSurfaceY);
+    playerBody.reset(player.x, clampedY);
+    if (clampedY >= this.floorSurfaceY - Math.max(1, 3 * this.gameScale)) {
+      playerBody.setVelocityY(0);
+    } else {
+      playerBody.setVelocityY(recoilForce);
+    }
+    player.setAngle(0);
+
+    if (block.getData('blindBoxResolved')) return;
+    block.setData('blindBoxResolved', true);
+    this.successSound.play();
+    void this.handleBlindBoxSelection(block);
+  }
+
+  private async handleBlindBoxSelection(block: any): Promise<void> {
+    const roundToken = this.blindBoxRoundToken;
+    const questionItem = block.getData('questionItem') as ThemeQuestion | undefined;
+    if (!questionItem) {
+      this.isInteractionActive = true;
+      return;
+    }
+
+    this.blindBoxRoundPhase = 'SHOWING';
+
+    const selectedIcon = block.getData('answerIcon') as Phaser.GameObjects.Image | undefined;
+    const selectedMark = block.getData('blindQuestionMark') as Phaser.GameObjects.Text | undefined;
+    const selectedTexture = this.getImageTextureKey(questionItem, this.currentTheme);
+    if (selectedIcon) {
+      selectedIcon.setTexture(this.textures.exists(selectedTexture) ? selectedTexture : 'tile_box');
+    }
+    if (selectedMark) {
+      selectedMark.setVisible(false);
+    }
+
+    this.blocks.children.iterate((candidate: any) => {
+      if (!candidate || candidate === block) return true;
+      const visuals = candidate.getData('visuals') as Phaser.GameObjects.Container | undefined;
+      if (visuals) {
+        this.tweens.add({
+          targets: visuals,
+          alpha: 0.5,
+          duration: 200,
+          ease: 'Sine.easeOut'
+        });
+      }
+      return true;
+    });
+
+    await this.waitForDelay(240);
+    if (!this.isActiveBlindBoxToken(roundToken)) return;
+
+    await this.playQuestionAudioByItem(questionItem);
+    if (!this.isActiveBlindBoxToken(roundToken)) return;
+
+    const countdownOk = await this.runBlindBoxCountdown(roundToken);
+    if (!countdownOk) return;
+
+    this.blindBoxRoundPhase = 'RECORDING';
+    console.info('[Pronounce] Recognition started:', questionItem.question);
+    const recognitionResult = await speechScoringService.recognizeOnce({
+      lang: 'en-US',
+      maxDurationMs: 5000
+    });
+    if (!this.isActiveBlindBoxToken(roundToken)) return;
+
+    const transcript = recognitionResult.transcript.trim();
+    const score = transcript
+      ? scorePronunciation(questionItem.question, transcript)
+      : 0;
+
+    const roundResult: PronunciationRoundResult = {
+      targetText: questionItem.question,
+      transcript,
+      score,
+      reason: recognitionResult.reason,
+      durationMs: recognitionResult.durationMs
+    };
+    this.pronunciationResults.push(roundResult);
+    this.removeBlindBoxQuestionFromRemaining(questionItem);
+
+    this.score = this.pronunciationResults.length;
+    if (this.onScoreUpdate) {
+      this.onScoreUpdate(this.score, this.totalQuestions);
+    }
+
+    const averageScore = this.getPronunciationAverageScore();
+    if (this.onPronunciationProgressUpdate) {
+      this.onPronunciationProgressUpdate(this.pronunciationResults.length, this.totalQuestions, averageScore);
+    }
+    console.info('[Pronounce] Round result:', roundResult);
+
+    this.blindBoxRoundPhase = 'RESULT';
+    const resultLabel = this.ensureBlindBoxResultLabel();
+    resultLabel.setVisible(true);
+    resultLabel.setText(`Score ${score}`);
+    resultLabel.setColor(score >= 80 ? '#6BFF6B' : score >= 50 ? '#FFD700' : '#FF7A7A');
+    resultLabel.setStroke('#222222', Math.max(3, Math.round(8 * this.gameScale)));
+    resultLabel.setAlpha(1);
+    resultLabel.setScale(1.2);
+    this.tweens.add({
+      targets: resultLabel,
+      scaleX: 1,
+      scaleY: 1,
+      duration: 220,
+      ease: 'Back.easeOut'
+    });
+
+    await this.waitForDelay(1100);
+    if (!this.isActiveBlindBoxToken(roundToken)) return;
+    resultLabel.setVisible(false);
+
+    this.cleanupBlocks();
+    await this.waitForDelay(400);
+    if (!this.isActiveBlindBoxToken(roundToken)) return;
+
+    this.blindBoxRoundPhase = 'IDLE';
+    if (this.blindBoxRemainingQuestions.length === 0) {
+      await this.showThemeCompletion();
+      return;
+    }
+
+    await this.spawnBlindBoxRound();
+  }
+
   hitBlock(player: any, block: any) {
+    if (this.sceneMode === 'BLIND_BOX_PRONUNCIATION') {
+      this.hitBlindBox(player, block);
+      return;
+    }
+
     if (!block.active || !this.isInteractionActive) return;
     
     if (player.body.velocity.y > this.getScaledPhysicsValue(500)) return;
@@ -1938,6 +2507,8 @@ export class MainScene extends Phaser.Scene {
   private async showThemeCompletion() {
     if (this.isGameOver) return;
     this.isGameOver = true;
+    this.blindBoxRoundToken += 1;
+    this.destroyBlindBoxUiText();
     this.currentAnswerRatios = [];
     this.currentAnswerKeys = [];
     this.activeCardLayouts = [];
@@ -1954,6 +2525,9 @@ export class MainScene extends Phaser.Scene {
     this.blocks.clear(true, true);
     
     // 2. 触发 React 层 UI 开启 (三明治上层)
+    if (this.sceneMode === 'BLIND_BOX_PRONUNCIATION' && this.onPronunciationComplete) {
+      this.onPronunciationComplete(this.buildPronunciationSummary());
+    }
     if (this.onGameOver) this.onGameOver();
   }
 

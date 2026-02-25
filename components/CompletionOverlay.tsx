@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import type Phaser from 'phaser';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { GameplayMode, PronunciationSummary } from '../types';
 import { getR2AssetUrl } from '../src/config/r2Config';
 import { ImgWithFallback } from './ImgWithFallback';
 
@@ -8,6 +9,8 @@ interface CompletionOverlayProps {
   score: number;
   total: number;
   isVisible: boolean;
+  gameplayMode: GameplayMode;
+  pronunciationSummary?: PronunciationSummary | null;
   onNextLevel?: () => void;
   onRestart?: () => void;
 }
@@ -75,7 +78,16 @@ const getUnknownErrorMessage = (error: unknown): string => {
   return String(error);
 };
 
-const CompletionOverlay: React.FC<CompletionOverlayProps> = ({ score, total, isVisible, onNextLevel, onRestart }) => {
+const CompletionOverlay: React.FC<CompletionOverlayProps> = ({
+  score,
+  total,
+  isVisible,
+  gameplayMode,
+  pronunciationSummary,
+  onNextLevel,
+  onRestart
+}) => {
+  const isBlindBoxMode = gameplayMode === 'BLIND_BOX_PRONUNCIATION';
   const isPerfect = score === total;
   const [feedbackWord, setFeedbackWord] = useState('');
   const [viewportSize, setViewportSize] = useState<ViewportSize>(() => {
@@ -156,6 +168,10 @@ const CompletionOverlay: React.FC<CompletionOverlayProps> = ({ score, total, isV
 
   // Use layout effect so the reward word is available before first paint.
   useLayoutEffect(() => {
+    if (isBlindBoxMode) {
+      setFeedbackWord('Great');
+      return;
+    }
     if (!isVisible) return;
     const isFullStars = total > 0 && score === total;
     if (!isFullStars) {
@@ -164,10 +180,30 @@ const CompletionOverlay: React.FC<CompletionOverlayProps> = ({ score, total, isV
     }
     const randomWord = FULL_SCORE_WORDS[Math.floor(Math.random() * FULL_SCORE_WORDS.length)];
     setFeedbackWord(randomWord);
-  }, [isVisible, score, total]);
+  }, [isBlindBoxMode, isVisible, score, total]);
 
   // Handle voice and sound feedback
   useEffect(() => {
+    if (isBlindBoxMode) {
+      if (!isVisible) return;
+      const autoAdvanceTimer = window.setTimeout(() => {
+        try {
+          if (onNextLevel) {
+            onNextLevel();
+            return;
+          }
+          if (onRestart) {
+            onRestart();
+          }
+        } catch (error) {
+          console.error('[Completion] Auto advance failed in blind-box mode:', error);
+        }
+      }, 2800);
+
+      return () => {
+        window.clearTimeout(autoAdvanceTimer);
+      };
+    }
     if (isVisible && feedbackWord) {
       const currentCycle = overlayCycleRef.current;
       const playbackKey = `${currentCycle}:${feedbackWord.toLowerCase()}`;
@@ -403,7 +439,15 @@ const CompletionOverlay: React.FC<CompletionOverlayProps> = ({ score, total, isV
         window.restoreBGMVolume?.();
       };
     }
-  }, [isVisible, feedbackWord, score, total, onNextLevel, onRestart]);
+  }, [isBlindBoxMode, isVisible, feedbackWord, score, total, onNextLevel, onRestart]);
+
+  const summary = pronunciationSummary || {
+    average: 0,
+    min: 0,
+    max: 0,
+    completed: score,
+    total
+  };
 
   return (
     <AnimatePresence>
@@ -432,6 +476,41 @@ const CompletionOverlay: React.FC<CompletionOverlayProps> = ({ score, total, isV
               />
             </div>
 
+            {isBlindBoxMode ? (
+              <div className="relative z-10 w-full flex flex-col items-center">
+                <h1
+                  className="text-[clamp(1.8rem,8.5vw,3.6rem)] leading-[0.95] font-black tracking-[0.04em] text-[#FFD700] drop-shadow-[4px_4px_0_rgba(0,0,0,0.2)] mb-4"
+                  style={{
+                    WebkitTextStroke: '3px #333',
+                    paintOrder: 'stroke fill',
+                    textShadow: '4px 4px 0 #333'
+                  }}
+                >
+                  跟读完成
+                </h1>
+                <div className="w-full grid grid-cols-2 gap-2 md:gap-3 mb-3">
+                  <div className="bg-white/80 border-2 border-kenney-dark rounded-xl py-2 px-3">
+                    <p className="text-xs md:text-sm font-black text-kenney-dark/70">完成题数</p>
+                    <p className="text-xl md:text-3xl font-black text-kenney-dark tabular-nums">
+                      {summary.completed} / {summary.total}
+                    </p>
+                  </div>
+                  <div className="bg-white/80 border-2 border-kenney-dark rounded-xl py-2 px-3">
+                    <p className="text-xs md:text-sm font-black text-kenney-dark/70">平均分</p>
+                    <p className="text-xl md:text-3xl font-black text-kenney-dark tabular-nums">{summary.average}</p>
+                  </div>
+                  <div className="bg-white/80 border-2 border-kenney-dark rounded-xl py-2 px-3">
+                    <p className="text-xs md:text-sm font-black text-kenney-dark/70">最高分</p>
+                    <p className="text-xl md:text-3xl font-black text-kenney-dark tabular-nums">{summary.max}</p>
+                  </div>
+                  <div className="bg-white/80 border-2 border-kenney-dark rounded-xl py-2 px-3">
+                    <p className="text-xs md:text-sm font-black text-kenney-dark/70">最低分</p>
+                    <p className="text-xl md:text-3xl font-black text-kenney-dark tabular-nums">{summary.min}</p>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
             {/* Title Text */}
             <motion.div
               initial={{ y: -50, opacity: 0, scale: 0.5 }}
@@ -524,6 +603,8 @@ const CompletionOverlay: React.FC<CompletionOverlayProps> = ({ score, total, isV
                 {score} / {total}
               </span>
             </motion.div>
+              </>
+            )}
           </motion.div>
         </motion.div>
       )}

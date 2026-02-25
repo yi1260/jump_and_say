@@ -26,6 +26,24 @@ export interface QuestionData {
   correctIndex: number;
 }
 
+export type GameplayMode = 'QUIZ' | 'BLIND_BOX_PRONUNCIATION';
+
+export interface PronunciationRoundResult {
+  targetText: string;
+  transcript: string;
+  score: number;
+  reason: 'ok' | 'unsupported' | 'timeout' | 'no-speech' | 'aborted' | 'error';
+  durationMs: number;
+}
+
+export interface PronunciationSummary {
+  average: number;
+  min: number;
+  max: number;
+  completed: number;
+  total: number;
+}
+
 export enum GamePhase {
   MENU = 'MENU',
   THEME_SELECTION = 'THEME_SELECTION',
