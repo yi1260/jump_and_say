@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 350" width="100%" height="100%">
+  <title>Golden Medal - EXCELLENT !!!</title>
+  <defs>
+    <style>
+      /* 进场弹跳与带有轻微摇摆的悬浮 */
+      .excel-medal-bounce {
+        transform-origin: 250px 175px;
+        transform: scale(1);
+        opacity: 1;
+      }
+
+      /* 闪烁的胜利星星 */
+      .excel-sparkle {
+        transform-origin: center;
+        transform: scale(1);
+        opacity: 1;
+      }
+
+      /* 圆润加粗字体 */
+      .excel-text-chunky {
+        font-family: 'Arial Rounded MT Bold', 'Nunito', 'Segoe UI Rounded', sans-serif;
+        font-size: 34px;
+        font-weight: 900;
+        text-anchor: middle;
+        dominant-baseline: central;
+        letter-spacing: 2px;
+      }
+    </style>
+  </defs>
+
+  <!-- 整体动画包裹组 -->
+  <g class="excel-medal-bounce">
+    
+    <!-- === 环境点缀：闪烁的金色小星星 === -->
+    <g fill="#FBBF24">
+      <path class="excel-sparkle s1" d="M 0 -12 Q 0 0 12 0 Q 0 0 0 12 Q 0 0 -12 0 Q 0 0 0 -12 Z" transform="translate(90, 80)" />
+      <path class="excel-sparkle s2" d="M 0 -16 Q 0 0 16 0 Q 0 0 0 16 Q 0 0 -16 0 Q 0 0 0 -16 Z" transform="translate(420, 95)" />
+      <path class="excel-sparkle s3" d="M 0 -8 Q 0 0 8 0 Q 0 0 0 8 Q 0 0 -8 0 Q 0 0 0 -8 Z" transform="translate(110, 275)" />
+      <path class="excel-sparkle" d="M 0 -10 Q 0 0 10 0 Q 0 0 0 10 Q 0 0 -10 0 Q 0 0 0 -10 Z" transform="translate(400, 260)" />
+    </g>
+
+    <!-- === 奖牌后方垂下的深红色绶带燕尾 === -->
+    <!-- 左侧燕尾 -->
+    <polygon points="25,200 90,200 90,260 25,260 45,230" fill="#991B1B" />
+    <!-- 右侧燕尾 -->
+    <polygon points="475,200 410,200 410,260 475,260 455,230" fill="#991B1B" />
+
+    <!-- === 黄金奖牌主体 === -->
+    <!-- 1. 奖牌外环向下偏移的厚度阴影 -->
+    <circle cx="250" cy="150" r="95" fill="#D97706" />
+    <!-- 2. 奖牌外环金边主体 -->
+    <circle cx="250" cy="140" r="95" fill="#FBBF24" />
+    <!-- 3. 奖牌内环凹陷产生的阴影 -->
+    <circle cx="250" cy="140" r="78" fill="#F59E0B" />
+    <!-- 4. 奖牌内环受光亮面 -->
+    <circle cx="250" cy="135" r="78" fill="#FEF08A" />
+
+    <!-- 奖牌左上角的平滑光泽 (果冻高光) -->
+    <path d="M 185 95 A 80 80 0 0 1 235 63" fill="none" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round" opacity="0.6" />
+
+    <!-- === 奖牌中心：厚涂 3D 大五角星 === -->
+    <!-- 使用 transform 定位到奖牌中心 (250, 132) -->
+    <g transform="translate(250, 132)">
+      <!-- 星星深色投影层 (向下偏移 8px) -->
+      <path d="M 0 -45 L 11 -15 L 43 -15 L 17 4 L 26 36 L 0 17 L -26 36 L -17 4 L -43 -15 L -11 -15 Z" 
+            fill="#F59E0B" stroke="#F59E0B" stroke-width="10" stroke-linejoin="round" transform="translate(0, 8)" />
+      <!-- 星星纯白亮面层 -->
+      <path d="M 0 -45 L 11 -15 L 43 -15 L 17 4 L 26 36 L 0 17 L -26 36 L -17 4 L -43 -15 L -11 -15 Z" 
+            fill="#FFFFFF" stroke="#FFFFFF" stroke-width="10" stroke-linejoin="round" />
+    </g>
+
+    <!-- === 前置横向的 3D 红色大绶带 === -->
+    <!-- 绶带底部的暗色厚度阴影 -->
+    <rect x="50" y="200" width="400" height="70" rx="20" fill="#B91C1C" />
+    <!-- 绶带的正红色亮面 -->
+    <rect x="50" y="190" width="400" height="70" rx="20" fill="#EF4444" />
+    <!-- 绶带顶部的果冻高光带 -->
+    <rect x="75" y="198" width="350" height="12" rx="6" fill="#FFFFFF" opacity="0.3" />
+
+    <!-- === EXCELLENT !!! 文字排版 === -->
+    <!-- 3D 深红色文字底块 (制造厚度) -->
+    <text x="250" y="234" class="excel-text-chunky" fill="#991B1B">EXCELLENT !!!</text>
+    <!-- 白色文字表面 -->
+    <text x="250" y="228" class="excel-text-chunky" fill="#FFFFFF">EXCELLENT !!!</text>
+
+  </g>
+</svg>

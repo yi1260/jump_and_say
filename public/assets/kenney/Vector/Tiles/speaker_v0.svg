@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="100%" height="100%">
+  <title>Cartoon Microphone Icon</title>
+  <defs>
+    <style>
+      /* 麦克风主体的Q弹呼吸动画 */
+      .mic-bounce {
+        transform-origin: 100px 100px;
+        animation: micBounce 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite alternate;
+      }
+      @keyframes micBounce {
+        0% { transform: translateY(2px) scale(1.02, 0.98); }
+        100% { transform: translateY(-4px) scale(0.98, 1.02); }
+      }
+      
+      /* 外围收音波纹动画 */
+      .sound-wave {
+        fill: none;
+        stroke: #1E1E24;
+        stroke-width: 6;
+        stroke-linecap: round;
+        opacity: 0;
+        animation: wavePulse 1.5s infinite;
+      }
+      .sound-wave.delay { animation-delay: 0.75s; }
+      @keyframes wavePulse {
+        0% { transform: scale(0.8); opacity: 0; }
+        20% { opacity: 0.6; }
+        80% { transform: scale(1.2); opacity: 0; }
+        100% { transform: scale(1.2); opacity: 0; }
+      }
+    </style>
+  </defs>
+
+  <!-- 动态收音波纹 -->
+  <circle cx="100" cy="100" r="85" class="sound-wave" transform-origin="center" />
+  <circle cx="100" cy="100" r="85" class="sound-wave delay" transform-origin="center" />
+
+  <!-- 外围粗线圆框 -->
+  <circle cx="100" cy="100" r="85" fill="#FFE066" stroke="#1E1E24" stroke-width="8" />
+  <!-- 圆框内的卡通高光 -->
+  <path d="M 30 70 A 70 70 0 0 1 70 30" fill="none" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round" opacity="0.6" />
+
+  <!-- 动态麦克风整体组 -->
+  <g class="mic-bounce">
+    <!-- U型支架 -->
+    <path d="M 60 90 V 105 A 40 40 0 0 0 140 105 V 90" fill="none" stroke="#1E1E24" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" />
+    
+    <!-- 底部支撑杆与底座 -->
+    <line x1="100" y1="145" x2="100" y2="165" stroke="#1E1E24" stroke-width="10" stroke-linecap="round" />
+    <line x1="75" y1="165" x2="125" y2="165" stroke="#1E1E24" stroke-width="10" stroke-linecap="round" />
+
+    <!-- 麦克风主体 -->
+    <rect x="75" y="45" width="50" height="75" rx="25" fill="#1E1E24" />
+    
+    <!-- 麦克风上的卡通高光 (果冻质感) -->
+    <rect x="83" y="53" width="10" height="25" rx="5" fill="#FFFFFF" opacity="0.3" />
+  </g>
+</svg>

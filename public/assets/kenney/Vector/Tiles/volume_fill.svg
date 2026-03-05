@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 400" width="50" height="200">
+  <title>Energy Bar Inner Fill</title>
+
+  <!-- 3D 底部厚度阴影 (提亮的暗黄色) -->
+  <rect x="28" y="320" width="44" height="52" rx="22" fill="#E0BA41" />
+  
+  <!-- 主体能量块表面 (更明亮的亮奶油黄) -->
+  <rect x="28" y="314" width="44" height="52" rx="22" fill="#FBE068" />
+  
+  <!-- 左侧标志性果冻胶囊高光 (静态透明度) -->
+  <rect x="34" y="322" width="6" height="24" rx="3" fill="#FFFFFF" opacity="0.4" />
+  
+  <!-- 顶部圆润曲面的反光弧线 -->
+  <path d="M 36 324 Q 50 316 64 324" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" opacity="0.5" />
+
+</svg>

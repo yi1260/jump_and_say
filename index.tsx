@@ -142,6 +142,15 @@ const cleanupServiceWorkerAndCachesInIosDev = async (): Promise<void> => {
 
 void cleanupServiceWorkerAndCachesInIosDev();
 
+if (import.meta.env.DEV && isIOSLike && import.meta.hot) {
+  import.meta.hot.on('vite:beforeUpdate', () => {
+    if (isDiag) {
+      console.info('[DIAG][HMR] iOS dev beforeUpdate, forcing full reload.');
+    }
+    window.location.reload();
+  });
+}
+
 if (isDiag) {
   console.info('[DIAG] enabled');
   if ('serviceWorker' in navigator) {

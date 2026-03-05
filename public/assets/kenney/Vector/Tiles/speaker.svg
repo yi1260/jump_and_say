@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <title>Static Soft Duolingo Mic</title>
+
+  <!-- ================= 核心按钮组 (纯静态) ================= -->
+  <g>
+    
+    <!-- 降低饱和度的 3D 圆形底部阴影 -->
+    <circle cx="100" cy="106" r="80" fill="#DDB042" />
+    
+    <!-- 降低饱和度的 柔和马卡龙黄主体 -->
+    <circle cx="100" cy="100" r="80" fill="#F4D35E" />
+    
+    <!-- 顶部的平滑果冻高光 -->
+    <path d="M 45 50 A 70 70 0 0 1 155 50" fill="none" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round" opacity="0.4" />
+
+    <!-- ================= 极简卡通麦克风 ================= -->
+    <g>
+      <!-- 麦克风的 U型固定架 -->
+      <path d="M 70 95 V 105 A 30 30 0 0 0 130 105 V 95" fill="none" stroke="#5C6A7A" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" />
+      
+      <!-- 底部支撑杆与底座 -->
+      <line x1="100" y1="135" x2="100" y2="152" stroke="#5C6A7A" stroke-width="8" stroke-linecap="round" />
+      <line x1="85" y1="152" x2="115" y2="152" stroke="#5C6A7A" stroke-width="8" stroke-linecap="round" />
+      
+      <!-- 麦克风主体 -->
+      <rect x="78" y="52" width="44" height="68" rx="22" fill="#5C6A7A" />
+      
+      <!-- 麦克风上的高光 (纯净的白光果冻胶囊) -->
+      <rect x="85" y="58" width="8" height="20" rx="4" fill="#FFFFFF" opacity="0.3" />
+    </g>
+
+  </g>
+</svg>

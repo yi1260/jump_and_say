@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 300" width="100%" height="100%">
+  <title>Rounded Engraved Mystery Box</title>
+  <defs>
+    <style>
+      /* 卡片整体平缓悬浮 */
+      .card-float {
+        animation: float 3s ease-in-out infinite;
+        transform-origin: center;
+      }
+      @keyframes float {
+        0%, 100% { transform: translateY(0px); }
+        50% { transform: translateY(-8px); }
+      }
+      
+      /* 问号温和的呼吸缩放 */
+      .q-pulse {
+        animation: pulse 2s ease-in-out infinite alternate;
+        transform-origin: 120px 150px;
+      }
+      @keyframes pulse {
+        0% { transform: scale(0.97); }
+        100% { transform: scale(1.03); }
+      }
+    </style>
+  </defs>
+
+  <g class="card-float">
+    
+    <!-- ========================================== -->
+    <!-- 1. 外层木箱轮廓与纯色块 3D 倒角              -->
+    <!-- ========================================== -->
+    
+    <!-- 极简外边缘 (深灰色) -->
+    <rect x="20" y="30" width="200" height="240" rx="8" fill="#353541" />
+
+    <!-- 阴影倒角层 (右下偏移，作为木箱暗面) -->
+    <rect x="24" y="34" width="192" height="232" rx="6" fill="#BD6341" />
+
+    <!-- 高光倒角层 (左上偏移，作为木箱亮面) -->
+    <rect x="24" y="34" width="184" height="224" rx="6" fill="#FA9F72" />
+
+    <!-- 基础平铺层 (木箱主体颜色) -->
+    <rect x="32" y="42" width="176" height="216" rx="4" fill="#DE7E4F" />
+
+
+    <!-- ========================================== -->
+    <!-- 2. 内嵌干净面板 (保留凹陷感，去除杂乱纹理)     -->
+    <!-- ========================================== -->
+    
+    <!-- 内嵌面板的高光层 (凹陷面板受光在右下) -->
+    <rect x="48" y="58" width="144" height="184" rx="2" fill="#FA9F72" />
+
+    <!-- 内嵌面板的阴影层 (凹陷面板背光在左上) -->
+    <rect x="48" y="58" width="136" height="176" rx="2" fill="#BD6341" />
+
+    <!-- 内嵌面板底部，纯净的底色 -->
+    <rect x="56" y="66" width="128" height="168" rx="0" fill="#DE7E4F" />
+
+
+    <!-- ========================================== -->
+    <!-- 3. 经典四角铆钉 (复古精致点缀)               -->
+    <!-- ========================================== -->
+    
+    <!-- 左上 -->
+    <circle cx="40" cy="50" r="4.5" fill="#353541" />
+    <circle cx="39" cy="49" r="2" fill="#FA9F72" />
+    
+    <!-- 右上 -->
+    <circle cx="200" cy="50" r="4.5" fill="#353541" />
+    <circle cx="199" cy="49" r="2" fill="#FA9F72" />
+    
+    <!-- 左下 -->
+    <circle cx="40" cy="230" r="4.5" fill="#353541" />
+    <circle cx="39" cy="229" r="2" fill="#FA9F72" />
+    
+    <!-- 右下 -->
+    <circle cx="200" cy="230" r="4.5" fill="#353541" />
+    <circle cx="199" cy="229" r="2" fill="#FA9F72" />
+
+
+    <!-- ========================================== -->
+    <!-- 4. 核心：圆润丰满且带雕刻质感的大问号         -->
+    <!-- ========================================== -->
+    <g class="q-pulse">
+      
+      <!-- 问号雕刻高光 (亮色，向右下偏移，营造深深陷进去的感觉) -->
+      <!-- 使用圆润线帽(stroke-linecap="round")生成完美的平滑拐角和圆点 -->
+      <g fill="none" stroke="#FA9F72" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" transform="translate(4, 4)">
+        <!-- 问号上方圆润的钩子 -->
+        <path d="M 95 110 C 95 80, 145 80, 145 110 C 145 135, 120 145, 120 165" />
+        <!-- 问号下方饱满的圆点 -->
+        <path d="M 120 195 L 120 195.1" />
+      </g>
+      
+      <!-- 问号暗部本体 (深灰色，在原始位置) -->
+      <g fill="none" stroke="#353541" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M 95 110 C 95 80, 145 80, 145 110 C 145 135, 120 145, 120 165" />
+        <path d="M 120 195 L 120 195.1" />
+      </g>
+
+    </g>
+  </g>
+</svg>

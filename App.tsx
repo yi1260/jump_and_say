@@ -5,15 +5,15 @@ import CompletionOverlay from './components/CompletionOverlay';
 import GameBackground from './components/GameBackground';
 import { GameCanvas, type QualityMode } from './components/GameCanvas';
 import { LoadingScreen } from './components/LoadingScreen';
-import { MainScene } from './game/scenes/MainScene';
 import { isCoverFailed, isCoverPreloaded, loadThemes, markCoverFailed, markCoverPreloaded, pauseBackgroundPreloading, preloadCoverImages, startBackgroundPreloading } from './gameConfig';
 import { preloadAllGameAssets } from './services/assetLoader';
 import { BgmController, ensurePhaserAudioUnlocked, primePhaserAudioContext } from './services/audioController';
 import { CameraSessionManager, isCameraPipelineError } from './services/cameraSessionManager';
 import { loggerService } from './services/logger';
 import { motionController } from './services/motionController';
+import { speechScoringService } from './services/speechScoring';
 import { getLocalAssetUrl, getR2AssetUrl, getR2ImageUrl } from './src/config/r2Config';
-import { PoseLandmark, Theme, ThemeId } from './types';
+import { GameplayMode, PoseLandmark, PronunciationSummary, Theme, ThemeId } from './types';
 
 declare global {
   interface Window {
@@ -59,6 +59,58 @@ const QUALITY_MODE_OPTIONS: Array<{ value: QualityMode; label: string }> = [
   { value: 'low', label: '最低' },
   { value: 'adaptive', label: '自适应' }
 ];
+
+const ROUND_INTRO_DURATION_MS = 4000;
+const THEME_SWITCH_REST_SECONDS = 15;
+
+interface RoundTutorialCard {
+  iconPath: string;
+  title: string;
+  subtitle: string;
+  iconAnimationClass: string;
+}
+
+interface RoundTutorialConfig {
+  heading: string;
+  cards: RoundTutorialCard[];
+}
+
+const ROUND_TUTORIAL_CONFIG: Record<GameplayMode, RoundTutorialConfig> = {
+  QUIZ: {
+    heading: 'Round One: 听音识图',
+    cards: [
+      {
+        iconPath: 'assets/kenney/Vector/Characters/character_pink_walk_a.svg',
+        title: '左右移动',
+        subtitle: '身体跟着左右移动',
+        iconAnimationClass: 'animate-bounce-horizontal-large'
+      },
+      {
+        iconPath: 'assets/kenney/Vector/Characters/character_pink_jump.svg',
+        title: '向上跳',
+        subtitle: '跳起来撞击方块选图',
+        iconAnimationClass: 'animate-bounce'
+      }
+    ]
+  },
+  BLIND_BOX_PRONUNCIATION: {
+    heading: 'Round Two: 大声跟读',
+    cards: [
+      {
+        iconPath: 'assets/kenney/Vector/Characters/character_pink_jump.svg',
+        title: '先撞闪卡',
+        subtitle: '跳起后听示范发音',
+        iconAnimationClass: 'animate-bounce'
+      },
+      {
+        iconPath: 'assets/kenney/Vector/Characters/character_pink_jump.svg',
+        title: '大声跟读',
+        subtitle: '看音量条，清楚读出单词',
+        iconAnimationClass: 'animate-pulse'
+      }
+    ]
+  }
+};
 
 const ThemeCardImage = ({ src, alt, index }: { src: string; alt: string; index: number }) => {
     const [loaded, setLoaded] = useState<boolean>(() => isCoverPreloaded(src));
@@ -156,10 +208,14 @@ const ThemeCardImage = ({ src, alt, index }: { src: string; alt: string; index: 
 export default function App() {
   const BGM_VOLUME_PLAYING = 0.003;
   const BGM_VOLUME_IDLE = 0.015;
-  const THEME_SWITCH_REST_SECONDS = 15;
   const [score, setScore] = useState(0);
   const [totalQuestions, setTotalQuestions] = useState(0);
   const [selectedThemes, setSelectedThemes] = useState<ThemeId[]>([]);
+  const [gameplayMode, setGameplayMode] = useState<GameplayMode>('QUIZ');
+  const [sessionThemeIndex, setSessionThemeIndex] = useState(0);
+  const [roundIntroMode, setRoundIntroMode] = useState<GameplayMode | null>(null);
+  const [roundIntroProgress, setRoundIntroProgress] = useState<number | null>(null);
+  const [isLoadingReadyToStart, setIsLoadingReadyToStart] = useState(false);
   const [isPortrait, setIsPortrait] = useState(false);
   const [showCompletion, setShowCompletion] = useState(false);
   const [restCountdownSeconds, setRestCountdownSeconds] = useState<number | null>(null);
@@ -169,6 +225,16 @@ export default function App() {
   const [selectedLevel, setSelectedLevel] = useState<string>('AA');
   const [qualityMode, setQualityMode] = useState<QualityMode>('adaptive');
   const [isQualityPickerOpen, setIsQualityPickerOpen] = useState<boolean>(false);
+  const [isSpeechRecognitionSupported, setIsSpeechRecognitionSupported] = useState<boolean>(() => {
+    try {
+      return speechScoringService.isSupported();
+    } catch (error) {
+      console.warn('[Pronounce] SpeechRecognition capability probe failed during init:', error);
+      return false;
+    }
+  });
+  const [gameplayModeIssue, setGameplayModeIssue] = useState<string>('');
+  const [pronunciationSummary, setPronunciationSummary] = useState<PronunciationSummary | null>(null);
 
   const levels = React.useMemo(() => {
     const allLevels = Array.from(new Set(themes.map(t => t.level).filter(Boolean))) as string[];
@@ -191,6 +257,10 @@ export default function App() {
   const activeQualityLabel = React.useMemo(() => (
     QUALITY_MODE_OPTIONS.find((option) => option.value === qualityMode)?.label ?? '自适应'
   ), [qualityMode]);
+  const currentThemeId = selectedThemes[sessionThemeIndex] || '';
+  const shouldSkipPronunciationRound = !isSpeechRecognitionSupported;
+  const firstRoundMode: GameplayMode = 'QUIZ';
+  const isThemeStartDisabled = selectedThemes.length === 0;
 
   useEffect(() => {
     if (levels.length > 0 && !levels.includes(selectedLevel)) {
@@ -220,7 +290,7 @@ export default function App() {
   const completionCycleRef = useRef(0);
   const completionAutoAdvanceHandledCycleRef = useRef<number | null>(null);
   const restCountdownTimerRef = useRef<number | null>(null);
-  const isCompletionTransitioningRef = useRef<boolean>(false);
+  const isThemeSwitchTransitioningRef = useRef<boolean>(false);
 
   useEffect(() => {
     if (phase !== GamePhase.MENU) {
@@ -245,6 +315,12 @@ export default function App() {
       window.removeEventListener('pointerdown', handlePointerDown);
     };
   }, [isQualityPickerOpen]);
+
+  useEffect(() => {
+    const supported = speechScoringService.isSupported();
+    setIsSpeechRecognitionSupported(supported);
+    console.info('[Pronounce] SpeechRecognition support:', supported);
+  }, []);
   
   // Loading State
   const [loadingProgress, setLoadingProgress] = useState(0);
@@ -324,8 +400,8 @@ export default function App() {
       window.clearInterval(restCountdownTimerRef.current);
       restCountdownTimerRef.current = null;
     }
+    isThemeSwitchTransitioningRef.current = false;
     setRestCountdownSeconds(null);
-    isCompletionTransitioningRef.current = false;
   }, []);
 
   const waitMs = (ms: number): Promise<void> => (
@@ -559,6 +635,8 @@ export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const cameraSessionManagerRef = useRef<CameraSessionManager>(new CameraSessionManager());
+  const cameraInitSeqRef = useRef<number>(0);
+  const cameraRenderFailureStreakRef = useRef<number>(0);
   const initializeCameraRef = useRef<() => Promise<boolean>>(async () => false);
   const initializeCameraInFlightRef = useRef<Promise<boolean> | null>(null);
   const startPoseOverlayLoopRef = useRef<() => void>(() => undefined);
@@ -616,27 +694,6 @@ export default function App() {
       document.removeEventListener('MSFullscreenError', handleFullscreenError);
     };
   }, [syncFullscreenState]);
-
-  useEffect(() => {
-    if (phase !== GamePhase.PLAYING) {
-      return;
-    }
-
-    let cancelled = false;
-    const autoEnterTimer = window.setTimeout(() => {
-      if (cancelled) return;
-      void requestFullscreenSafely('auto').then((entered) => {
-        if (!entered) {
-          console.info('[Fullscreen] Auto-enter skipped or rejected. Continue windowed mode.');
-        }
-      });
-    }, 80);
-
-    return () => {
-      cancelled = true;
-      window.clearTimeout(autoEnterTimer);
-    };
-  }, [phase, requestFullscreenSafely]);
 
   useEffect(() => {
     const controller = new BgmController({
@@ -978,7 +1035,7 @@ export default function App() {
       }
 
       .loading-content {
-        gap: 1.5rem;
+        gap: 1rem;
       }
 
       .loading-character {
@@ -1002,7 +1059,7 @@ export default function App() {
         .loading-content {
           flex-direction: row;
           text-align: left;
-          gap: 1rem;
+          gap: 0.75rem;
         }
         .loading-text {
           align-items: flex-start;
@@ -1249,7 +1306,9 @@ export default function App() {
 
   const cleanupCameraAndMotion = useCallback((): void => {
     pauseBackgroundPreloading();
+    console.warn('[Camera] Cleanup camera and motion runtime.');
     motionController.stop();
+    motionController.resetPoseObservation();
     if (poseLoopRef.current !== null) {
       cancelAnimationFrame(poseLoopRef.current);
       poseLoopRef.current = null;
@@ -1261,8 +1320,43 @@ export default function App() {
     setPoseDetectedState(false);
   }, [setPoseDetectedState]);
 
+  const releaseCameraForRuntimeTransition = useCallback((reason: string): void => {
+    const hasStream = !!streamRef.current;
+    const hasPoseLoop = poseLoopRef.current !== null;
+    if (!hasStream && !hasPoseLoop) {
+      return;
+    }
+
+    console.warn('[Camera] Releasing runtime camera session.', {
+      reason,
+      hasStream,
+      hasPoseLoop,
+      tracks: streamRef.current ? cameraSessionManagerRef.current.getVideoTrackDiagnostics(streamRef.current) : []
+    });
+
+    motionController.stop();
+    motionController.resetPoseObservation();
+    if (poseLoopRef.current !== null) {
+      cancelAnimationFrame(poseLoopRef.current);
+      poseLoopRef.current = null;
+    }
+    if (streamRef.current) {
+      cameraSessionManagerRef.current.cleanupSession(videoRef.current, streamRef.current);
+      streamRef.current = null;
+    }
+    hasCalibratedPoseRef.current = false;
+    lastPoseSeenAtRef.current = 0;
+    setPoseDetectedState(false);
+  }, [setPoseDetectedState]);
+
   const handleStartProcess = async () => {
     setCameraIssueMessage('');
+    setGameplayModeIssue('');
+    setIsLoadingReadyToStart(false);
+    setRoundIntroMode(null);
+    setRoundIntroProgress(null);
+    setSessionThemeIndex(0);
+    setGameplayMode(firstRoundMode);
     setPhase(GamePhase.THEME_SELECTION);
   };
 
@@ -1315,9 +1409,16 @@ export default function App() {
     setScore(0);
     setTotalQuestions(0);
     setShowCompletion(false);
+    setIsLoadingReadyToStart(false);
+    setRoundIntroMode(null);
+    setRoundIntroProgress(null);
+    setSessionThemeIndex(0);
+    setGameplayMode(firstRoundMode);
+    setPronunciationSummary(null);
+    setGameplayModeIssue('');
     setSelectedThemes([]); // Clear selected themes
     setPhase(GamePhase.THEME_SELECTION);
-  }, [cleanupCameraAndMotion, clearRestCountdown, exitFullscreenSafely]);
+  }, [cleanupCameraAndMotion, clearRestCountdown, exitFullscreenSafely, firstRoundMode]);
 
   const handleExitToMenu = () => {
     loadingRequestIdRef.current += 1;
@@ -1326,6 +1427,13 @@ export default function App() {
     cleanupCameraAndMotion();
 
     setSelectedThemes([]); // Clear selected themes
+    setIsLoadingReadyToStart(false);
+    setRoundIntroMode(null);
+    setRoundIntroProgress(null);
+    setSessionThemeIndex(0);
+    setGameplayMode(firstRoundMode);
+    setPronunciationSummary(null);
+    setGameplayModeIssue('');
     setPhase(GamePhase.MENU);
   };
 
@@ -1467,8 +1575,77 @@ export default function App() {
     ].join('\n');
   };
 
+  const ensureMicrophonePermissionForPronunciation = async (): Promise<{ ok: true } | { ok: false; message: string }> => {
+    if (!speechScoringService.isSupported()) {
+      return {
+        ok: false,
+        message: '当前浏览器不支持语音评分，请切换到“经典答题”模式。'
+      };
+    }
+
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      return {
+        ok: false,
+        message: '当前浏览器不支持麦克风权限请求，无法进入 Round Two 大声跟读。'
+      };
+    }
+
+    try {
+      const permissions = navigator.permissions;
+      if (permissions && typeof permissions.query === 'function') {
+        const status = await permissions.query({ name: 'microphone' as PermissionName });
+        if (status.state === 'denied') {
+          return {
+            ok: false,
+            message: '麦克风权限被拒绝，请在浏览器设置中允许麦克风后再试。'
+          };
+        }
+      }
+    } catch (error) {
+      console.warn('[Pronounce] Microphone permission query failed:', error);
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track: MediaStreamTrack) => track.stop());
+      console.info('[Pronounce] Microphone permission pre-check passed.');
+      return { ok: true };
+    } catch (error) {
+      console.warn('[Pronounce] Microphone permission pre-check failed:', error);
+      return {
+        ok: false,
+        message: '无法获取麦克风权限，请允许后再开始 Round Two 大声跟读。'
+      };
+    }
+  };
+
+  const speakIntroText = useCallback((text: string): void => {
+    if (typeof window === 'undefined' || typeof window.speechSynthesis === 'undefined' || typeof SpeechSynthesisUtterance === 'undefined') {
+      return;
+    }
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'zh-CN';
+      utterance.rate = 0.92;
+      utterance.pitch = 1;
+      window.speechSynthesis.speak(utterance);
+    } catch (error) {
+      console.warn('[Tutorial] Intro voice playback failed:', error);
+    }
+  }, []);
+
   const initializeCameraInternal = async (): Promise<boolean> => {
     const cameraSessionManager = cameraSessionManagerRef.current;
+    const platformInfo = cameraSessionManager.resolvePlatformInfo();
+    const initId = ++cameraInitSeqRef.current;
+    console.info('[Camera][Flow] initializeCameraInternal start', {
+      initId,
+      platform: platformInfo.platform,
+      phase: phaseRef.current,
+      hasStream: !!streamRef.current,
+      visibilityState: document.visibilityState
+    });
 
     const waitForPoseDetection = async (timeoutMs: number, sinceTimestampMs: number): Promise<boolean> => {
       const startedAt = performance.now();
@@ -1633,16 +1810,50 @@ export default function App() {
 
       setLoadingStatus(streamRef.current ? '正在恢复摄像头连接...' : '正在请求摄像头权限...');
 
-      const platformInfo = cameraSessionManager.resolvePlatformInfo();
       const renderRetryCount = cameraSessionManager.getRenderRetryCount(platformInfo);
       const permissionTimeoutMs = isSimulatedFailure('camera_timeout') ? 300 : 12000;
-      const stream = await cameraSessionManager.acquireRenderableStream({
-        videoElement,
-        existingStream: streamRef.current,
+      console.info('[Camera][Flow] acquireRenderableStream begin', {
+        initId,
+        platform: platformInfo.platform,
+        renderRetryCount,
         permissionTimeoutMs,
-        renderRetryCount
+        hasExistingStream: !!streamRef.current
       });
+      const acquireStreamWithRecovery = async (): Promise<MediaStream> => {
+        try {
+          return await cameraSessionManager.acquireRenderableStream({
+            videoElement,
+            existingStream: streamRef.current,
+            permissionTimeoutMs,
+            renderRetryCount
+          });
+        } catch (error) {
+          const isRenderError = isCameraPipelineError(error) && error.code === 'VIDEO_STREAM_NOT_RENDERING';
+          if (!isRenderError) {
+            throw error;
+          }
+
+          console.warn('[Camera][Flow] acquireRenderableStream render error, emergency reset and retry once', {
+            initId,
+            platform: platformInfo.platform
+          });
+          releaseCameraForRuntimeTransition('acquire-render-error-emergency-reset');
+          await waitMs(platformInfo.platform === 'ios' ? 900 : 520);
+          return await cameraSessionManager.acquireRenderableStream({
+            videoElement,
+            existingStream: null,
+            permissionTimeoutMs: Math.max(permissionTimeoutMs, 16000),
+            renderRetryCount: renderRetryCount + 2
+          });
+        }
+      };
+
+      const stream = await acquireStreamWithRecovery();
       streamRef.current = stream;
+      console.info('[Camera][Flow] acquireRenderableStream success', {
+        initId,
+        tracks: cameraSessionManager.getVideoTrackDiagnostics(stream)
+      });
 
       setLoadingStatus('摄像头已连接，正在启动识别引擎...');
       if (isSimulatedFailure('pose_init_timeout')) {
@@ -1653,12 +1864,19 @@ export default function App() {
 
       startPoseOverlayLoop();
       setCameraIssueMessage('');
+      cameraRenderFailureStreakRef.current = 0;
+      console.info('[Camera][Flow] initializeCameraInternal success', { initId });
       return true;
     } catch (err) {
       const normalizedError = err instanceof Error
         ? { name: err.name, message: err.message, stack: err.stack }
         : { kind: typeof err, value: String(err) };
-      console.error('Camera init failed:', normalizedError);
+      console.error('Camera init failed:', {
+        initId,
+        phase: phaseRef.current,
+        visibilityState: document.visibilityState,
+        normalizedError
+      });
       const errorMessage = String(err);
       const errorName = err instanceof DOMException ? err.name : '';
 
@@ -1688,9 +1906,32 @@ export default function App() {
         }
 
         if (err.code === 'VIDEO_STREAM_NOT_RENDERING') {
+          cameraRenderFailureStreakRef.current += 1;
+          console.warn('[Camera][Flow] VIDEO_STREAM_NOT_RENDERING streak', {
+            initId,
+            streak: cameraRenderFailureStreakRef.current,
+            platform: platformInfo.platform
+          });
           cameraSessionManager.cleanupSession(videoRef.current, streamRef.current);
           streamRef.current = null;
           motionController.stop();
+
+          if (platformInfo.platform === 'ios' && cameraRenderFailureStreakRef.current >= 2) {
+            const reloadMarker = '__camera_render_error_reload_once_v1';
+            const hasReloaded = sessionStorage.getItem(reloadMarker) === '1';
+            if (!hasReloaded) {
+              sessionStorage.setItem(reloadMarker, '1');
+              console.warn('[Camera][Flow] forcing one reload after repeated render failures on iOS', {
+                initId,
+                streak: cameraRenderFailureStreakRef.current
+              });
+              window.location.reload();
+              return false;
+            }
+          } else if (platformInfo.platform !== 'ios') {
+            sessionStorage.removeItem('__camera_render_error_reload_once_v1');
+          }
+
           setLoadingStatus('摄像头画面不可用。');
           setCameraIssueMessage('摄像头权限已允许，但画面未正常渲染。\n请点击"重试"，并确认没有其他应用占用摄像头。');
           return false;
@@ -1765,6 +2006,7 @@ export default function App() {
 
   const initializeCamera = async (): Promise<boolean> => {
     if (initializeCameraInFlightRef.current) {
+      console.info('[Camera][Flow] initializeCamera reused in-flight');
       return initializeCameraInFlightRef.current;
     }
 
@@ -1886,9 +2128,20 @@ export default function App() {
       }
     };
 
+    const teardownForBackground = (reason: string): void => {
+      if (phaseRef.current === GamePhase.MENU || phaseRef.current === GamePhase.THEME_SELECTION) return;
+      if (phaseRef.current === GamePhase.LOADING) return;
+      releaseCameraForRuntimeTransition(reason);
+    };
+
     const recoverAfterForeground = async (reason: string): Promise<void> => {
       if (disposed) return;
       if (document.visibilityState !== 'visible') return;
+      console.info('[Camera][Flow] recoverAfterForeground triggered', {
+        reason,
+        phase: phaseRef.current,
+        hasStream: !!streamRef.current
+      });
       if (
         phaseRef.current === GamePhase.MENU ||
         phaseRef.current === GamePhase.THEME_SELECTION ||
@@ -1975,11 +2228,17 @@ export default function App() {
     const handleVisibilityChange = (): void => {
       if (document.visibilityState === 'visible') {
         scheduleRecover('visibilitychange', 120);
+        return;
       }
+      teardownForBackground('visibility-hidden');
     };
 
     const handlePageShow = (): void => {
       scheduleRecover('pageshow', 120);
+    };
+
+    const handlePageHide = (): void => {
+      teardownForBackground('pagehide');
     };
 
     const handleFocus = (): void => {
@@ -1988,6 +2247,7 @@ export default function App() {
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('pageshow', handlePageShow);
+    window.addEventListener('pagehide', handlePageHide);
     window.addEventListener('focus', handleFocus);
 
     return () => {
@@ -1995,9 +2255,21 @@ export default function App() {
       clearResumeTimer();
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('pageshow', handlePageShow);
+      window.removeEventListener('pagehide', handlePageHide);
       window.removeEventListener('focus', handleFocus);
     };
-  }, [setPoseDetectedState]);
+  }, [releaseCameraForRuntimeTransition, setPoseDetectedState]);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV || !import.meta.hot) return;
+    const onBeforeUpdate = () => {
+      releaseCameraForRuntimeTransition('hmr-before-update');
+    };
+    import.meta.hot.on('vite:beforeUpdate', onBeforeUpdate);
+    return () => {
+      import.meta.hot?.off('vite:beforeUpdate', onBeforeUpdate);
+    };
+  }, [releaseCameraForRuntimeTransition]);
 
   useEffect(() => {
     const handleAppInstalled = () => {
@@ -2009,6 +2281,14 @@ export default function App() {
 
   const handleStartGame = async () => {
     if (selectedThemes.length === 0) return;
+    setGameplayModeIssue('');
+    setPronunciationSummary(null);
+    setIsLoadingReadyToStart(false);
+    setRoundIntroMode(null);
+    setRoundIntroProgress(null);
+    setSessionThemeIndex(0);
+    setGameplayMode(firstRoundMode);
+
     clearRestCountdown();
     const loadingRequestId = loadingRequestIdRef.current + 1;
     loadingRequestIdRef.current = loadingRequestId;
@@ -2026,11 +2306,24 @@ export default function App() {
     // 0. Enter Loading Phase
     setPhase(GamePhase.LOADING);
     setLoadingProgress(0);
-    setLoadingStatus('正在准备摄像头...');
+    setLoadingStatus(shouldSkipPronunciationRound ? '正在准备摄像头...' : '正在请求麦克风权限...');
 
     // 1. Request camera first to avoid permission prompt conflicts on mobile browsers
     try {
+        console.info('[Camera][Flow] handleStartGame waitForNextPaint before init');
         await waitForNextPaint();
+        if (!shouldSkipPronunciationRound) {
+          const microphoneResult = await ensureMicrophonePermissionForPronunciation();
+          if (!isCurrentLoadingRequest()) return;
+          if (!microphoneResult.ok && 'message' in microphoneResult) {
+            setLoadingStatus('麦克风权限未开启。');
+            setCameraIssueMessage(microphoneResult.message);
+            return;
+          }
+        }
+
+        setLoadingStatus('正在准备摄像头...');
+        console.info('[Camera][Flow] handleStartGame initializeCamera start');
         const cameraSuccess = await initializeCamera();
         if (!isCurrentLoadingRequest()) return;
         if (!cameraSuccess) {
@@ -2056,7 +2349,10 @@ export default function App() {
         }
 
         setThemeImagesLoaded(true);
-        setPhase(GamePhase.TUTORIAL);
+        setLoadingProgress(100);
+        setLoadingStatus('资源准备完成，点击开始闯关');
+        setIsLoadingReadyToStart(true);
+        setPhase(GamePhase.LOADING);
         setInitStatus('系统就绪');
         
     } catch (e) {
@@ -2093,6 +2389,18 @@ export default function App() {
       void (scorePanel as HTMLElement).offsetWidth; // 触发重绘
       scorePanel.classList.add('animate-bounce-short');
     }
+  }, []);
+
+  const handlePronunciationProgressUpdate = useCallback((completed: number, total: number, _averageConfidence: number) => {
+    setScore(completed);
+    setTotalQuestions(total);
+  }, []);
+
+  const handlePronunciationComplete = useCallback((summary: PronunciationSummary) => {
+    setPronunciationSummary(summary);
+    setScore(summary.completed);
+    setTotalQuestions(summary.total);
+    console.info('[Pronounce] Completed summary:', summary);
   }, []);
 
   const syncScoreHudTarget = useCallback((): boolean => {
@@ -2150,15 +2458,6 @@ export default function App() {
     };
   }, [isFullscreen, phase, score, totalQuestions, syncScoreHudTarget]);
   
-  const handleGameOver = useCallback(() => {
-    setShowCompletion(true);
-  }, []);
-
-  const handleGameRestart = useCallback(() => {
-    setShowCompletion(false);
-    setBgIndex(0);
-  }, []);
-
   const handleEnterPlaying = useCallback(async (): Promise<void> => {
     setBgIndex(0);
     setHasShownEmoji(true);
@@ -2166,11 +2465,6 @@ export default function App() {
       primePhaserAudioContext(),
       bgmControllerRef.current?.ensureAudioUnlocked() ?? Promise.resolve(false)
     ]);
-    try {
-      await requestFullscreenSafely('manual');
-    } catch (error) {
-      console.warn('[Fullscreen] Unexpected error before entering PLAYING:', error);
-    }
     await primeAudioPromise;
     setPhase(GamePhase.PLAYING);
     window.setTimeout(() => {
@@ -2181,86 +2475,144 @@ export default function App() {
       void ensurePhaserAudioUnlocked();
       bgmControllerRef.current?.syncState();
     }, 180);
-  }, [requestFullscreenSafely]);
+  }, []);
 
-  const handleReplay = useCallback(() => {
+  const startRoundIntro = useCallback(async (mode: GameplayMode): Promise<void> => {
+    setShowCompletion(false);
+    setRoundIntroMode(mode);
+    setRoundIntroProgress(1);
+    setGameplayMode(mode);
+    setPhase(GamePhase.TUTORIAL);
+  }, []);
+
+  const handleGameOver = useCallback(() => {
+    setShowCompletion(true);
+  }, []);
+
+  const handleStartFromLoading = useCallback(async (): Promise<void> => {
+    if (!isLoadingReadyToStart) return;
+    void requestFullscreenSafely('manual');
+    setGameplayModeIssue('');
+    setPronunciationSummary(null);
+    setScore(0);
+    setTotalQuestions(0);
+    setSessionThemeIndex(0);
+    setGameplayMode(firstRoundMode);
+    setIsLoadingReadyToStart(false);
+    await startRoundIntro(firstRoundMode);
+  }, [firstRoundMode, isLoadingReadyToStart, requestFullscreenSafely, startRoundIntro]);
+
+  useEffect(() => {
+    if (phase !== GamePhase.TUTORIAL) return;
+    if (!roundIntroMode) return;
+    const targetMode = roundIntroMode;
+    const startedAt = performance.now();
+    let timerId = 0;
+    let isFinished = false;
+
+    const finishIntro = (): void => {
+      if (isFinished) return;
+      isFinished = true;
+      window.clearInterval(timerId);
+      setRoundIntroMode(null);
+      setRoundIntroProgress(null);
+      setGameplayMode(targetMode);
+      void handleEnterPlaying();
+    };
+
+    const tick = (): void => {
+      if (isFinished) return;
+      const elapsedMs = performance.now() - startedAt;
+      const progress = Math.max(0, 1 - elapsedMs / ROUND_INTRO_DURATION_MS);
+      setRoundIntroProgress(progress);
+      if (progress <= 0) {
+        finishIntro();
+      }
+    };
+
+    tick();
+    timerId = window.setInterval(tick, 40);
+
+    return () => {
+      isFinished = true;
+      window.clearInterval(timerId);
+    };
+  }, [phase, roundIntroMode, handleEnterPlaying]);
+
+  useEffect(() => {
+    if (phase !== GamePhase.TUTORIAL || !roundIntroMode) return;
+    const introText = roundIntroMode === 'QUIZ'
+      ? (shouldSkipPronunciationRound ? '听音识图。' : 'Round One，听音识图。')
+      : 'Round Two，大声跟读。';
+    speakIntroText(introText);
+  }, [phase, roundIntroMode, shouldSkipPronunciationRound, speakIntroText]);
+
+  const handleContinueToRound2 = useCallback(() => {
+    if (shouldSkipPronunciationRound) return;
     clearRestCountdown();
     setShowCompletion(false);
-    const game = window.phaserGame;
-    if (!game) {
-      console.warn('[Completion] Replay skipped: Phaser game instance missing.');
+    setPronunciationSummary(null);
+    setScore(0);
+    setTotalQuestions(0);
+    void startRoundIntro('BLIND_BOX_PRONUNCIATION');
+  }, [clearRestCountdown, shouldSkipPronunciationRound, startRoundIntro]);
+
+  const handleReplay = useCallback(() => {
+    if (gameplayMode === 'QUIZ' && !shouldSkipPronunciationRound) {
+      handleContinueToRound2();
       return;
     }
-
-    try {
-      const mainScene = game.scene.getScene('MainScene') as MainScene;
-      mainScene.restartLevel();
-    } catch (error) {
-      console.error('[Completion] Replay failed to access MainScene:', error);
-    }
-  }, [clearRestCountdown]);
+    setShowCompletion(false);
+    setPronunciationSummary(null);
+    setScore(0);
+    setTotalQuestions(0);
+    void startRoundIntro(firstRoundMode);
+  }, [firstRoundMode, gameplayMode, handleContinueToRound2, shouldSkipPronunciationRound, startRoundIntro]);
 
   const handleNextLevel = useCallback(() => {
-    if (isCompletionTransitioningRef.current) {
+    if (gameplayMode === 'QUIZ' && !shouldSkipPronunciationRound) {
+      handleContinueToRound2();
       return;
     }
-
+    if (isThemeSwitchTransitioningRef.current) {
+      return;
+    }
     setShowCompletion(false);
+    setPronunciationSummary(null);
+    setScore(0);
+    setTotalQuestions(0);
 
-    const game = window.phaserGame;
-    if (!game) {
-      console.warn('[Completion] Next level skipped: Phaser game instance missing.');
+    const nextIndex = sessionThemeIndex + 1;
+    if (nextIndex >= selectedThemes.length) {
+      handleBackToMenu();
       return;
     }
 
-    try {
-      const mainScene = game.scene.getScene('MainScene') as MainScene;
-      const hasNextTheme = mainScene.hasNextTheme();
+    isThemeSwitchTransitioningRef.current = true;
+    let remainingSeconds = THEME_SWITCH_REST_SECONDS;
+    setRestCountdownSeconds(remainingSeconds);
 
-      if (!hasNextTheme) {
-        handleBackToMenu();
+    if (restCountdownTimerRef.current !== null) {
+      window.clearInterval(restCountdownTimerRef.current);
+    }
+
+    restCountdownTimerRef.current = window.setInterval(() => {
+      remainingSeconds -= 1;
+      if (remainingSeconds <= 0) {
+        if (restCountdownTimerRef.current !== null) {
+          window.clearInterval(restCountdownTimerRef.current);
+          restCountdownTimerRef.current = null;
+        }
+        setRestCountdownSeconds(null);
+        isThemeSwitchTransitioningRef.current = false;
+        setSessionThemeIndex(nextIndex);
+        void startRoundIntro(firstRoundMode);
         return;
       }
 
-      isCompletionTransitioningRef.current = true;
-      let remainingSeconds = THEME_SWITCH_REST_SECONDS;
       setRestCountdownSeconds(remainingSeconds);
-
-      if (restCountdownTimerRef.current !== null) {
-        window.clearInterval(restCountdownTimerRef.current);
-      }
-
-      restCountdownTimerRef.current = window.setInterval(() => {
-        remainingSeconds -= 1;
-        if (remainingSeconds <= 0) {
-          if (restCountdownTimerRef.current !== null) {
-            window.clearInterval(restCountdownTimerRef.current);
-            restCountdownTimerRef.current = null;
-          }
-          setRestCountdownSeconds(null);
-          isCompletionTransitioningRef.current = false;
-
-          try {
-            const currentGame = window.phaserGame;
-            const currentMainScene = currentGame?.scene?.getScene('MainScene') as MainScene | undefined;
-            if (!currentMainScene || !currentMainScene.nextLevel()) {
-              handleBackToMenu();
-            }
-          } catch (error) {
-            console.error('[Completion] Next level transition failed after rest:', error);
-            handleBackToMenu();
-          }
-          return;
-        }
-
-        setRestCountdownSeconds(remainingSeconds);
-      }, 1000);
-    } catch (error) {
-      console.error('[Completion] Next level failed to access MainScene:', error);
-      isCompletionTransitioningRef.current = false;
-      setRestCountdownSeconds(null);
-    }
-  }, [THEME_SWITCH_REST_SECONDS, handleBackToMenu]);
+    }, 1000);
+  }, [firstRoundMode, gameplayMode, handleBackToMenu, handleContinueToRound2, selectedThemes.length, sessionThemeIndex, shouldSkipPronunciationRound, startRoundIntro]);
 
   useEffect(() => {
     if (!showCompletion || phase !== GamePhase.PLAYING) {
@@ -2286,6 +2638,14 @@ export default function App() {
   }, [showCompletion, phase, handleNextLevel]);
 
   const isPlayingFullscreen = phase === GamePhase.PLAYING && isFullscreen;
+  const activeTutorialMode: GameplayMode = roundIntroMode ?? gameplayMode;
+  const tutorialConfig = ROUND_TUTORIAL_CONFIG[activeTutorialMode];
+  const tutorialHeading = activeTutorialMode === 'QUIZ' && shouldSkipPronunciationRound
+    ? '听音识图'
+    : tutorialConfig.heading;
+  const tutorialProgressPercent = Math.round(
+    Math.max(0, Math.min(1, roundIntroProgress ?? 1)) * 100
+  );
 
   return (
     <div
@@ -2435,9 +2795,11 @@ export default function App() {
              {phase === GamePhase.PLAYING && (
                <div ref={scorePanelRef} className="score-panel kenney-panel h-11 md:h-14 px-3 md:px-4 flex items-center gap-2 md:gap-2.5 transition-all bg-white/90 backdrop-blur-sm shadow-[0_6px_0_#333333] border-[3px] md:border-[4px]">
                  <img src={getR2AssetUrl('assets/kenney/Vector/Tiles/star.svg')} className="w-8 h-8 md:w-10 md:h-10" alt="分数" />
-                 <span className="text-lg md:text-3xl font-black leading-none text-kenney-dark tabular-nums tracking-tight">
-                   {score} / {totalQuestions}
-                 </span>
+                 <div className="flex flex-col items-start leading-none">
+                   <span className="text-lg md:text-3xl font-black text-kenney-dark tabular-nums tracking-tight">
+                     {score} / {totalQuestions}
+                   </span>
+                 </div>
                </div>
              )}
           </div>
@@ -2453,10 +2815,11 @@ export default function App() {
             <GameCanvas 
               onScoreUpdate={handleScoreUpdate} 
               onGameOver={handleGameOver}
-              onGameRestart={handleGameRestart}
               onBackgroundUpdate={setBgIndex}
-              // @ts-ignore
-              themes={selectedThemes}
+              onPronunciationProgressUpdate={handlePronunciationProgressUpdate}
+              onPronunciationComplete={handlePronunciationComplete}
+              gameplayMode={gameplayMode}
+              themes={currentThemeId ? [currentThemeId] : []}
               allThemes={themes}
               qualityMode={qualityMode}
             />
@@ -2469,6 +2832,8 @@ export default function App() {
         isVisible={showCompletion} 
         score={score} 
         total={totalQuestions} 
+        gameplayMode={gameplayMode}
+        pronunciationSummary={pronunciationSummary}
         onRestart={handleReplay}
         onNextLevel={handleNextLevel}
       />
@@ -2493,7 +2858,18 @@ export default function App() {
             {/* LOADING SCREEN */}
             {phase === GamePhase.LOADING && (
                 <>
-                  <LoadingScreen progress={loadingProgress} status={loadingStatus} />
+                  <LoadingScreen
+                    progress={loadingProgress}
+                    status={loadingStatus}
+                    isReady={isLoadingReadyToStart && !cameraIssueMessage}
+                    onPrimeAudio={() => {
+                      void primePhaserAudioContext();
+                      void bgmControllerRef.current?.ensureAudioUnlocked();
+                    }}
+                    onStart={() => {
+                      void handleStartFromLoading();
+                    }}
+                  />
                   {cameraIssueMessage && (
                     <div className="absolute inset-0 z-[90] bg-black/35 backdrop-blur-md flex items-center justify-center p-4">
                       <div className="kenney-panel bg-white/95 max-w-2xl w-full px-5 md:px-8 py-5 md:py-7 shadow-2xl">
@@ -2616,6 +2992,16 @@ export default function App() {
                     <h2 className="text-lg sm:text-2xl md:text-4xl lg:text-5xl font-black text-white mb-1 md:mb-2 tracking-[0.04em] shrink-0 mobile-landscape-title pt-4 md:pt-6">
                         选择绘本
                     </h2>
+                    {!isSpeechRecognitionSupported && (
+                      <p className="text-xs md:text-sm font-black text-yellow-100 bg-yellow-500/60 border border-yellow-200/70 rounded-xl px-3 py-2 mb-2">
+                        当前浏览器不支持语音识别，将自动跳过第二轮“大声跟读”，仅进行听音识图。
+                      </p>
+                    )}
+                    {gameplayModeIssue && (
+                      <p className="text-xs md:text-sm font-black text-red-100 bg-red-500/60 border border-red-200/70 rounded-xl px-3 py-2 mb-2 whitespace-pre-line">
+                        {gameplayModeIssue}
+                      </p>
+                    )}
                     <div className="w-full overflow-y-auto overflow-x-hidden px-0.5 md:px-2 scrollbar-hide flex-1 min-h-0 will-change-transform">
                         {/* Level Selection Bar */}
                         {levels.length > 0 && (
@@ -2725,10 +3111,10 @@ export default function App() {
                     <div className="theme-start flex justify-center px-4">
                          <button 
                             onClick={handleStartGame}
-                            disabled={selectedThemes.length === 0}
-                            className={`pointer-events-auto kenney-button kenney-button-handdrawn mobile-landscape-button px-8 py-3 text-xl md:text-2xl shadow-2xl transition-all transform duration-300 ${selectedThemes.length > 0 ? 'scale-100 opacity-100 translate-y-0' : 'scale-50 opacity-0 translate-y-10'}`}
+                            disabled={isThemeStartDisabled}
+                            className={`pointer-events-auto kenney-button kenney-button-handdrawn mobile-landscape-button px-8 py-3 text-xl md:text-2xl shadow-2xl transition-all transform duration-300 ${!isThemeStartDisabled ? 'scale-100 opacity-100 translate-y-0' : 'scale-90 opacity-80 translate-y-0 bg-gray-400 border-gray-600'}`}
                         >
-                            开始游戏（{selectedThemes.length}）
+                            加载资源（{selectedThemes.length}）
                         </button>
                     </div>
                 </div>
@@ -2736,63 +3122,48 @@ export default function App() {
 
             {/* TUTORIAL */}
             {phase === GamePhase.TUTORIAL && (
-                <div className="tutorial-shell non-game-scale text-center w-full max-w-6xl px-4 md:px-20 lg:px-32 flex flex-col items-center justify-center h-full max-h-screen gap-[2vh] md:gap-[4vh] overflow-y-auto scrollbar-hide py-4">
-                    
-                    <h2 className="tutorial-title text-[4vw] sm:text-[5vw] md:text-[6vw] font-bold text-white tracking-[0.03em] rotate-[-1deg] shrink-0 mobile-landscape-title landscape-compact-title leading-none">
-                        游戏说明
-                    </h2>
-                    
-                    <div className="w-full flex-1 flex flex-col items-center justify-center min-h-0 gap-[2vh] md:gap-[4vh]">
-                        <div className="grid grid-cols-2 gap-[3vw] md:gap-[4vw] w-full max-w-3xl lg:max-w-4xl min-h-0 mobile-landscape-tutorial-grid">
-                            <div className="tutorial-card kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
-                                <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-4">
-                                    <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_walk_a.svg')} className="tutorial-card-img w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce-horizontal-large mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
-                                </div>
-                                <div className="shrink-0 flex flex-col items-center gap-1">
-                                    <h3 className="tutorial-card-title text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark tracking-[0.02em] mobile-landscape-card-text">左右移动</h3>
-                                    <p className="tutorial-card-subtitle hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">身体左右移动</p>
-                                </div>
-                            </div>
+              <div className="tutorial-shell non-game-scale text-center w-full max-w-6xl px-4 md:px-12 lg:px-20 flex flex-col items-center justify-center h-full max-h-screen gap-3 md:gap-5 overflow-y-auto scrollbar-hide py-4">
+                <h2 className="tutorial-title text-[clamp(1.6rem,5.8vw,3.7rem)] font-bold text-white tracking-[0.03em] rotate-[-1deg] shrink-0 mobile-landscape-title landscape-compact-title leading-none">
+                  {tutorialHeading}
+                </h2>
 
-                            <div className="tutorial-card kenney-panel p-[2vh] md:p-[4vh] flex flex-col items-center group hover:bg-kenney-light transition-colors mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl">
-                                <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-4">
-                                    <img src={getR2AssetUrl('assets/kenney/Vector/Characters/character_pink_jump.svg')} className="tutorial-card-img w-[8vw] h-[8vw] sm:w-[10vw] sm:h-[10vw] md:w-[14vw] md:h-[14vw] lg:w-[16vw] lg:h-[16vw] animate-bounce mobile-landscape-card-img landscape-compact-img drop-shadow-md" alt="" />
-                                </div>
-                                <div className="shrink-0 flex flex-col items-center gap-1">
-                                    <h3 className="tutorial-card-title text-[2vw] sm:text-[2.5vw] md:text-[3vw] font-black text-kenney-dark tracking-[0.02em] mobile-landscape-card-text">向上跳</h3>
-                                    <p className="tutorial-card-subtitle hidden landscape:block md:block text-kenney-dark/60 font-bold text-[1.2vw] md:text-[1.5vw] uppercase tracking-tight">跳起来撞击方块</p>
-                                </div>
-                            </div>
+                <div className="w-full flex-1 flex flex-col items-center justify-center min-h-0 gap-3 md:gap-5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-5 w-full max-w-4xl min-h-0 mobile-landscape-tutorial-grid">
+                    {tutorialConfig.cards.map((card: RoundTutorialCard) => (
+                      <div
+                        key={card.title}
+                        className="tutorial-card kenney-panel p-3 md:p-5 flex flex-col items-center mobile-landscape-panel mobile-landscape-tutorial-card landscape-compact-card shadow-[4px_4px_0px_#333333] border-[3px] md:border-[4px] rounded-2xl md:rounded-3xl"
+                      >
+                        <div className="flex-1 flex items-center justify-center min-h-0 w-full bg-kenney-blue/10 rounded-xl mb-2 md:mb-3 py-2">
+                          <img
+                            src={getR2AssetUrl(card.iconPath)}
+                            className={`tutorial-card-img w-14 h-14 sm:w-16 sm:h-16 md:w-24 md:h-24 lg:w-28 lg:h-28 mobile-landscape-card-img landscape-compact-img drop-shadow-md ${card.iconAnimationClass}`}
+                            alt=""
+                          />
                         </div>
+                        <div className="shrink-0 flex flex-col items-center gap-1">
+                          <h3 className="tutorial-card-title text-[clamp(1rem,2.7vw,1.7rem)] font-black text-kenney-dark tracking-[0.02em] mobile-landscape-card-text">
+                            {card.title}
+                          </h3>
+                          <p className="tutorial-card-subtitle text-kenney-dark/75 font-bold text-[clamp(0.75rem,1.9vw,1rem)] tracking-tight px-1">
+                            {card.subtitle}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
 
-                        <div className="flex flex-col items-center gap-2">
-                            <button 
-                                onTouchStart={() => {
-                                  void primePhaserAudioContext();
-                                  void bgmControllerRef.current?.ensureAudioUnlocked();
-                                }}
-                                onClick={() => {
-                                    void handleEnterPlaying();
-                                }}
-                                disabled={!motionController.isStarted || !themeImagesLoaded}
-                                className={`kenney-button kenney-button-handdrawn px-6 sm:px-12 md:px-24 py-2 sm:py-4 md:py-8 text-base sm:text-2xl md:text-4xl hover:scale-110 transition-transform shadow-2xl mobile-landscape-button landscape-compact-button flex items-center justify-center gap-3 md:gap-4 ${(!motionController.isStarted || !themeImagesLoaded) ? 'opacity-100 bg-gray-400 border-gray-600 cursor-wait' : 'bg-kenney-green border-kenney-dark'}`}>
-                                {(motionController.isStarted && themeImagesLoaded) ? (
-                                    <>
-                                        <span className="font-black leading-none pb-1 text-base sm:text-2xl md:text-4xl">开始！</span>
-                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={4} stroke="currentColor" className="w-4 h-4 sm:w-5 sm:h-5 md:w-7 md:h-7 animate-pulse filter drop-shadow-md">
-                                            <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
-                                        </svg>
-                                    </>
-                                ) : (
-                                    <>
-                                        <div className="w-5 h-5 sm:w-6 sm:h-6 md:w-7 md:h-7 border-[3px] md:border-[4px] border-white/30 border-t-white rounded-full animate-spin"></div>
-                                        <span className="font-black tracking-widest leading-none">加载中...</span>
-                                    </>
-                                )}
-                            </button>
-                        </div>
+                  <div className="w-full max-w-2xl px-1 md:px-3">
+                    <p className="text-xs md:text-sm font-black text-white/90 mb-2">4 秒后自动开始</p>
+                    <div className="h-4 md:h-5 rounded-full bg-white/35 border-[2px] md:border-[3px] border-white/85 overflow-hidden shadow-[0_3px_0_rgba(51,51,51,0.55)]">
+                      <div
+                        className="h-full bg-kenney-yellow transition-[width] duration-75 ease-linear"
+                        style={{ width: `${tutorialProgressPercent}%` }}
+                      />
                     </div>
+                  </div>
                 </div>
+              </div>
             )}
 
 

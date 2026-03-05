@@ -5,12 +5,22 @@ import { ImgWithFallback } from './ImgWithFallback';
 interface LoadingScreenProps {
   progress: number;
   status: string;
+  isReady: boolean;
+  onPrimeAudio?: () => void;
+  onStart?: () => void;
 }
 
-export const LoadingScreen: React.FC<LoadingScreenProps> = ({ progress, status }) => {
+export const LoadingScreen: React.FC<LoadingScreenProps> = ({
+  progress,
+  status,
+  isReady,
+  onPrimeAudio,
+  onStart
+}) => {
+  const title = isReady ? '准备完成' : '正在准备中...';
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-kenney-blue/90 backdrop-blur-md p-4">
-      <div className="loading-content non-game-scale text-center w-full max-w-2xl px-4 flex flex-col items-center gap-5 md:gap-6 transition-all duration-300">
+      <div className="loading-content non-game-scale text-center w-full max-w-2xl px-4 flex flex-col items-center gap-4 md:gap-5 transition-all duration-300">
         
         {/* Animated Character */}
         <div className="relative shrink-0">
@@ -22,10 +32,10 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ progress, status }
         </div>
 
         {/* Content Container */}
-        <div className="loading-text w-full flex flex-col items-center gap-4 md:gap-5">
+        <div className="loading-text w-full flex flex-col items-center gap-3 md:gap-4">
           {/* Title */}
           <h2 className="loading-title font-black text-white tracking-[0.03em]">
-            正在加载，请稍候...
+            {title}
           </h2>
 
           {/* Progress Bar Container */}
@@ -44,6 +54,18 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ progress, status }
           <p className="loading-status text-white font-bold tracking-[0.02em] min-h-[1.5em]">
             {status || '正在加载中...'}
           </p>
+
+          {isReady && onStart && (
+            <button
+              onTouchStart={() => {
+                if (onPrimeAudio) onPrimeAudio();
+              }}
+              onClick={onStart}
+              className="kenney-button kenney-button-handdrawn mobile-landscape-button mt-1 md:mt-2 w-full max-w-[min(88vw,320px)] px-5 sm:px-6 md:px-10 py-2 sm:py-2.5 md:py-3 text-base sm:text-lg md:text-xl shadow-2xl"
+            >
+              开始闯关
+            </button>
+          )}
         </div>
       </div>
     </div>
