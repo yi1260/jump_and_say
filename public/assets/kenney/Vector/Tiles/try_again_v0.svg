@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" width="100%" height="100%">
+  <title>Silver Medal - TRY AGAIN</title>
+  <defs>
+    <style>
+      /* 低调的滑入与平缓悬浮 */
+      .medal-soft {
+        transform-origin: 200px 150px;
+        transform: scale(1);
+        opacity: 1;
+      }
+
+      /* 圆润粗体字 */
+      .text-chunky {
+        font-family: 'Arial Rounded MT Bold', 'Nunito', sans-serif;
+        font-size: 32px; /* 字号略微缩小以适应更长的文本 */
+        font-weight: 900;
+        text-anchor: middle;
+        dominant-baseline: central;
+        letter-spacing: 1px;
+      }
+    </style>
+  </defs>
+
+  <!-- 整体悬浮组 -->
+  <g class="medal-soft">
+
+    <!-- === 奖牌后面的绶带燕尾 (暗灰色) === -->
+    <polygon points="15,170 70,170 70,220 15,220 35,195" fill="#374151" />
+    <polygon points="385,170 330,170 330,220 385,220 365,195" fill="#374151" />
+
+    <!-- === 奖牌主体 (银灰色) === -->
+    <!-- 1. 奖牌外环阴影厚度 -->
+    <circle cx="200" cy="130" r="85" fill="#4B5563" />
+    <!-- 2. 奖牌外环灰边 -->
+    <circle cx="200" cy="120" r="85" fill="#9CA3AF" />
+    <!-- 3. 奖牌内环凹陷阴影 -->
+    <circle cx="200" cy="120" r="70" fill="#6B7280" />
+    <!-- 4. 奖牌内环未点亮面 -->
+    <circle cx="200" cy="116" r="70" fill="#E5E7EB" />
+
+    <!-- 奖牌左上角的光泽高光 (减弱透明度) -->
+    <path d="M 135 90 A 75 75 0 0 1 180 45" fill="none" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round" opacity="0.4" />
+
+    <!-- === 奖牌中心的未激活五角星 (灰色) === -->
+    <g>
+      <!-- 星星阴影 -->
+      <path d="M 200 76 L 211 102 L 238 102 L 216 118 L 225 145 L 200 129 L 175 145 L 184 118 L 162 102 L 189 102 Z" 
+            fill="#9CA3AF" stroke="#9CA3AF" stroke-width="10" stroke-linejoin="round" transform="translate(0, 8)" />
+      <!-- 星星暗淡亮面 -->
+      <path d="M 200 76 L 211 102 L 238 102 L 216 118 L 225 145 L 200 129 L 175 145 L 184 118 L 162 102 L 189 102 Z" 
+            fill="#D1D5DB" stroke="#D1D5DB" stroke-width="10" stroke-linejoin="round" />
+    </g>
+
+    <!-- === 覆盖在奖牌上方的前置横向绶带 (石板色) === -->
+    <!-- 绶带阴影 -->
+    <rect x="60" y="170" width="280" height="65" rx="20" fill="#4B5563" />
+    <!-- 绶带主体 -->
+    <rect x="60" y="160" width="280" height="65" rx="20" fill="#6B7280" />
+    <!-- 绶带高光 (减弱透明度以保持低调) -->
+    <rect x="80" y="168" width="240" height="12" rx="6" fill="#FFFFFF" opacity="0.15" />
+
+    <!-- === 文字排版 === -->
+    <!-- 3D 深灰色文字底 -->
+    <text x="200" y="202" class="text-chunky" fill="#374151">TRY AGAIN</text>
+    <!-- 白色文字面 -->
+    <text x="200" y="196" class="text-chunky" fill="#FFFFFF">TRY AGAIN</text>
+
+  </g>
+</svg>

@@ -3,7 +3,7 @@ import React, { useEffect, useRef } from 'react';
 import { bindActivePhaserGame, ensurePhaserAudioUnlocked, getPhaserAudioConfig } from '../services/audioController';
 import { MainScene } from '../game/scenes/MainScene';
 import { PreloadScene } from '../game/scenes/PreloadScene';
-import { Theme, ThemeId } from '../types';
+import { GameplayMode, PronunciationSummary, Theme, ThemeId } from '../types';
 
 const isIPadDevice = (): boolean => (
   /iPad|Macintosh/i.test(navigator.userAgent) && 'ontouchend' in document
@@ -234,6 +234,38 @@ const getAppliedRenderProfile = (qualityStep: number): RenderProfile & { applied
   };
 };
 
+interface CssViewportSize {
+  width: number;
+  height: number;
+}
+
+const readContainerCssSize = (container: HTMLDivElement): CssViewportSize => {
+  const clientWidth = Math.floor(container.clientWidth || 0);
+  const clientHeight = Math.floor(container.clientHeight || 0);
+  if (isValidViewportSize(clientWidth, clientHeight)) {
+    return { width: clientWidth, height: clientHeight };
+  }
+
+  const rect = container.getBoundingClientRect();
+  const rectWidth = Math.floor(rect.width);
+  const rectHeight = Math.floor(rect.height);
+  if (isValidViewportSize(rectWidth, rectHeight)) {
+    return { width: rectWidth, height: rectHeight };
+  }
+
+  const visualViewport = window.visualViewport;
+  const viewportWidth = Math.floor(
+    visualViewport?.width || window.innerWidth || document.documentElement.clientWidth || 0
+  );
+  const viewportHeight = Math.floor(
+    visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0
+  );
+  return {
+    width: viewportWidth,
+    height: viewportHeight
+  };
+};
+
 const syncHiDpiScale = (
   game: Phaser.Game,
   container: HTMLDivElement,
@@ -241,13 +273,18 @@ const syncHiDpiScale = (
 ): { profile: RenderProfileName; appliedQualityStep: number; maxQualityStep: number } => {
   const profile = getAppliedRenderProfile(qualityStep);
   const targetRenderDpr = profile.renderDpr;
-  const rect = container.getBoundingClientRect();
-  const measuredCssWidth = Math.floor(rect.width);
-  const measuredCssHeight = Math.floor(rect.height);
+  const measuredCssSize = readContainerCssSize(container);
+  const measuredCssWidth = measuredCssSize.width;
+  const measuredCssHeight = measuredCssSize.height;
   const storedCssWidth = game.registry.get('cssWidth');
   const storedCssHeight = game.registry.get('cssHeight');
-  const fallbackCssWidth = Math.floor(window.innerWidth || document.documentElement.clientWidth || 0);
-  const fallbackCssHeight = Math.floor(window.innerHeight || document.documentElement.clientHeight || 0);
+  const visualViewport = window.visualViewport;
+  const fallbackCssWidth = Math.floor(
+    visualViewport?.width || window.innerWidth || document.documentElement.clientWidth || 0
+  );
+  const fallbackCssHeight = Math.floor(
+    visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0
+  );
 
   const measuredIsValid = isValidViewportSize(measuredCssWidth, measuredCssHeight);
   const storedIsValid = (
@@ -286,6 +323,8 @@ const syncHiDpiScale = (
   game.registry.set('dpr', 1);
   game.registry.set('cssWidth', cssWidth);
   game.registry.set('cssHeight', cssHeight);
+  game.registry.set('internalWidth', internalWidth);
+  game.registry.set('internalHeight', internalHeight);
 
   // IMPORTANT: resize first, then setZoom.
   // setZoom() calls refresh() which emits a resize event. If setZoom is called
@@ -306,6 +345,24 @@ const syncHiDpiScale = (
     game.scale.setZoom(nextZoom);
   }
 
+  // Keep canvas style synchronized with the measured CSS viewport. This avoids
+  // transient browser-reported scale glitches (observed on iPad Edge) from
+  // leaving the canvas at a stale display size and visually pinning content to
+  // the top-left corner.
+  if (game.canvas) {
+    const expectedStyleWidth = `${cssWidth}px`;
+    const expectedStyleHeight = `${cssHeight}px`;
+    const styleMismatched = (
+      game.canvas.style.width !== expectedStyleWidth ||
+      game.canvas.style.height !== expectedStyleHeight
+    );
+    if (styleMismatched) {
+      game.canvas.style.width = expectedStyleWidth;
+      game.canvas.style.height = expectedStyleHeight;
+      game.scale.refresh();
+    }
+  }
+
   return {
     profile: profile.name,
     appliedQualityStep: profile.appliedQualityStep,
@@ -316,9 +373,10 @@ const syncHiDpiScale = (
 interface GameCanvasProps {
   onScoreUpdate: (score: number, total: number) => void;
   onGameOver: () => void;
-  onGameRestart?: () => void;
-  onQuestionUpdate?: (question: string) => void;
   onBackgroundUpdate?: (index: number) => void;
+  onPronunciationProgressUpdate?: (completed: number, total: number, averageConfidence: number) => void;
+  onPronunciationComplete?: (summary: PronunciationSummary) => void;
+  gameplayMode: GameplayMode;
   themes: ThemeId[];
   allThemes: Theme[];
   qualityMode: QualityMode;
@@ -327,9 +385,10 @@ interface GameCanvasProps {
 export const GameCanvas: React.FC<GameCanvasProps> = ({ 
   onScoreUpdate, 
   onGameOver, 
-  onGameRestart,
-  onQuestionUpdate,
   onBackgroundUpdate,
+  onPronunciationProgressUpdate,
+  onPronunciationComplete,
+  gameplayMode,
   themes,
   allThemes,
   qualityMode
@@ -581,12 +640,13 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             game.registry.set('callbacks', {
               onScoreUpdate,
               onGameOver,
-              onGameRestart,
-              onQuestionUpdate,
-              onBackgroundUpdate
+              onBackgroundUpdate,
+              onPronunciationProgressUpdate,
+              onPronunciationComplete
             });
             game.registry.set('initialThemes', themes);
             game.registry.set('allThemes', allThemes);
+            game.registry.set('gameplayMode', gameplayMode);
             game.registry.set('renderProfile', qualityProfile);
             game.registry.set('renderDpr', 1);
             game.registry.set('textureBoost', 1);

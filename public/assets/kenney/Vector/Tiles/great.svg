@@ -1,0 +1,19 @@
+<svg width="300" height="120" viewBox="0 0 300 120" xmlns="http://www.w3.org/2000/svg">
+  <title>Great - Tilted Flat 3D</title>
+  
+  <g transform="translate(150, 55) rotate(-3) skewX(-10)" 
+     font-family="'Arial Rounded MT Bold', 'Nunito', 'Fredoka One', sans-serif" 
+     font-size="48" font-weight="900" text-anchor="middle" dominant-baseline="central" 
+     stroke-linejoin="round" stroke-linecap="round">
+    
+    <!-- 1. 3D 投影厚度 (深绿色，向下偏移) -->
+    <text x="0" y="8" fill="#46A302" stroke="#46A302" stroke-width="22">GREAT !</text>
+    
+    <!-- 2. 亮色外轮廓 (活力绿) -->
+    <text x="0" y="0" fill="#58CC02" stroke="#58CC02" stroke-width="22">GREAT !</text>
+    
+    <!-- 3. 文字本体 (纯净白) -->
+    <text x="0" y="0" fill="#FFFFFF" stroke="none">GREAT !</text>
+    
+  </g>
+</svg>

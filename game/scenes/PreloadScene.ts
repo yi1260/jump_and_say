@@ -1,15 +1,27 @@
 import { getCachedThemes, getPreloadedThemeAudioBlobUrl } from '@/gameConfig';
 import {
-  getLocalAssetUrl,
-  getR2AssetUrl,
-  getR2ImageUrl,
-  getThemesListFallbackUrl,
-  getThemesListPrimaryUrl
+    getLocalAssetUrl,
+    getR2ImageUrl,
+    getThemesListFallbackUrl,
+    getThemesListPrimaryUrl
 } from '@/src/config/r2Config';
 import Phaser from 'phaser';
 import { Theme, ThemeId } from '../../types';
 
-const REWARD_VOICE_WORDS = ['perfect', 'super', 'great', 'amazing', 'awesome', 'excellent'] as const;
+const REWARD_VOICE_WORDS = ['perfect', 'super', 'great', 'amazing', 'awesome', 'excellent', 'try_again'] as const;
+const ROUND1_VOLUME_BORDER_SVG_CACHE_BUSTER = 'v=20260303_volume_border_split';
+const ROUND1_VOLUME_FILL_SVG_CACHE_BUSTER = 'v=20260303_volume_fill_split';
+const ROUND1_MIC_SVG_CACHE_BUSTER = 'v=20260301_mic_ring_hd';
+const ROUND1_FEEDBACK_BADGE_SVG_CACHE_BUSTER = 'v=20260305_feedback_badge_hq_v4';
+const ROUND1_FEEDBACK_BADGE_MIN_DISPLAY_WIDTH = 216;
+const ROUND1_FEEDBACK_BADGE_MAX_DISPLAY_WIDTH = 540;
+const ROUND1_FEEDBACK_BADGE_VIEWPORT_WIDTH_RATIO = 0.66;
+const ROUND1_FEEDBACK_BADGE_VIEWPORT_HEIGHT_RATIO = 0.48;
+const ROUND1_FEEDBACK_BADGE_ASPECT_RATIO = {
+  reward_excellent: 460 / 120,
+  reward_great: 300 / 120,
+  reward_try_again: 360 / 120
+} as const;
 
 export class PreloadScene extends Phaser.Scene {
   private currentTheme: ThemeId = '';
@@ -227,6 +239,7 @@ export class PreloadScene extends Phaser.Scene {
         getLocalUrl(`${soundBase}sfx_bump.mp3`),
         getLocalUrl(`${soundBase}sfx_bump.ogg`)
     ]);
+    this.load.audio('sfx_record_start', getLocalUrl(`${soundBase}glass_001.ogg`));
 
     REWARD_VOICE_WORDS.forEach((word) => {
       const voiceKey = `voice_${word}`;
@@ -235,7 +248,7 @@ export class PreloadScene extends Phaser.Scene {
       this.load.audio(voiceKey, voiceUrl);
     });
     
-    const { height } = this.scale;
+    const { width, height } = this.scale;
     const gameScale = height / 1080;
     const rawDpr = this.registry.get('dpr') || 1;
     const textureBoostRaw = this.registry.get('textureBoost');
@@ -246,6 +259,28 @@ export class PreloadScene extends Phaser.Scene {
     const targetBeeSize = Math.round(100 * gameScale * dprScale);
     const charTextureSize = Math.round(180 * gameScale * dprScale);
     const tileTextureSize = Math.round(320 * gameScale * dprScale);
+    // Pronunciation-round UI textures are generated from SVG; size them based on actual display bounds
+    // to avoid unnecessary GPU memory usage on mobile/iPad while keeping crisp edges.
+    const shortestViewportSide = Math.max(1, Math.min(width, height));
+    const roundCardDisplaySize = Phaser.Math.Clamp(
+      Math.min(shortestViewportSide * 0.28, height * 0.62),
+      220 * gameScale,
+      780 * gameScale
+    );
+    const roundCardTextureSize = Math.round(
+      Phaser.Math.Clamp(roundCardDisplaySize * dprScale * 1.25, 512, 1792)
+    );
+    const round1MicIconDisplaySize = Math.round(Math.max(52, 80 * gameScale));
+    const round1MicTextureSize = Math.round(
+      Phaser.Math.Clamp(round1MicIconDisplaySize * dprScale * 3.2, 256, 768)
+    );
+    const round1VolumeFrameDisplayHeight = Phaser.Math.Clamp(320 * gameScale, 220, 420);
+    const round1VolumeFrameTextureHeight = Math.round(
+      Phaser.Math.Clamp(round1VolumeFrameDisplayHeight * dprScale * 2.6, 896, 2304)
+    );
+    const round1VolumeFrameTextureWidth = Math.round(
+      Phaser.Math.Clamp(round1VolumeFrameTextureHeight * 0.25, 224, 640)
+    );
     
     if (!this.textures.exists('p1_stand')) {
         this.load.svg('p1_stand', getLocalUrl(`${kenneyBase}Characters/character_pink_idle.svg`), { width: charTextureSize, height: charTextureSize });
@@ -257,6 +292,9 @@ export class PreloadScene extends Phaser.Scene {
     if (!this.textures.exists('tile_box')) {
         this.load.svg('tile_box', getLocalUrl(`${kenneyBase}Tiles/block_empty.svg`), { width: tileTextureSize, height: tileTextureSize });
     }
+    if (!this.textures.exists('tile_card_frame_hd')) {
+        this.load.svg('tile_card_frame_hd', getLocalUrl(`${kenneyBase}Tiles/card.svg`), { width: roundCardTextureSize, height: roundCardTextureSize });
+    }
         
     if (!this.textures.exists('bee_a')) {
         this.load.svg('bee_a', getLocalUrl(`${kenneyBase}Enemies/bee_a.svg`), { width: targetBeeSize, height: targetBeeSize });
@@ -267,6 +305,24 @@ export class PreloadScene extends Phaser.Scene {
 
     const safeRewardSize = Math.min(512, Math.max(192, Math.round(220 * gameScale * dprScale)));
     const safeIconSize = Math.min(512, Math.max(192, Math.round(200 * gameScale * dprScale)));
+    const round1FeedbackBadgeDisplayWidth = Phaser.Math.Clamp(
+      Math.min(
+        this.scale.width * ROUND1_FEEDBACK_BADGE_VIEWPORT_WIDTH_RATIO,
+        this.scale.height * ROUND1_FEEDBACK_BADGE_VIEWPORT_HEIGHT_RATIO
+      ),
+      ROUND1_FEEDBACK_BADGE_MIN_DISPLAY_WIDTH,
+      ROUND1_FEEDBACK_BADGE_MAX_DISPLAY_WIDTH
+    );
+    const round1FeedbackBadgeTextureWidth = Math.round(
+      Phaser.Math.Clamp(round1FeedbackBadgeDisplayWidth * dprScale * 2.1, 384, 3072)
+    );
+    const getFeedbackBadgeTextureHeight = (aspectRatio: number): number => Math.round(
+      Phaser.Math.Clamp(
+        round1FeedbackBadgeTextureWidth / Phaser.Math.Clamp(aspectRatio, 1.6, 4.6),
+        96,
+        1024
+      )
+    );
 
     if (!this.textures.exists('star_gold')) {
       this.load.svg('star_gold', getLocalUrl(`${kenneyBase}Tiles/star.svg`), { width: safeRewardSize, height: safeRewardSize });
@@ -281,6 +337,44 @@ export class PreloadScene extends Phaser.Scene {
       
       this.load.svg('icon_retry', getLocalUrl(`${kenneyBase}Tiles/replay_256dp.svg`), { width: safeIconSize, height: safeIconSize });
       this.load.svg('icon_next', getLocalUrl(`${kenneyBase}Tiles/keyboard_double_arrow_right_256dp.svg`), { width: safeIconSize, height: safeIconSize });
+    }
+    if (!this.textures.exists('reward_excellent')) {
+      this.load.svg('reward_excellent', `${getLocalUrl(`${kenneyBase}Tiles/excellent.svg`)}?${ROUND1_FEEDBACK_BADGE_SVG_CACHE_BUSTER}`, {
+        width: round1FeedbackBadgeTextureWidth,
+        height: getFeedbackBadgeTextureHeight(ROUND1_FEEDBACK_BADGE_ASPECT_RATIO.reward_excellent)
+      });
+    }
+    if (!this.textures.exists('reward_great')) {
+      this.load.svg('reward_great', `${getLocalUrl(`${kenneyBase}Tiles/great.svg`)}?${ROUND1_FEEDBACK_BADGE_SVG_CACHE_BUSTER}`, {
+        width: round1FeedbackBadgeTextureWidth,
+        height: getFeedbackBadgeTextureHeight(ROUND1_FEEDBACK_BADGE_ASPECT_RATIO.reward_great)
+      });
+    }
+    if (!this.textures.exists('reward_try_again')) {
+      this.load.svg('reward_try_again', `${getLocalUrl(`${kenneyBase}Tiles/try_again.svg`)}?${ROUND1_FEEDBACK_BADGE_SVG_CACHE_BUSTER}`, {
+        width: round1FeedbackBadgeTextureWidth,
+        height: getFeedbackBadgeTextureHeight(ROUND1_FEEDBACK_BADGE_ASPECT_RATIO.reward_try_again)
+      });
+    }
+
+    if (!this.textures.exists('tile_speaker_icon_hd')) {
+      this.load.svg(
+        'tile_speaker_icon_hd',
+        `${getLocalUrl(`${kenneyBase}Tiles/speaker.svg`)}?${ROUND1_MIC_SVG_CACHE_BUSTER}`,
+        { width: round1MicTextureSize, height: round1MicTextureSize }
+      );
+    }
+    if (!this.textures.exists('round1_volume_border_hd')) {
+      this.load.svg('round1_volume_border_hd', `${getLocalUrl(`${kenneyBase}Tiles/volume_border.svg`)}?${ROUND1_VOLUME_BORDER_SVG_CACHE_BUSTER}`, {
+        width: round1VolumeFrameTextureWidth,
+        height: round1VolumeFrameTextureHeight
+      });
+    }
+    if (!this.textures.exists('round1_volume_fill_hd')) {
+      this.load.svg('round1_volume_fill_hd', `${getLocalUrl(`${kenneyBase}Tiles/volume_fill.svg`)}?${ROUND1_VOLUME_FILL_SVG_CACHE_BUSTER}`, {
+        width: round1VolumeFrameTextureWidth,
+        height: round1VolumeFrameTextureHeight
+      });
     }
   }
 

@@ -1,0 +1,20 @@
+<svg width="460" height="120" viewBox="0 0 460 120" xmlns="http://www.w3.org/2000/svg">
+  <title>Excellent - Tilted Flat 3D</title>
+  
+  <!-- transform: rotate(-3) skewX(-10) 带来炫酷的前倾冲刺感 -->
+  <g transform="translate(230, 55) rotate(-3) skewX(-10)" 
+     font-family="'Arial Rounded MT Bold', 'Nunito', 'Fredoka One', sans-serif" 
+     font-size="44" font-weight="900" text-anchor="middle" dominant-baseline="central" 
+     stroke-linejoin="round" stroke-linecap="round">
+    
+    <!-- 1. 最底层的 3D 投影厚度 (暗橘黄，向下偏移 8px) -->
+    <text x="0" y="8" fill="#D68900" stroke="#D68900" stroke-width="22">EXCELLENT !!!</text>
+    
+    <!-- 2. 文字的亮色外轮廓 (明亮黄) -->
+    <text x="0" y="0" fill="#FFC800" stroke="#FFC800" stroke-width="22">EXCELLENT !!!</text>
+    
+    <!-- 3. 最顶层的文字本体 (纯净白) -->
+    <text x="0" y="0" fill="#FFFFFF" stroke="none">EXCELLENT !!!</text>
+    
+  </g>
+</svg>

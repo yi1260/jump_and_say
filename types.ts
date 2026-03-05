@@ -26,6 +26,43 @@ export interface QuestionData {
   correctIndex: number;
 }
 
+export const GAMEPLAY_MODE = {
+  QUIZ: 'QUIZ',
+  BLIND_BOX_PRONUNCIATION: 'BLIND_BOX_PRONUNCIATION'
+} as const;
+
+export type GameplayMode = (typeof GAMEPLAY_MODE)[keyof typeof GAMEPLAY_MODE];
+export type GameplayModeId = GameplayMode;
+
+export type PronunciationConfidenceLevel = 'HIGH' | 'MEDIUM' | 'LOW';
+
+export interface PronunciationRoundResult {
+  targetText: string;
+  transcript: string;
+  confidence: number;
+  confidenceLevel: PronunciationConfidenceLevel;
+  volumePeak: number;
+  reason: 'ok' | 'unsupported' | 'timeout' | 'no-speech' | 'aborted' | 'error';
+  durationMs: number;
+}
+
+export interface PronunciationSummary {
+  averageConfidence: number;
+  highConfidenceCount: number;
+  mediumConfidenceCount: number;
+  lowConfidenceCount: number;
+  completed: number;
+  total: number;
+}
+
+export interface PronunciationHudState {
+  micVisible: boolean;
+  volumeLevel: number;
+  countdownSeconds: number;
+  micAnchorX?: number;
+  micAnchorY?: number;
+}
+
 export enum GamePhase {
   MENU = 'MENU',
   THEME_SELECTION = 'THEME_SELECTION',

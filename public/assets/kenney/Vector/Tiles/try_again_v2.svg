@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" width="400" height="200">
+  <title>Static Feedback - Try Again</title>
+  
+  <!-- 底部厚度阴影 (深石板灰) -->
+  <rect x="50" y="68" width="300" height="80" rx="40" fill="#7A858C" />
+  
+  <!-- 顶层主体 (雾霾蓝/石板灰) -->
+  <rect x="50" y="58" width="300" height="80" rx="40" fill="#96A2A8" />
+  
+  <!-- 顶层果冻高光 (调低透明度使其更低调) -->
+  <rect x="70" y="66" width="260" height="14" rx="7" fill="#FFFFFF" opacity="0.25" />
+
+  <!-- 文字排版 (带底色阴影) -->
+  <text x="200" y="104" font-family="'Arial Rounded MT Bold', 'Nunito', sans-serif" font-size="34" font-weight="900" text-anchor="middle" dominant-baseline="central" letter-spacing="2" fill="#7A858C">TRY AGAIN</text>
+  <text x="200" y="98" font-family="'Arial Rounded MT Bold', 'Nunito', sans-serif" font-size="34" font-weight="900" text-anchor="middle" dominant-baseline="central" letter-spacing="2" fill="#FFFFFF">TRY AGAIN</text>
+</svg>

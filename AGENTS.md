@@ -230,3 +230,16 @@ const isMobilePhone = /iPhone|Android|Mobile/i.test(navigator.userAgent) && !/iP
 3. **Audio Optimization**: Blob URL caching for reduced latency
 4. **Camera Resilience**: Multi-attempt fallback for `getUserMedia` constraints
 5. **Completion Polish**: Star timing, voice synchronization, and one-shot playback guard
+
+## Skills
+### Available skills
+- phaser-doc-first: Any change touching Phaser behavior, Scene lifecycle, physics, camera, animation, input, loader, sound, time/tween, or game loop must be validated against official Phaser documentation before implementation. (file: ./skills/phaser-doc-first/SKILL.md)
+
+### How to use skills
+- Trigger rules: If a task involves modifying Phaser-related code (`game/`, Phaser APIs in React components/services, or Phaser config), `phaser-doc-first` must be used in that turn.
+- Documentation source policy: Prefer official Phaser docs first:
+  - https://docs.phaser.io/api-documentation/3.88.2/api-documentation
+  - https://photonstorm.github.io/phaser3-docs/
+- Execution requirement: Before editing code, locate the exact API docs and confirm method/property signatures, lifecycle timing, and side effects.
+- Response requirement: When finishing Phaser-related changes, include the specific API section(s) used as justification.
+- Prohibited behavior: Do not make speculative Phaser API changes without documentation support.

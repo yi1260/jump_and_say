@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import type Phaser from 'phaser';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { GameplayMode, PronunciationSummary } from '../types';
 import { getR2AssetUrl } from '../src/config/r2Config';
 import { ImgWithFallback } from './ImgWithFallback';
 
@@ -8,6 +9,8 @@ interface CompletionOverlayProps {
   score: number;
   total: number;
   isVisible: boolean;
+  gameplayMode: GameplayMode;
+  pronunciationSummary?: PronunciationSummary | null;
   onNextLevel?: () => void;
   onRestart?: () => void;
 }
@@ -75,7 +78,15 @@ const getUnknownErrorMessage = (error: unknown): string => {
   return String(error);
 };
 
-const CompletionOverlay: React.FC<CompletionOverlayProps> = ({ score, total, isVisible, onNextLevel, onRestart }) => {
+const CompletionOverlay: React.FC<CompletionOverlayProps> = ({
+  score,
+  total,
+  isVisible,
+  gameplayMode: _gameplayMode,
+  pronunciationSummary: _pronunciationSummary,
+  onNextLevel,
+  onRestart
+}) => {
   const isPerfect = score === total;
   const [feedbackWord, setFeedbackWord] = useState('');
   const [viewportSize, setViewportSize] = useState<ViewportSize>(() => {
@@ -432,6 +443,7 @@ const CompletionOverlay: React.FC<CompletionOverlayProps> = ({ score, total, isV
               />
             </div>
 
+            <>
             {/* Title Text */}
             <motion.div
               initial={{ y: -50, opacity: 0, scale: 0.5 }}
@@ -524,6 +536,7 @@ const CompletionOverlay: React.FC<CompletionOverlayProps> = ({ score, total, isV
                 {score} / {total}
               </span>
             </motion.div>
+            </>
           </motion.div>
         </motion.div>
       )}
