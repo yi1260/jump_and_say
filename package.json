@@ -13,6 +13,7 @@
     "@fontsource/zcool-kuaile": "^5.2.7",
     "@mediapipe/camera_utils": "^0.3.1675466862",
     "@mediapipe/pose": "^0.5.1675469404",
+    "@vercel/analytics": "^1.6.1",
     "framer-motion": "^12.23.26",
     "phaser": "3.80.0",
     "react": "18.3.1",

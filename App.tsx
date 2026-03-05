@@ -1,6 +1,7 @@
 import type Phaser from 'phaser';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BugReportButton } from './components/BugReportButton';
+import { Analytics } from '@vercel/analytics/react';
 import CompletionOverlay from './components/CompletionOverlay';
 import GameBackground from './components/GameBackground';
 import { GameCanvas, type QualityMode } from './components/GameCanvas';
@@ -3171,6 +3172,7 @@ export default function App() {
       )}
 
       <BugReportButton />
+      <Analytics />
     </div>
   );
 }
