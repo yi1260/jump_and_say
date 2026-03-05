@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 400" width="100%" height="100%">
+  <title>Static Brightened Energy Bar (1/6)</title>
+
+  <!-- ================= 1. 外边框组件 (Outer Border) ================= -->
+  <g id="outer-border">
+    <!-- 背景凹槽 (极低透明度的灰蓝色) -->
+    <rect x="20" y="20" width="60" height="360" rx="30" fill="#5C6A7A" opacity="0.08" />
+    
+    <!-- 外边框加粗描边 -->
+    <rect x="20" y="20" width="60" height="360" rx="30" fill="none" stroke="#5C6A7A" stroke-width="8" />
+
+    <!-- 背景刻度指示线 -->
+    <g opacity="0.2" stroke="#5C6A7A" stroke-width="4" stroke-linecap="round">
+      <line x1="32" y1="83" x2="68" y2="83" />
+      <line x1="32" y1="141" x2="68" y2="141" />
+      <line x1="32" y1="200" x2="68" y2="200" />
+      <line x1="32" y1="258" x2="68" y2="258" />
+      <line x1="32" y1="317" x2="68" y2="317" />
+    </g>
+  </g>
+
+  <!-- ================= 2. 内部能量块 (Inner Fill - 精准占 1/6) ================= -->
+  <g id="inner-fill">
+    <!-- 3D 底部厚度阴影 (提亮的暗黄色) -->
+    <rect x="28" y="320" width="44" height="52" rx="22" fill="#E0BA41" />
+    
+    <!-- 主体能量块表面 (更明亮的亮奶油黄) -->
+    <rect x="28" y="314" width="44" height="52" rx="22" fill="#FBE068" />
+    
+    <!-- 左侧标志性果冻胶囊高光 (转为静态，透明度固定) -->
+    <rect x="34" y="322" width="6" height="24" rx="3" fill="#FFFFFF" opacity="0.4" />
+    
+    <!-- 顶部圆润曲面的反光弧线 -->
+    <path d="M 36 324 Q 50 316 64 324" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" opacity="0.5" />
+  </g>
+
+</svg>

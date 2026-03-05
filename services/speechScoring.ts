@@ -8,6 +8,7 @@ type SpeechRecognitionResultReason =
 
 interface SpeechRecognitionAlternativeLike {
   transcript: string;
+  confidence?: number;
 }
 
 interface SpeechRecognitionResultLike {
@@ -70,6 +71,7 @@ export interface RecognizeOnceOptions {
 
 export interface RecognizeOnceResult {
   transcript: string;
+  confidence: number;
   reason: SpeechRecognitionResultReason;
   durationMs: number;
 }
@@ -177,6 +179,7 @@ class SpeechScoringService {
     if (!RecognitionCtor) {
       return {
         transcript: '',
+        confidence: 0,
         reason: 'unsupported',
         durationMs: 0
       };
@@ -192,6 +195,7 @@ class SpeechScoringService {
       recognition.maxAlternatives = 1;
 
       let transcript = '';
+      let confidence = 0;
       let finalized = false;
       let forcedTimeout = false;
       let mappedErrorReason: SpeechRecognitionResultReason | null = null;
@@ -211,6 +215,7 @@ class SpeechScoringService {
         const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
         resolve({
           transcript: transcript.trim(),
+          confidence: Math.max(0, Math.min(1, confidence)),
           reason,
           durationMs
         });
@@ -218,13 +223,18 @@ class SpeechScoringService {
 
       recognition.onresult = (event: SpeechRecognitionEventLike): void => {
         const chunks: string[] = [];
+        let latestConfidence = 0;
         for (let i = event.resultIndex; i < event.results.length; i += 1) {
           const alt = event.results[i][0];
           if (!alt || typeof alt.transcript !== 'string') continue;
           chunks.push(alt.transcript);
+          if (typeof alt.confidence === 'number' && Number.isFinite(alt.confidence)) {
+            latestConfidence = Math.max(latestConfidence, alt.confidence);
+          }
         }
         if (chunks.length > 0) {
           transcript = chunks.join(' ').trim();
+          confidence = Math.max(confidence, latestConfidence);
         }
       };
 
@@ -256,7 +266,7 @@ class SpeechScoringService {
           console.warn('[Pronounce] SpeechRecognition stop failed on timeout:', error);
           finalize('timeout');
         }
-      }, Math.max(1500, options.maxDurationMs));
+      }, Math.max(300, options.maxDurationMs));
 
       try {
         recognition.start();

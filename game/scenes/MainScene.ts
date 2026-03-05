@@ -1,16 +1,34 @@
 import Phaser from 'phaser';
-import { pauseBackgroundPreloading, prioritizeThemeInQueue, resumeBackgroundPreloading } from '../../gameConfig';
-import { motionController } from '../../services/motionController';
-import { scorePronunciation, speechScoringService } from '../../services/speechScoring';
+import { Round1PronunciationFlow } from '../modes/round1/Round1PronunciationFlow';
+import { Round1PronunciationMode } from '../modes/round1/Round1PronunciationMode';
+import { Round2QuizFlow } from '../modes/round2/Round2QuizFlow';
+import { Round2QuizMode } from '../modes/round2/Round2QuizMode';
+import type {
+  GameplayModeHost,
+  GameplayModeId,
+  ModeVisualProfile,
+  ModeContext,
+  ModeSystems,
+  ModeTransitionReason,
+  ResponsiveLayoutStrategyId,
+  RuntimeCallbackBridge
+} from '../modes/core/types';
+import { ModeRegistry } from '../runtime/ModeRegistry';
+import { SceneRuntimeState } from '../runtime/SceneRuntimeState';
+import { CardSystem } from '../systems/CardSystem';
+import { PronunciationSystem } from '../systems/PronunciationSystem';
+import { RewardSystem } from '../systems/RewardSystem';
+import { SceneUiSystem } from '../systems/SceneUiSystem';
+import { PlayerControlSystem } from '../systems/PlayerControlSystem';
+import { ThemeAssetRuntime } from '../runtime/ThemeAssetRuntime';
+import { pauseBackgroundPreloading, resumeBackgroundPreloading } from '../../gameConfig';
 import { getLocalAssetUrl } from '../../src/config/r2Config';
 import {
-  GameplayMode,
   PronunciationRoundResult,
   PronunciationSummary,
   QuestionData,
   Theme,
   ThemeId,
-  ThemeList,
   ThemeQuestion
 } from '../../types';
 
@@ -19,8 +37,6 @@ import {
 const C_GOLD = 0xFFD700;
 const C_AMBER = 0xFFA500;
 const C_WHITE = 0xFFFFFF;
-
-const FONT_STACK = '"FredokaBoot", "FredokaLatin", "Fredoka", "ZCOOL KuaiLe UI", "ZCOOL KuaiLe", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, -apple-system, sans-serif';
 
 interface AnswerCardLayout {
   centerX: number;
@@ -36,8 +52,9 @@ interface ViewportSize {
   height: number;
 }
 
-export class MainScene extends Phaser.Scene {
+export class MainScene extends Phaser.Scene implements GameplayModeHost {
   private player!: Phaser.Physics.Arcade.Sprite;
+  private playerTrailEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
   private jumpBurstEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
   private blockDebrisEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
   private blockSmokeEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
@@ -94,21 +111,72 @@ export class MainScene extends Phaser.Scene {
   private questionCounter: number = 0;
   private totalQuestions: number = 0;
   
-  private onScoreUpdate: ((score: number, total: number) => void) | null = null;
-  private onGameOver: (() => void) | null = null;
-  private onGameRestart: (() => void) | null = null;
-  private onQuestionUpdate: ((q: string) => void) | null = null;
-  private onBackgroundUpdate: ((index: number) => void) | null = null;
-  private onPronunciationProgressUpdate: ((completed: number, total: number, averageScore: number) => void) | null = null;
-  private onPronunciationComplete: ((summary: PronunciationSummary) => void) | null = null;
-  private sceneMode: GameplayMode = 'QUIZ';
+  private callbackBridge: RuntimeCallbackBridge = {};
+  private activeModeId: GameplayModeId = 'QUIZ';
+  private responsiveLayoutStrategy: ResponsiveLayoutStrategyId = 'round2-quiz';
+  private modeVisualProfile: ModeVisualProfile = { pronunciationFlowEnabled: false };
+  private runtimeState: SceneRuntimeState | null = null;
+  private modeRegistry: ModeRegistry = new ModeRegistry();
+  private modeSystems: ModeSystems | null = null;
+  private modeContext: ModeContext | null = null;
+  private readonly round1Flow: Round1PronunciationFlow;
+  private readonly round2Flow: Round2QuizFlow;
+  private readonly playerControlSystem: PlayerControlSystem;
+  private readonly themeAssetRuntime: ThemeAssetRuntime;
   private blindBoxRoundPhase: 'IDLE' | 'SELECTING' | 'SHOWING' | 'COUNTDOWN' | 'RECORDING' | 'RESULT' = 'IDLE';
   private blindBoxRemainingQuestions: ThemeQuestion[] = [];
   private currentBlindBoxRoundQuestions: ThemeQuestion[] = [];
   private pronunciationResults: PronunciationRoundResult[] = [];
   private blindBoxRoundToken: number = 0;
-  private blindBoxCountdownText: Phaser.GameObjects.Text | null = null;
-  private blindBoxResultText: Phaser.GameObjects.Text | null = null;
+  private blindBoxVolumeContainer: Phaser.GameObjects.Container | null = null;
+  private blindBoxVolumeFrameImage: Phaser.GameObjects.Image | null = null;
+  private blindBoxVolumeFillImage: Phaser.GameObjects.Image | null = null;
+  private blindBoxVolumeFillGraphics: Phaser.GameObjects.Graphics | null = null;
+  private blindBoxVolumeMaskGraphics: Phaser.GameObjects.Graphics | null = null;
+  private blindBoxVolumeFillMask: Phaser.Display.Masks.GeometryMask | null = null;
+  private blindBoxVolumePeakLine: Phaser.GameObjects.Rectangle | null = null;
+  private blindBoxVolumeHeatGlow: Phaser.GameObjects.Ellipse | null = null;
+  private blindBoxVolumeValueText: Phaser.GameObjects.Text | null = null;
+  private blindBoxVolumeSparkEmitter: Phaser.GameObjects.Particles.ParticleEmitter | null = null;
+  private blindBoxVolumeInnerRect:
+    | {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        radius: number;
+      }
+    | null = null;
+  private blindBoxVolumeLevelStage: number = -1;
+  private blindBoxVolumeCurrentLevel: number = 0;
+  private blindBoxVolumePeakLevel: number = 0;
+  private blindBoxVolumePeakHoldUntil: number = 0;
+  private blindBoxVolumeLastUpdateAt: number = 0;
+  private blindBoxVolumeBurstCooldownUntil: number = 0;
+  private blindBoxCurrentVolumePeak: number = 0;
+  private blindBoxRevealImage: Phaser.GameObjects.Image | null = null;
+  private blindBoxRevealShadow: Phaser.GameObjects.Ellipse | null = null;
+  private blindBoxMicHintIcon: Phaser.GameObjects.Image | null = null;
+  private blindBoxMicPulseTween: Phaser.Tweens.Tween | null = null;
+  private blindBoxRevealImageRatio: number = 1;
+  private volumeMonitorStream: MediaStream | null = null;
+  private volumeMonitorAudioContext: AudioContext | null = null;
+  private volumeMonitorSource: MediaStreamAudioSourceNode | null = null;
+  private volumeMonitorAnalyser: AnalyserNode | null = null;
+  private volumeMonitorDataArray: Uint8Array | null = null;
+  private volumeMonitorFrameId: number | null = null;
+  private volumeMonitorLastSampleAt: number = 0;
+  private volumeMonitorStartAt: number = 0;
+  private volumeMonitorNoiseFloor: number = 0.008;
+  private volumeMonitorReferenceLevel: number = 0.032;
+  private volumeMonitorSensitivityBoost: number = 1;
+  private blindBoxMicHintContainer: Phaser.GameObjects.Container | null = null;
+  private blindBoxMicHintText: Phaser.GameObjects.Text | null = null;
+  private pronunciationHudMicVisible: boolean = false;
+  private pronunciationHudVolumeLevel: number = 0;
+  private pronunciationHudCountdownSeconds: number = 0;
+  private pronunciationHudMicAnchorX: number = 0.5;
+  private pronunciationHudMicAnchorY: number = 0.9;
   
   // Input & Lane State
   private targetLaneIndex: number = 1; 
@@ -161,6 +229,10 @@ export class MainScene extends Phaser.Scene {
   private readonly PLAYER_LEAN_LERP = 0.35;
   private readonly MIN_VALID_VIEWPORT_WIDTH = 64;
   private readonly MIN_VALID_VIEWPORT_HEIGHT = 64;
+  private readonly BLIND_BOX_SINGLE_LAYOUT_RATIO = 0.52;
+  private readonly BLIND_BOX_OPTION_COUNT = 3;
+  private readonly BLIND_BOX_VOLUME_MONITOR_FFT_SIZE = 256;
+  private readonly PRONUNCIATION_RECORDING_TIMEOUT_MS = 10000;
 
   declare add: Phaser.GameObjects.GameObjectFactory;
   declare make: Phaser.GameObjects.GameObjectCreator;
@@ -172,6 +244,10 @@ export class MainScene extends Phaser.Scene {
 
   constructor() {
     super({ key: 'MainScene' });
+    this.round1Flow = new Round1PronunciationFlow(this);
+    this.round2Flow = new Round2QuizFlow(this);
+    this.playerControlSystem = new PlayerControlSystem(this);
+    this.themeAssetRuntime = new ThemeAssetRuntime(this);
   }
 
   private isCompressedLandscapeViewport(width: number, height: number): boolean {
@@ -188,6 +264,14 @@ export class MainScene extends Phaser.Scene {
     );
   }
 
+  private getInternalScaleSize(): ViewportSize {
+    const gameSize = this.scale.gameSize;
+    return {
+      width: Math.round(gameSize.width),
+      height: Math.round(gameSize.height)
+    };
+  }
+
   private resolveViewportSize(width: number, height: number): ViewportSize {
     const normalizedWidth = Math.round(width);
     const normalizedHeight = Math.round(height);
@@ -197,15 +281,47 @@ export class MainScene extends Phaser.Scene {
       return { width: normalizedWidth, height: normalizedHeight };
     }
 
+    const registryInternalWidth = this.registry.get('internalWidth');
+    const registryInternalHeight = this.registry.get('internalHeight');
+    if (
+      typeof registryInternalWidth === 'number' &&
+      typeof registryInternalHeight === 'number' &&
+      this.isValidViewportSize(registryInternalWidth, registryInternalHeight)
+    ) {
+      this.stableViewportWidth = Math.round(registryInternalWidth);
+      this.stableViewportHeight = Math.round(registryInternalHeight);
+      return {
+        width: this.stableViewportWidth,
+        height: this.stableViewportHeight
+      };
+    }
+
     const registryCssWidth = this.registry.get('cssWidth');
     const registryCssHeight = this.registry.get('cssHeight');
+    const renderDpr = this.getRenderDpr();
     if (
       typeof registryCssWidth === 'number' &&
       typeof registryCssHeight === 'number' &&
       this.isValidViewportSize(registryCssWidth, registryCssHeight)
     ) {
-      this.stableViewportWidth = Math.round(registryCssWidth);
-      this.stableViewportHeight = Math.round(registryCssHeight);
+      this.stableViewportWidth = Math.round(registryCssWidth * renderDpr);
+      this.stableViewportHeight = Math.round(registryCssHeight * renderDpr);
+      return {
+        width: this.stableViewportWidth,
+        height: this.stableViewportHeight
+      };
+    }
+
+    const visualViewport = window.visualViewport;
+    const fallbackCssWidth = Math.round(
+      visualViewport?.width || window.innerWidth || document.documentElement.clientWidth || 0
+    );
+    const fallbackCssHeight = Math.round(
+      visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0
+    );
+    if (this.isValidViewportSize(fallbackCssWidth, fallbackCssHeight)) {
+      this.stableViewportWidth = Math.round(fallbackCssWidth * renderDpr);
+      this.stableViewportHeight = Math.round(fallbackCssHeight * renderDpr);
       return {
         width: this.stableViewportWidth,
         height: this.stableViewportHeight
@@ -219,7 +335,8 @@ export class MainScene extends Phaser.Scene {
   }
 
   private getCurrentViewportSize(): ViewportSize {
-    return this.resolveViewportSize(this.scale.width, this.scale.height);
+    const internalSize = this.getInternalScaleSize();
+    return this.resolveViewportSize(internalSize.width, internalSize.height);
   }
 
   private updateSceneBounds(width: number, height: number): void {
@@ -245,6 +362,21 @@ export class MainScene extends Phaser.Scene {
       return spacing;
     }
     return Math.max(this.stableViewportWidth * 0.3, 1);
+  }
+
+  public getBlindBoxLayoutForResize(
+    width: number,
+    height: number,
+    imageRatio: number
+  ): { centerX: number; width: number; height: number; imageWidth: number; imageHeight: number } {
+    const layout = this.round1Flow.getBlindBoxLayout(width, height, imageRatio);
+    return {
+      centerX: layout.centerX,
+      width: layout.width,
+      height: layout.height,
+      imageWidth: layout.imageWidth,
+      imageHeight: layout.imageHeight
+    };
   }
 
   private recoverPlayerIfCorrupted(): void {
@@ -292,17 +424,6 @@ export class MainScene extends Phaser.Scene {
     return this.isCompressedLandscapeViewport(width, height) ? 48 * this.gameScale : 60 * this.gameScale;
   }
 
-  private destroyBlindBoxUiText(): void {
-    if (this.blindBoxCountdownText) {
-      this.blindBoxCountdownText.destroy();
-      this.blindBoxCountdownText = null;
-    }
-    if (this.blindBoxResultText) {
-      this.blindBoxResultText.destroy();
-      this.blindBoxResultText = null;
-    }
-  }
-
   private clearResizeStabilizers(): void {
     this.resizeStabilizeTimers.forEach((timer) => {
       if (timer && !timer.hasDispatched) {
@@ -312,20 +433,154 @@ export class MainScene extends Phaser.Scene {
     this.resizeStabilizeTimers = [];
   }
 
+  private getRuntimeCallbacks(): RuntimeCallbackBridge {
+    return this.callbackBridge;
+  }
+
+  private initializeModeRuntime(initialModeId: GameplayModeId): void {
+    const callbacks = this.getRuntimeCallbacks();
+    this.runtimeState = new SceneRuntimeState(initialModeId, callbacks);
+    this.modeSystems = {
+      ui: new SceneUiSystem(this),
+      cards: new CardSystem(this),
+      reward: new RewardSystem(this),
+      pronunciation: new PronunciationSystem(this)
+    };
+    this.modeContext = {
+      scene: this,
+      state: this.runtimeState,
+      systems: this.modeSystems,
+      callbacks
+    };
+    this.modeRegistry = new ModeRegistry();
+    this.modeRegistry.register('BLIND_BOX_PRONUNCIATION', new Round1PronunciationMode());
+    this.modeRegistry.register('QUIZ', new Round2QuizMode());
+    this.activeModeId = initialModeId;
+  }
+
+  private teardownModeRuntime(reason: ModeTransitionReason): void {
+    if (this.modeContext) {
+      this.modeRegistry.shutdown(this.modeContext, reason);
+    }
+    if (this.modeSystems) {
+      this.modeSystems.pronunciation.destroy();
+      this.modeSystems.reward.destroy();
+      this.modeSystems.cards.destroy();
+      this.modeSystems.ui.destroy();
+    }
+    this.modeContext = null;
+    this.modeSystems = null;
+    this.runtimeState = null;
+  }
+
+  public switchMode(nextModeId: GameplayModeId, reason: ModeTransitionReason): void {
+    if (!this.modeContext) {
+      this.activeModeId = nextModeId;
+      this.modeVisualProfile = this.getVisualProfileByMode(nextModeId);
+      return;
+    }
+    const safeFallbackMode: GameplayModeId = 'QUIZ';
+    const resolvedMode = this.modeRegistry.switchMode(
+      this.modeContext,
+      nextModeId,
+      reason,
+      safeFallbackMode
+    );
+    this.activeModeId = resolvedMode;
+  }
+
+  private getLayoutStrategyByMode(modeId: GameplayModeId): ResponsiveLayoutStrategyId {
+    if (modeId === 'BLIND_BOX_PRONUNCIATION') {
+      return 'round1-pronunciation';
+    }
+    return 'round2-quiz';
+  }
+
+  private getVisualProfileByMode(modeId: GameplayModeId): ModeVisualProfile {
+    if (modeId === 'BLIND_BOX_PRONUNCIATION') {
+      return { pronunciationFlowEnabled: true };
+    }
+    return { pronunciationFlowEnabled: false };
+  }
+
+  private isPronunciationFlowEnabled(): boolean {
+    return this.modeVisualProfile.pronunciationFlowEnabled;
+  }
+
+  public setModeVisualProfile(profile: ModeVisualProfile): void {
+    this.modeVisualProfile = profile;
+  }
+
+  public setModeResponsiveLayoutStrategy(strategyId: ResponsiveLayoutStrategyId): void {
+    this.responsiveLayoutStrategy = strategyId;
+  }
+
+  public setLegacyGameplayMode(modeId: GameplayModeId): void {
+    this.activeModeId = modeId;
+    this.responsiveLayoutStrategy = this.getLayoutStrategyByMode(modeId);
+    this.modeVisualProfile = this.getVisualProfileByMode(modeId);
+  }
+
+  public onModeEnter(modeId: GameplayModeId, reason: ModeTransitionReason): void {
+    this.activeModeId = modeId;
+    this.logModeRuntime('mode-enter', { modeId, reason });
+  }
+
+  public onModeExit(modeId: GameplayModeId, reason: ModeTransitionReason): void {
+    this.logModeRuntime('mode-exit', { modeId, reason });
+  }
+
+  public onModeResize(width: number, height: number): void {
+    this.applyResponsiveLayout(width, height);
+  }
+
+  public handleRound1PlayerHitBlock(player: unknown, block: unknown): void {
+    this.round1Flow.hitBlindBox(
+      player as Phaser.Types.Physics.Arcade.GameObjectWithBody,
+      block as Phaser.Types.Physics.Arcade.GameObjectWithBody
+    );
+  }
+
+  public handleRound2PlayerHitBlock(player: unknown, block: unknown): void {
+    this.round2Flow.handlePlayerHitBlock(
+      player as Phaser.Types.Physics.Arcade.GameObjectWithBody,
+      block as Phaser.Types.Physics.Arcade.GameObjectWithBody
+    );
+  }
+
+  public cleanupBlocksForModeSwitch(): void {
+    this.cleanupBlocks();
+  }
+
+  public resetPronunciationModeUi(): void {
+    this.round1Flow.destroyBlindBoxUiText();
+  }
+
+  public logModeRuntime(message: string, extra?: Record<string, unknown>): void {
+    if (extra) {
+      console.info(`[ModeRuntime] ${message}`, extra);
+      return;
+    }
+    console.info(`[ModeRuntime] ${message}`);
+  }
+
   init(data: {
     theme: ThemeId;
     dpr?: number;
   }) {
-    const callbacks = this.registry.get('callbacks') || {};
-    this.onScoreUpdate = callbacks.onScoreUpdate || null;
-    this.onGameOver = callbacks.onGameOver || null;
-    this.onGameRestart = callbacks.onGameRestart || null;
-    this.onQuestionUpdate = callbacks.onQuestionUpdate || null;
-    this.onBackgroundUpdate = callbacks.onBackgroundUpdate || null;
-    this.onPronunciationProgressUpdate = callbacks.onPronunciationProgressUpdate || null;
-    this.onPronunciationComplete = callbacks.onPronunciationComplete || null;
+    const callbacksRaw = this.registry.get('callbacks');
+    if (callbacksRaw && typeof callbacksRaw === 'object') {
+      this.callbackBridge = callbacksRaw as RuntimeCallbackBridge;
+    } else {
+      this.callbackBridge = {};
+    }
+    this.round1Flow.resetPronunciationHudState();
     const registryMode = this.registry.get('gameplayMode');
-    this.sceneMode = registryMode === 'BLIND_BOX_PRONUNCIATION' ? 'BLIND_BOX_PRONUNCIATION' : 'QUIZ';
+    const initialModeId: GameplayModeId =
+      registryMode === 'BLIND_BOX_PRONUNCIATION' ? 'BLIND_BOX_PRONUNCIATION' : 'QUIZ';
+    this.activeModeId = initialModeId;
+    this.modeVisualProfile = this.getVisualProfileByMode(initialModeId);
+    this.initializeModeRuntime(initialModeId);
 
     const initialThemes = this.registry.get('initialThemes');
     const initialTheme = this.registry.get('initialTheme'); // Fallback
@@ -368,16 +623,22 @@ export class MainScene extends Phaser.Scene {
     this.activeCardLayouts = [];
     this.currentThemeUsesPortraitFrames = true;
     this.pronunciationSound = null;
-    this.destroyBlindBoxUiText();
+    this.blindBoxVolumePeakLevel = 0;
+    this.blindBoxVolumePeakHoldUntil = 0;
+    this.blindBoxVolumeLastUpdateAt = 0;
+    this.blindBoxVolumeBurstCooldownUntil = 0;
+    this.volumeMonitorLastSampleAt = 0;
+    this.volumeMonitorStartAt = 0;
+    this.volumeMonitorNoiseFloor = 0.008;
+    this.volumeMonitorReferenceLevel = 0.032;
+    this.blindBoxVolumeInnerRect = null;
+    this.blindBoxVolumeFillImage = null;
+    this.round1Flow.destroyBlindBoxUiText();
     this.clearResizeStabilizers();
     // Randomize background for each level/restart
     this.currentBgIndex = Phaser.Math.Between(0, 6);
     this.wrongAttempts = 0;
 
-    // 每次初始化或重启场景时，重置 React 层的结算状态
-    if (this.onGameRestart) {
-      this.onGameRestart();
-    }
     this.dpr = data.dpr || 1;
     this.lastQuestionWord = '';
     const viewport = this.getCurrentViewportSize();
@@ -385,85 +646,23 @@ export class MainScene extends Phaser.Scene {
   }
 
   private initThemeDataFromCache() {
-    const themeList = this.cache.json.get('themes_list');
-    const themes = themeList?.themes || [];
-    const theme = themes.find((t: Theme) => t.id === this.currentTheme);
-
-    if (!theme) {
-      // 降级方案：如果缓存中没有，尝试重新加载 (虽然理论上 PreloadScene 已经处理了)
-      console.warn(`[MainScene] Theme ${this.currentTheme} not found in cache. Attempting fallback fetch...`);
-      this.loadThemeDataFallback();
-      return;
-    }
-
-    this.setupThemeData(theme);
+    this.themeAssetRuntime.initThemeDataFromCache();
   }
 
   private setupThemeData(theme: Theme) {
     this.themeData = theme;
-    if (this.sceneMode === 'BLIND_BOX_PRONUNCIATION') {
-      this.blindBoxRemainingQuestions = [...this.themeData.questions];
-      Phaser.Utils.Array.Shuffle(this.blindBoxRemainingQuestions);
-      this.currentBlindBoxRoundQuestions = [];
-      this.pronunciationResults = [];
-      this.totalQuestions = this.blindBoxRemainingQuestions.length;
-      this.score = 0;
-      if (this.onScoreUpdate) this.onScoreUpdate(this.score, this.totalQuestions);
-      if (this.onPronunciationProgressUpdate) {
-        this.onPronunciationProgressUpdate(0, this.totalQuestions, 0);
-      }
-      this.time.delayedCall(100, () => {
-        void this.spawnBlindBoxRound();
-      });
-      return;
-    }
-
-    // Store raw question strings to preserve "The"
-    this.themeWordPool = this.themeData.questions.map(q => q.question);
-    this.totalQuestions = this.themeWordPool.length;
-    Phaser.Utils.Array.Shuffle(this.themeWordPool);
-
-    if (this.onScoreUpdate) this.onScoreUpdate(this.score, this.totalQuestions);
-    
-    // 如果之前因为没有数据而无法生成题目，现在尝试生成
-    if (!this.currentQuestion) {
-        this.time.delayedCall(100, () => this.spawnQuestion());
-    }
+    if (!this.modeContext) return;
+    this.modeRegistry.onThemeDataReady(this.modeContext, theme);
   }
 
-  private async loadThemeDataFallback() {
-      try {
-        // 动态引入避免循环依赖
-        const { getThemesListFallbackUrl, getThemesListPrimaryUrl } = await import('@/src/config/r2Config');
-        const fetchThemeList = async (url: string): Promise<ThemeList> => {
-          const response = await fetch(url);
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const data = (await response.json()) as ThemeList;
-          return data;
-        };
+  public setupRound1ThemeData(theme: Theme): void {
+    this.themeData = theme;
+    this.round1Flow.setupThemeData(theme);
+  }
 
-        let themeList: ThemeList;
-        try {
-          themeList = await fetchThemeList(getThemesListPrimaryUrl());
-        } catch (primaryError) {
-          console.warn('[MainScene] CDN themes-list failed, falling back to local', primaryError);
-          themeList = await fetchThemeList(getThemesListFallbackUrl());
-        }
-        // 更新缓存供后续使用
-        this.cache.json.add('themes_list', themeList);
-        
-        // Flatten themes from all levels to find the target theme
-        const allThemes = Object.values(themeList.levels).flatMap(l => l.themes);
-        const theme = allThemes.find((t: Theme) => t.id === this.currentTheme);
-        if (theme) {
-            console.log(`[MainScene] Fallback load successful for ${this.currentTheme}`);
-            this.setupThemeData(theme);
-        } else {
-            console.error(`[MainScene] Theme ${this.currentTheme} still not found after fallback`);
-        }
-      } catch (err) {
-          console.error('[MainScene] Fallback load failed:', err);
-      }
+  public setupRound2ThemeData(theme: Theme): void {
+    this.themeData = theme;
+    this.round2Flow.setupThemeData(theme);
   }
 
   private getScoreHudTarget(): { x: number; y: number } {
@@ -486,26 +685,42 @@ export class MainScene extends Phaser.Scene {
       return fallbackTarget;
     }
 
-    return { x: target.x, y: target.y };
+    const viewport = this.getCurrentViewportSize();
+    const cssWidthRaw = this.registry.get('cssWidth');
+    const cssHeightRaw = this.registry.get('cssHeight');
+    const cssWidth = typeof cssWidthRaw === 'number' && Number.isFinite(cssWidthRaw) && cssWidthRaw > 0
+      ? cssWidthRaw
+      : viewport.width / this.getRenderDpr();
+    const cssHeight = typeof cssHeightRaw === 'number' && Number.isFinite(cssHeightRaw) && cssHeightRaw > 0
+      ? cssHeightRaw
+      : viewport.height / this.getRenderDpr();
+    const scaleX = viewport.width / Math.max(1, cssWidth);
+    const scaleY = viewport.height / Math.max(1, cssHeight);
+
+    return { x: target.x * scaleX, y: target.y * scaleY };
+  }
+
+  public getScoreHudTargetPoint(): { x: number; y: number } {
+    return this.getScoreHudTarget();
+  }
+
+  public applyScoreDelta(delta: number): void {
+    this.score += delta;
+    this.themeScore += delta;
+    if (this.callbackBridge.onScoreUpdate) {
+      this.callbackBridge.onScoreUpdate(this.score, this.totalQuestions);
+    }
+  }
+
+  public getGameScaleValue(): number {
+    return this.gameScale;
+  }
+
+  public getRewardTrailEmitter(): Phaser.GameObjects.Particles.ParticleEmitter | null {
+    return this.rewardTrailEmitter ?? null;
   }
 
   private dpr: number = 1;
-
-  private toQuestionKey(questionText: string): string {
-    return questionText.replace(/^[Tt]he\s+/i, '').replace(/\s+/g, '_').toUpperCase();
-  }
-
-  private getQuestionByAnswerKey(answerKey: string): Theme['questions'][number] | undefined {
-    return this.themeData?.questions.find((questionItem: Theme['questions'][number]) => {
-      return this.toQuestionKey(questionItem.question) === answerKey;
-    });
-  }
-
-  private getImageTextureKeyByAnswer(answerKey: string): string {
-    const questionItem = this.getQuestionByAnswerKey(answerKey);
-    if (!questionItem) return '';
-    return this.getImageTextureKey(questionItem, this.currentTheme);
-  }
 
   private getImageTextureKey(questionItem: Theme['questions'][number], themeId: string): string {
     return `theme_${themeId}_${questionItem.image.replace(/\.(png|jpg|jpeg|webp)$/i, '')}`;
@@ -514,13 +729,6 @@ export class MainScene extends Phaser.Scene {
   private getAudioCacheKey(questionItem: Theme['questions'][number], themeId: string): string {
     if (!questionItem.audio) return '';
     return `theme_audio_${themeId}_${questionItem.audio.replace(/\.(mp3|wav|ogg|m4a)$/i, '')}`;
-  }
-
-  private getQuestionByText(questionText: string): Theme['questions'][number] | undefined {
-    const normalizedText = this.toQuestionKey(questionText);
-    return this.themeData?.questions.find((questionItem: Theme['questions'][number]) => (
-      this.toQuestionKey(questionItem.question) === normalizedText
-    ));
   }
 
   private stopPronunciationSound(restoreBgmVolume = true): void {
@@ -587,21 +795,34 @@ export class MainScene extends Phaser.Scene {
 
   private computeAnswerCardLayouts(answerRatios: number[], sceneWidth: number, sceneHeight: number): AnswerCardLayout[] {
     const fallbackRatios = answerRatios.length === 3 ? answerRatios : [1, 1, 1];
+    const isRound1Pronunciation = this.responsiveLayoutStrategy === 'round1-pronunciation';
     const frameAspectRatio = this.currentThemeUsesPortraitFrames
       ? this.CARD_FRAME_ASPECT_RATIO_PORTRAIT
       : this.CARD_FRAME_ASPECT_RATIO_LANDSCAPE;
 
-    const sidePadding = Math.max(sceneWidth * this.CARD_SIDE_PADDING_RATIO, 36 * this.gameScale);
-    const gap = Math.max(sceneWidth * this.CARD_GAP_RATIO, 20 * this.gameScale);
+    const sidePaddingRatio = isRound1Pronunciation ? Math.max(0.008, this.CARD_SIDE_PADDING_RATIO * 0.24) : this.CARD_SIDE_PADDING_RATIO;
+    const gapRatio = isRound1Pronunciation ? Math.max(0.004, this.CARD_GAP_RATIO * 0.35) : this.CARD_GAP_RATIO;
+    const sidePadding = Math.max(sceneWidth * sidePaddingRatio, 16 * this.gameScale);
+    const gap = Math.max(sceneWidth * gapRatio, 8 * this.gameScale);
     const availableWidth = Math.max(sceneWidth - sidePadding * 2 - gap * 2, sceneWidth * 0.42);
-    const cardWidth = Math.round(availableWidth / 3);
+    const cardWidthByViewport = Math.round(availableWidth / 3);
+    const minRound1CardSize = Math.max(142 * this.gameScale, sceneHeight * (this.isMobileDevice ? 0.19 : 0.21));
+    const maxRound1CardSize = Math.min(
+      cardWidthByViewport,
+      Math.min(sceneHeight * (this.isMobileDevice ? 0.48 : 0.58), 700 * this.gameScale)
+    );
+    const cardWidth = isRound1Pronunciation
+      ? Math.round(Phaser.Math.Clamp(cardWidthByViewport, minRound1CardSize, Math.max(minRound1CardSize, maxRound1CardSize)))
+      : cardWidthByViewport;
     const imageInset = Math.max(2, Math.round(this.CARD_IMAGE_INSET_BASE * this.gameScale));
     const totalWidth = cardWidth * 3 + gap * 2;
     let cursorX = (sceneWidth - totalWidth) / 2;
 
     return fallbackRatios.map((ratio: number, index: number) => {
       const rawRatio = Math.max(0.01, answerRatios[index] ?? ratio);
-      const cardHeight = this.getCardHeightByAspect(cardWidth, frameAspectRatio, sceneHeight);
+      const cardHeight = isRound1Pronunciation
+        ? cardWidth
+        : this.getCardHeightByAspect(cardWidth, frameAspectRatio, sceneHeight);
       const centerX = Math.round(cursorX + cardWidth / 2);
       cursorX += cardWidth + gap;
 
@@ -617,15 +838,43 @@ export class MainScene extends Phaser.Scene {
   }
 
   private constrainCardLayout(layout: AnswerCardLayout, sceneWidth: number, sceneHeight: number): AnswerCardLayout {
-    const sidePadding = Math.max(sceneWidth * this.CARD_SIDE_PADDING_RATIO, 36 * this.gameScale);
-    const gap = Math.max(sceneWidth * this.CARD_GAP_RATIO, 20 * this.gameScale);
+    const isRound1Pronunciation = this.responsiveLayoutStrategy === 'round1-pronunciation';
+    const sidePaddingRatio = isRound1Pronunciation ? Math.max(0.008, this.CARD_SIDE_PADDING_RATIO * 0.24) : this.CARD_SIDE_PADDING_RATIO;
+    const gapRatio = isRound1Pronunciation ? Math.max(0.004, this.CARD_GAP_RATIO * 0.35) : this.CARD_GAP_RATIO;
+    const sidePadding = Math.max(sceneWidth * sidePaddingRatio, 16 * this.gameScale);
+    const gap = Math.max(sceneWidth * gapRatio, 8 * this.gameScale);
     const availableWidth = Math.max(sceneWidth - sidePadding * 2 - gap * 2, sceneWidth * 0.42);
     const maxCardWidth = Math.round(availableWidth / 3);
+    const imageInset = Math.max(2, Math.round(this.CARD_IMAGE_INSET_BASE * this.gameScale));
+    if (isRound1Pronunciation) {
+      const minRound1CardSize = Math.max(142 * this.gameScale, sceneHeight * (this.isMobileDevice ? 0.19 : 0.21));
+      const maxRound1CardSize = Math.min(
+        maxCardWidth,
+        Math.min(sceneHeight * (this.isMobileDevice ? 0.48 : 0.58), 700 * this.gameScale)
+      );
+      const rawCardSize = Math.round(Math.max(layout.cardWidth, layout.cardHeight));
+      const safeCardSize = Math.max(
+        1,
+        Math.round(
+          Phaser.Math.Clamp(
+            rawCardSize,
+            minRound1CardSize,
+            Math.max(minRound1CardSize, maxRound1CardSize)
+          )
+        )
+      );
+      return {
+        ...layout,
+        cardWidth: safeCardSize,
+        cardHeight: safeCardSize,
+        iconWidth: Math.max(1, Math.round(safeCardSize - imageInset * 2)),
+        iconHeight: Math.max(1, Math.round(safeCardSize - imageInset * 2))
+      };
+    }
     const frameAspectRatio = this.currentThemeUsesPortraitFrames
       ? this.CARD_FRAME_ASPECT_RATIO_PORTRAIT
       : this.CARD_FRAME_ASPECT_RATIO_LANDSCAPE;
     const maxCardHeight = this.getCardHeightByAspect(maxCardWidth, frameAspectRatio, sceneHeight);
-    const imageInset = Math.max(2, Math.round(this.CARD_IMAGE_INSET_BASE * this.gameScale));
 
     const safeCardWidth = Math.max(1, Math.min(Math.round(layout.cardWidth), maxCardWidth));
     const safeCardHeight = Math.max(1, Math.min(Math.round(layout.cardHeight), maxCardHeight));
@@ -671,8 +920,10 @@ export class MainScene extends Phaser.Scene {
   }
 
   private forceDestroyAllBlockVisuals(): void {
-    if (!this.blocks) return;
-    this.blocks.children.iterate((b: any) => {
+    const blocks = this.blocks;
+    const blockChildren = blocks?.children;
+    if (!blocks || !blockChildren || typeof blockChildren.iterate !== 'function') return;
+    blockChildren.iterate((b: any) => {
       if (!b) return true;
       const visuals = b.getData('visuals') as Phaser.GameObjects.Container | undefined;
       this.destroyBlockVisual(visuals);
@@ -934,152 +1185,14 @@ export class MainScene extends Phaser.Scene {
   }
 
   private async loadThemeImages(themeId?: string) {
-    const targetThemeId = themeId || this.currentTheme;
-    const isCurrentTheme = targetThemeId === this.currentTheme;
-
-    // 如果已经在加载，返回现有的 promise
-    if (isCurrentTheme && this.loadingPromise) {
-      return this.loadingPromise;
-    }
-
-    // 如果已经加载完成，就直接返回
-    if (isCurrentTheme && this.imagesLoaded) {
-      return Promise.resolve();
-    }
-
-    const themesList = this.cache.json.get('themes_list');
-    if (!themesList) {
-      console.warn('[loadThemeImages] Themes list not loaded yet');
-      return Promise.resolve();
-    }
-    const themes = themesList.themes || [];
-    
-    // 获取目标主题
-    const targetTheme = themes.find((t: Theme) => t.id === targetThemeId);
-    if (!targetTheme) {
-      console.warn(`[loadThemeImages] Theme ${targetThemeId} not found`);
-      return Promise.resolve();
-    }
-    
-    // --- Load Theme Assets ---
-    // NO-OP: All theme assets are now guaranteed to be loaded by PreloadScene
-    // We just check if they are missing as a safety net, but we don't block
-    
-    const missingImageQuestions = targetTheme.questions.filter((questionItem: Theme['questions'][number]) => {
-        const key = this.getImageTextureKey(questionItem, targetThemeId);
-        return !this.textures.exists(key);
-    });
-    const missingAudioQuestions = targetTheme.questions.filter((questionItem: Theme['questions'][number]) => {
-        if (!questionItem.audio) return false;
-        const key = this.getAudioCacheKey(questionItem, targetThemeId);
-        return !this.cache.audio.exists(key);
-    });
-
-    if (missingImageQuestions.length > 0) {
-        console.warn(
-          `[MainScene] Missing ${missingImageQuestions.length} textures for ${targetThemeId}, loading fallback...`
-        );
-        const { getR2ImageUrl } = await import('@/src/config/r2Config');
-        missingImageQuestions.forEach((questionItem: Theme['questions'][number]) => {
-            const imageName = questionItem.image.replace(/\.(png|jpg|jpeg)$/i, '.webp');
-            const imagePath = getR2ImageUrl(imageName);
-            const key = this.getImageTextureKey(questionItem, targetThemeId);
-            if (!this.textures.exists(key)) {
-                this.load.image(key, imagePath);
-            }
-        });
-
-        if (isCurrentTheme) {
-          this.imagesLoading = true;
-        }
-
-        const loadPromise = new Promise<void>((resolve) => {
-            this.load.once('complete', () => {
-                if (isCurrentTheme) {
-                  this.imagesLoading = false;
-                  this.imagesLoaded = true;
-                  this.loadingPromise = null;
-                }
-                resolve();
-            });
-            this.load.start();
-        });
-        if (isCurrentTheme) {
-          this.loadingPromise = loadPromise;
-        }
-        if (missingAudioQuestions.length > 0) {
-          this.preloadThemeAudiosInBackground(targetThemeId, missingAudioQuestions);
-        }
-        return loadPromise;
-    }
-
-    if (isCurrentTheme) {
-      this.imagesLoading = false;
-      this.imagesLoaded = true;
-      this.loadingPromise = null;
-    }
-    if (missingAudioQuestions.length > 0) {
-      this.preloadThemeAudiosInBackground(targetThemeId, missingAudioQuestions);
-    }
-    return Promise.resolve();
-  }
-
-  private preloadThemeAudiosInBackground(
-    themeId: string,
-    audioQuestions: Array<Theme['questions'][number]>
-  ): void {
-    if (!audioQuestions || audioQuestions.length === 0) return;
-    void (async () => {
-      const { getR2ImageUrl } = await import('@/src/config/r2Config');
-      let queuedAudioCount = 0;
-      audioQuestions.forEach((questionItem: Theme['questions'][number]) => {
-        if (!questionItem.audio) return;
-        const audioKey = this.getAudioCacheKey(questionItem, themeId);
-        if (!audioKey || this.cache.audio.exists(audioKey)) return;
-        const audioPath = getR2ImageUrl(questionItem.audio);
-        this.load.audio(audioKey, audioPath);
-        queuedAudioCount += 1;
-      });
-      if (queuedAudioCount === 0) return;
-      console.log(`[MainScene] Background loading ${queuedAudioCount} theme audios for ${themeId}`);
-      if (!this.load.isLoading()) {
-        this.load.start();
-      }
-    })().catch((error: unknown) => {
-      console.warn('[MainScene] Failed to queue background audio preload', error);
-    });
+    await this.themeAssetRuntime.loadThemeImages(themeId);
   }
 
   /**
    * 预加载下一个主题的图片 (后台执行)
    */
   private async preloadNextTheme() {
-    try {
-      let nextThemeId = '';
-      
-      if (this.currentThemes.length > 0) {
-        if (this.currentThemeIndex >= this.currentThemes.length - 1) {
-          return;
-        }
-        const nextIndex = this.currentThemeIndex + 1;
-        nextThemeId = this.currentThemes[nextIndex];
-      } else {
-         const themesList = this.cache.json.get('themes_list');
-         if (!themesList) return;
-         const themes = themesList.themes || [];
-         const currentIndex = themes.findIndex((t: Theme) => t.id === this.currentTheme);
-         if (currentIndex === -1 || currentIndex >= themes.length - 1) return;
-         const nextIndex = currentIndex + 1;
-         nextThemeId = themes[nextIndex].id;
-      }
-      
-      console.log(`[preloadNextTheme] Starting background preload for: ${nextThemeId}`);
-      
-      // Prioritize this theme in the global queue (browser cache warmup)
-      prioritizeThemeInQueue(nextThemeId);
-    } catch (err) {
-      console.warn('[preloadNextTheme] Error:', err);
-    }
+    await this.themeAssetRuntime.preloadNextTheme();
   }
 
   create() {
@@ -1087,6 +1200,15 @@ export class MainScene extends Phaser.Scene {
     
     // PAUSE background preloading when gameplay starts to save CPU/Bandwidth
     pauseBackgroundPreloading();
+    try {
+      this.switchMode(this.activeModeId, 'scene-init');
+    } catch (error) {
+      this.logModeRuntime('mode-init-failed', {
+        modeId: this.activeModeId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      this.switchMode('QUIZ', 'fallback');
+    }
 
     this.initThemeDataFromCache();
     
@@ -1175,20 +1297,27 @@ export class MainScene extends Phaser.Scene {
       this.clearResizeStabilizers();
       this.scale.off('resize', this.handleResize, this);
       this.blindBoxRoundToken += 1;
-      this.destroyBlindBoxUiText();
+      this.teardownModeRuntime('shutdown');
+      this.round1Flow.destroyBlindBoxUiText();
       this.stopPronunciationSound(true);
     });
     this.events.once('destroy', () => {
       this.clearResizeStabilizers();
       this.scale.off('resize', this.handleResize, this);
       this.blindBoxRoundToken += 1;
-      this.destroyBlindBoxUiText();
+      this.teardownModeRuntime('destroy');
+      this.round1Flow.destroyBlindBoxUiText();
       this.stopPronunciationSound(true);
     });
 
     this.physics.add.collider(this.player, platforms);
     this.physics.add.overlap(this.player, this.blocks, this.hitBlock, undefined, this);
     this.applyResponsiveLayout(width, height);
+    // Force one post-create resize pass. On iPad Edge we may receive a transient
+    // viewport during scene create and not get another resize event immediately.
+    // Re-running the resize pipeline here guarantees round1 layout uses the final
+    // internal coordinate space.
+    this.handleResize(this.scale.gameSize);
 
     // 预创建小蜜蜂飞行动画 (移到 create 中)
     if (!this.anims.exists('bee_fly')) {
@@ -1203,7 +1332,7 @@ export class MainScene extends Phaser.Scene {
         });
     }
 
-    this.add.particles(0, 0, 'particle_gold', {
+    this.playerTrailEmitter = this.add.particles(0, 0, 'particle_gold', {
         speed: { min: 50, max: 150 },
         scale: { start: 0.8, end: 0 },
         alpha: { start: 0.8, end: 0 },
@@ -1274,8 +1403,8 @@ export class MainScene extends Phaser.Scene {
     // });
 
     // Sync initial background to React UI
-    if (this.onBackgroundUpdate) {
-        this.onBackgroundUpdate(this.currentBgIndex);
+    if (this.callbackBridge.onBackgroundUpdate) {
+        this.callbackBridge.onBackgroundUpdate(this.currentBgIndex);
     }
   }
 
@@ -1287,16 +1416,11 @@ export class MainScene extends Phaser.Scene {
       this.recalcLayout(safeWidth, safeHeight);
       this.updateSceneBounds(safeWidth, safeHeight);
 
-      if (this.currentAnswerRatios.length === 3) {
-          this.activeCardLayouts = this.computeAnswerCardLayouts(this.currentAnswerRatios, safeWidth, safeHeight);
-          this.LANE_X_POSITIONS = this.activeCardLayouts.map((layout) => layout.centerX);
-          if (this.activeCardLayouts.length > 0) {
-              this.updateJumpVelocityByCardHeight(this.getMaxCardHeight(this.activeCardLayouts));
-          }
-      } else {
-          this.activeCardLayouts = [];
-          this.LANE_X_POSITIONS = [safeWidth * 0.20, safeWidth * 0.5, safeWidth * 0.80];
-      }
+      this.modeSystems?.cards.applyResponsiveAnswerLayouts(
+        this.responsiveLayoutStrategy,
+        safeWidth,
+        safeHeight
+      );
       this.targetLaneIndex = Phaser.Math.Clamp(this.targetLaneIndex, 0, Math.max(0, this.LANE_X_POSITIONS.length - 1));
 
       // 1. 更新地面位置
@@ -1337,80 +1461,21 @@ export class MainScene extends Phaser.Scene {
           this.recoverPlayerIfCorrupted();
       }
 
-      // 3. 更新答案块
-      if (this.blocks) {
-          this.blocks.children.iterate((b: any) => {
-              if (!b || !b.active) return true;
-              if (b.getData('isCleaningUp')) return true;
+      this.modeSystems?.cards.relayoutBlocks(safeWidth, safeHeight);
 
-              const answerIndex = b.getData('answerIndex');
-              const visuals = b.getData('visuals') as Phaser.GameObjects.Container | undefined;
+      this.modeSystems?.ui.syncBeeLayout(safeWidth, safeHeight);
 
-              if (typeof answerIndex === 'number' && this.activeCardLayouts[answerIndex]) {
-                  const layout = this.activeCardLayouts[answerIndex];
-                  this.applyBlockVisualLayout(b, visuals, layout);
-                  return true;
-              }
-
-              const optionId = b.getData('optionId') as string | undefined;
-              if (optionId) {
-                  const optionX = optionId === 'retry' ? this.getLaneXPosition(0) : this.getLaneXPosition(2);
-                  const optionSize = 240 * this.gameScale;
-                  b.x = optionX;
-                  b.y = this.blockCenterY;
-                  b.setDisplaySize(optionSize, optionSize);
-                  b.refreshBody();
-
-                  if (visuals) {
-                      visuals.x = optionX;
-                      visuals.y = this.blockCenterY;
-                      const bubble = visuals.list[0] as Phaser.GameObjects.Image | undefined;
-                      const icon = visuals.list[1] as Phaser.GameObjects.Image | undefined;
-                      if (bubble) bubble.setDisplaySize(optionSize, optionSize);
-                      if (icon) {
-                          const iconSize = optionSize * 0.5;
-                          icon.setDisplaySize(iconSize, iconSize);
-                      }
-                  }
-              }
-              return true;
-          });
-      }
-
-      // 4. 更新蜜蜂位置
-      if (this.beeContainer && this.beeContainer.active) {
-          this.beeContainer.x = safeWidth / 2;
-          this.beeContainer.y = this.beeCenterY;
-
-          const visualBeeSize = 80 * this.gameScale;
-          const fontSize = Math.round(38 * this.gameScale);
-          const textOffsetY = this.getBeeTextOffsetY(safeWidth, safeHeight);
-
-          if (this.beeSprite) {
-              this.beeSprite.setDisplaySize(visualBeeSize, visualBeeSize);
-          }
-          if (this.beeWordText) {
-              this.beeWordText.setFontSize(`${fontSize}px`);
-              this.beeWordText.y = textOffsetY;
-          }
-      }
-
-      if (this.blindBoxCountdownText && this.blindBoxCountdownText.active) {
-          this.blindBoxCountdownText.setPosition(safeWidth / 2, safeHeight * 0.2);
-      }
-      if (this.blindBoxResultText && this.blindBoxResultText.active) {
-          this.blindBoxResultText.setPosition(safeWidth / 2, safeHeight * 0.22);
-      }
+      this.round1Flow.onSceneResize();
   }
 
   handleResize(_gameSize: Phaser.Structs.Size) {
-      // Always read the latest scale dimensions instead of using the gameSize
-      // parameter directly. During adaptive quality changes, setZoom() and
-      // resize() fire separate resize events — the first may carry stale
-      // dimensions that don't match the current zoom, causing layout overflow.
-      const currentWidth = Math.round(this.scale.width);
-      const currentHeight = Math.round(this.scale.height);
-      this.applyResponsiveLayout(currentWidth, currentHeight);
+      // Always resolve from the latest internal game size. Layout coordinates
+      // are in world space, and world space follows scale.gameSize.
+      const currentInternalSize = this.getInternalScaleSize();
+      const currentWidth = currentInternalSize.width;
+      const currentHeight = currentInternalSize.height;
+      if (!this.modeContext) return;
+      this.modeRegistry.onResize(this.modeContext, currentWidth, currentHeight);
 
       // iPad/Safari 在退出全屏时会先抛出一次过渡尺寸，随后才稳定。
       // 追加两次短延迟重排，读取最新 scale 尺寸，避免偶发布局错位。
@@ -1419,1086 +1484,34 @@ export class MainScene extends Phaser.Scene {
       settleDelays.forEach((delayMs) => {
           const timer = this.time.delayedCall(delayMs, () => {
               if (!this.scene.isActive()) return;
-              const stableWidth = Math.round(this.scale.width);
-              const stableHeight = Math.round(this.scale.height);
-              this.applyResponsiveLayout(stableWidth, stableHeight);
+              const stableInternalSize = this.getInternalScaleSize();
+              const stableWidth = stableInternalSize.width;
+              const stableHeight = stableInternalSize.height;
+              if (!this.modeContext) return;
+              this.modeRegistry.onResize(this.modeContext, stableWidth, stableHeight);
           });
           this.resizeStabilizeTimers.push(timer);
       });
   }
   
-  private getHysteresisLane(bodyX: number, currentLaneIndex: number): number {
-    if (currentLaneIndex === 0) {
-      // Currently in Left Lane. To leave (go to Center), must cross POS_FROM_LEFT
-      return bodyX > this.POS_FROM_LEFT ? 1 : 0;
-    }
-    if (currentLaneIndex === 2) {
-      // Currently in Right Lane. To leave (go to Center), must cross POS_FROM_RIGHT
-      return bodyX < this.POS_FROM_RIGHT ? 1 : 2;
-    }
-    
-    // Currently in Center Lane (1)
-    if (bodyX < this.POS_TO_LEFT) return 0;  // Go Left
-    if (bodyX > this.POS_TO_RIGHT) return 2; // Go Right
-    return 1; // Stay Center
+  public runLegacyUpdateLoop(_time: number, _delta: number): void {
+    void _time;
+    void _delta;
+    this.playerControlSystem.update();
   }
 
-  update() {
-    if (!this.player || !this.player.body) return;
-    this.recoverPlayerIfCorrupted();
-    this.stabilizePlayerOnFloor();
-
-    const body = this.player.body as Phaser.Physics.Arcade.Body;
-    const nearFloor = Math.abs(this.player.y - this.floorSurfaceY) <= Math.max(1.5, 4 * this.gameScale);
-    const isSlowVertical = Math.abs(body.velocity.y) <= this.getScaledPhysicsValue(30);
-    const isOnGround =
-      body.touching.down ||
-      body.blocked.down ||
-      body.wasTouching.down ||
-      (nearFloor && isSlowVertical);
-
-    const motionState = motionController.state;
-    if (isOnGround) {
-        // Use smoothed state for movement logic to prevent jitter/lag
-        // Fallback to raw state if smoothedState is not available yet
-        const effectiveState = motionController.smoothedState || motionState;
-        
-        const bodyX = Phaser.Math.Clamp(
-          typeof effectiveState.bodyX === 'number' ? effectiveState.bodyX : (1 - effectiveState.rawNoseX),
-          0,
-          1
-        );
-
-        // --- Step-based Movement Logic ---
-        // Only allow 1 step at a time. Must return to "neutral zone" before moving again.
-        
-        // Positional Control Logic (Absolute Mapping)
-        // Directly maps body position to target lane with hysteresis
-        // This solves the "locking" issue where user moves "too far" and gets stuck waiting for reset
-        
-        const newLane = this.getHysteresisLane(bodyX, this.targetLaneIndex);
-        this.targetLaneIndex = newLane;
-        
-        // Smooth visual movement
-        const targetX = this.getLaneXPosition(this.targetLaneIndex);
-        this.player.x = Phaser.Math.Linear(this.player.x, targetX, 0.28);
-        
-        if (this.player.anims.currentAnim?.key !== 'p1_walk') {
-            this.player.play('p1_walk', true);
-        }
- 
-        // Use smoothed jump state too? No, jump is an event, use immediate state but with latching in controller
-        // Actually, we should check if jump was triggered in the last few frames if we missed it
-        if (effectiveState.isJumping && this.isInteractionActive) {
-            this.player.setVelocityY(-this.jumpVelocity); 
-            this.player.setTexture('p1_jump');
-            this.player.anims.stop();
-            this.jumpSound.play();
-            this.jumpBurstEmitter.emitParticleAt(this.player.x, this.player.y, 1); 
-            this.jumpBurstEmitter.explode(20, this.player.x, this.player.y);
-        }
-    } else {
-        if (body.velocity.y > 0) {
-            this.player.setTexture('p1_stand');
-        }
-    }
-
-    this.player.setVelocityX(0);
-
-    const targetXForAngle = this.getLaneXPosition(this.targetLaneIndex);
-    const diff = targetXForAngle - this.player.x;
-    const laneSpacing = this.getLaneSpacing();
-    const normalizedDiff = Phaser.Math.Clamp(diff / Math.max(laneSpacing, 1), -1, 1);
-    const targetLeanAngle = normalizedDiff * this.PLAYER_MAX_LEAN_ANGLE;
-    const nextLeanAngle = Phaser.Math.Linear(this.player.angle, targetLeanAngle, this.PLAYER_LEAN_LERP);
-    this.player.setAngle(nextLeanAngle);
-
-    // 控制器备份 (键盘支持)
-    const cursors = this.input.keyboard?.createCursorKeys();
-    if (cursors) {
-        if (Phaser.Input.Keyboard.JustDown(cursors.left)) {
-            this.targetLaneIndex = Math.max(0, this.targetLaneIndex - 1);
-        } else if (Phaser.Input.Keyboard.JustDown(cursors.right)) {
-            this.targetLaneIndex = Math.min(2, this.targetLaneIndex + 1);
-        }
-        if ((Phaser.Input.Keyboard.JustDown(cursors.up) || Phaser.Input.Keyboard.JustDown(cursors.space)) && isOnGround) {
-            this.player.setVelocityY(-this.jumpVelocity); 
-            this.player.setTexture('p1_jump');
-            this.player.anims.stop();
-            this.jumpSound.play();
-            this.jumpBurstEmitter.explode(20, this.player.x, this.player.y);
-        }
-    }
+  update(time: number, delta: number): void {
+    if (!this.modeContext) return;
+    this.modeRegistry.update(this.modeContext, time, delta);
   }
 
-  speak(text: string) {
-      const questionItem = this.getQuestionByText(text);
-      const audioKey = questionItem ? this.getAudioCacheKey(questionItem, this.currentTheme) : '';
-      if (!audioKey) {
-          console.warn(`[MainScene] Missing audio mapping for question: ${text}`);
-          return;
-      }
-      if (!this.cache.audio.exists(audioKey)) {
-          console.warn(`[MainScene] Audio cache missing: ${audioKey}`);
-          return;
-      }
-
-      if (window.setBGMVolume) {
-          window.setBGMVolume(0);
-      }
-      this.stopPronunciationSound(false);
-
-      try {
-          const sound = this.sound.add(audioKey);
-          this.pronunciationSound = sound;
-
-          sound.once('complete', () => {
-              if (this.pronunciationSound === sound) {
-                  this.pronunciationSound = null;
-              }
-              sound.destroy();
-              window.restoreBGMVolume?.();
-          });
-          sound.once('destroy', () => {
-              if (this.pronunciationSound === sound) {
-                  this.pronunciationSound = null;
-              }
-          });
-
-          const played = sound.play({ volume: this.PRONUNCIATION_VOLUME });
-          if (!played) {
-              sound.destroy();
-              this.pronunciationSound = null;
-              window.restoreBGMVolume?.();
-          }
-      } catch (error) {
-          console.warn('[MainScene] Failed to play question audio', error);
-          this.stopPronunciationSound(true);
-      }
+  public getPronunciationSummarySnapshot(): PronunciationSummary {
+    return this.round1Flow.getPronunciationSummarySnapshot();
   }
 
-  generateWordQuestion(): QuestionData | null {
-    if (this.themeWordPool.length === 0) {
-        return null;
-    }
-
-    const themeWords = this.themeData ? this.themeData.questions.map(q => this.toQuestionKey(q.question)) : [];
-
-    // 从池子中选一个和上次不一样的单词
-    let selectedIndex = -1;
-    for (let i = 0; i < this.themeWordPool.length; i++) {
-        if (this.themeWordPool[i] !== this.lastQuestionWord) {
-            selectedIndex = i;
-            break;
-        }
-    }
-
-    // 如果没找到不一样的（极端情况，池子里剩下的都是一样的），就选第一个
-    if (selectedIndex === -1) selectedIndex = 0;
-
-    const correctRawWord = this.themeWordPool.splice(selectedIndex, 1)[0];
-    this.lastQuestionWord = correctRawWord;
-
-    const correctKey = this.toQuestionKey(correctRawWord);
-
-    // 干扰项从该主题的所有单词中选
-    let distractors = themeWords.filter(w => w !== correctKey);
-    distractors = Phaser.Utils.Array.Shuffle(distractors).slice(0, 2);
-    
-    const answers = [correctKey, ...distractors]
-        .map(value => ({ value, sort: Math.random() }))
-        .sort((a, b) => a.sort - b.sort)
-        .map(({ value }) => value);
-
-    return { 
-        question: correctRawWord, 
-        answers, 
-        correctIndex: answers.indexOf(correctKey)
-    };
-  }
-
-  private getBlindBoxRoundQuestions(): ThemeQuestion[] {
-    if (this.blindBoxRemainingQuestions.length <= 3) {
-      return [...this.blindBoxRemainingQuestions];
-    }
-    const pool = [...this.blindBoxRemainingQuestions];
-    Phaser.Utils.Array.Shuffle(pool);
-    return pool.slice(0, 3);
-  }
-
-  private removeBlindBoxQuestionFromRemaining(selected: ThemeQuestion): void {
-    const index = this.blindBoxRemainingQuestions.findIndex((questionItem: ThemeQuestion) => (
-      questionItem === selected ||
-      (
-        questionItem.question === selected.question &&
-        questionItem.image === selected.image &&
-        questionItem.audio === selected.audio
-      )
-    ));
-    if (index >= 0) {
-      this.blindBoxRemainingQuestions.splice(index, 1);
-    }
-  }
-
-  private getPronunciationAverageScore(): number {
-    if (this.pronunciationResults.length === 0) return 0;
-    const sum = this.pronunciationResults.reduce((acc: number, item: PronunciationRoundResult) => acc + item.score, 0);
-    return Math.round(sum / this.pronunciationResults.length);
-  }
-
-  private buildPronunciationSummary(): PronunciationSummary {
-    if (this.pronunciationResults.length === 0) {
-      return {
-        average: 0,
-        min: 0,
-        max: 0,
-        completed: 0,
-        total: this.totalQuestions
-      };
-    }
-    const scores = this.pronunciationResults.map((item: PronunciationRoundResult) => item.score);
-    return {
-      average: this.getPronunciationAverageScore(),
-      min: Math.min(...scores),
-      max: Math.max(...scores),
-      completed: this.pronunciationResults.length,
-      total: this.totalQuestions
-    };
-  }
-
-  private waitForDelay(delayMs: number): Promise<void> {
-    return new Promise((resolve) => {
-      this.time.delayedCall(delayMs, () => resolve());
-    });
-  }
-
-  private isActiveBlindBoxToken(roundToken: number): boolean {
-    return this.scene.isActive() && roundToken === this.blindBoxRoundToken;
-  }
-
-  private ensureBlindBoxCountdownLabel(): Phaser.GameObjects.Text {
-    if (this.blindBoxCountdownText && this.blindBoxCountdownText.active) {
-      return this.blindBoxCountdownText;
-    }
-    const viewport = this.getCurrentViewportSize();
-    this.blindBoxCountdownText = this.add.text(viewport.width / 2, viewport.height * 0.2, '', {
-      fontFamily: FONT_STACK,
-      fontSize: `${Math.max(42, Math.round(96 * this.gameScale))}px`,
-      fontStyle: '900',
-      color: '#ffffff',
-      stroke: '#222222',
-      strokeThickness: Math.max(4, Math.round(10 * this.gameScale))
-    }).setOrigin(0.5).setDepth(1500).setVisible(false);
-    return this.blindBoxCountdownText;
-  }
-
-  private ensureBlindBoxResultLabel(): Phaser.GameObjects.Text {
-    if (this.blindBoxResultText && this.blindBoxResultText.active) {
-      return this.blindBoxResultText;
-    }
-    const viewport = this.getCurrentViewportSize();
-    this.blindBoxResultText = this.add.text(viewport.width / 2, viewport.height * 0.22, '', {
-      fontFamily: FONT_STACK,
-      fontSize: `${Math.max(24, Math.round(52 * this.gameScale))}px`,
-      fontStyle: '900',
-      color: '#FFD700',
-      stroke: '#222222',
-      strokeThickness: Math.max(3, Math.round(8 * this.gameScale)),
-      align: 'center'
-    }).setOrigin(0.5).setDepth(1500).setVisible(false);
-    return this.blindBoxResultText;
-  }
-
-  private async runBlindBoxCountdown(roundToken: number): Promise<boolean> {
-    const label = this.ensureBlindBoxCountdownLabel();
-    this.blindBoxRoundPhase = 'COUNTDOWN';
-    label.setVisible(true);
-    label.setAlpha(1);
-    const steps = ['3', '2', '1'];
-    for (const step of steps) {
-      if (!this.isActiveBlindBoxToken(roundToken)) return false;
-      label.setText(step);
-      label.setScale(1.2);
-      this.tweens.add({
-        targets: label,
-        scaleX: 1,
-        scaleY: 1,
-        duration: 260,
-        ease: 'Back.easeOut'
-      });
-      await this.waitForDelay(700);
-    }
-    label.setVisible(false);
-    return this.isActiveBlindBoxToken(roundToken);
-  }
-
-  private async speakWithSpeechSynthesis(text: string): Promise<void> {
-    if (typeof window === 'undefined' || typeof window.speechSynthesis === 'undefined' || typeof SpeechSynthesisUtterance === 'undefined') {
-      return;
-    }
-
-    await new Promise<void>((resolve) => {
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = 'en-US';
-      utterance.rate = 0.95;
-      utterance.pitch = 1;
-      let resolved = false;
-      const finish = (): void => {
-        if (resolved) return;
-        resolved = true;
-        resolve();
-      };
-      utterance.onend = () => finish();
-      utterance.onerror = () => finish();
-      try {
-        window.speechSynthesis.cancel();
-        window.speechSynthesis.speak(utterance);
-        window.setTimeout(finish, 5000);
-      } catch (error) {
-        console.warn('[Pronounce] speechSynthesis fallback failed:', error);
-        finish();
-      }
-    });
-  }
-
-  private async playQuestionAudioByItem(questionItem: ThemeQuestion): Promise<void> {
-    const audioKey = this.getAudioCacheKey(questionItem, this.currentTheme);
-    if (window.setBGMVolume) {
-      window.setBGMVolume(0);
-    }
-
-    if (audioKey && this.cache.audio.exists(audioKey)) {
-      this.stopPronunciationSound(false);
-      await new Promise<void>((resolve) => {
-        try {
-          const sound = this.sound.add(audioKey);
-          this.pronunciationSound = sound;
-
-          const finalize = (): void => {
-            if (this.pronunciationSound === sound) {
-              this.pronunciationSound = null;
-            }
-            sound.destroy();
-            resolve();
-          };
-
-          sound.once('complete', finalize);
-          sound.once('destroy', () => {
-            if (this.pronunciationSound === sound) {
-              this.pronunciationSound = null;
-            }
-          });
-
-          const played = sound.play({ volume: this.PRONUNCIATION_VOLUME });
-          if (!played) {
-            finalize();
-          }
-        } catch (error) {
-          console.warn('[Pronounce] Failed to play question audio, fallback to speech synthesis.', error);
-          resolve();
-        }
-      });
-      window.restoreBGMVolume?.();
-      return;
-    }
-
-    console.warn(`[Pronounce] Audio missing for "${questionItem.question}", using speech synthesis fallback.`);
-    await this.speakWithSpeechSynthesis(questionItem.question);
-    window.restoreBGMVolume?.();
-  }
-
-  private async spawnBlindBoxRound(): Promise<void> {
-    if (this.sceneMode !== 'BLIND_BOX_PRONUNCIATION') return;
-    const roundToken = ++this.blindBoxRoundToken;
-    this.isInteractionActive = false;
-    this.blindBoxRoundPhase = 'SELECTING';
-    this.destroyBlindBoxUiText();
-
-    if (!this.imagesLoaded) {
-      await this.loadThemeImages();
-      if (!this.isActiveBlindBoxToken(roundToken)) return;
-    }
-
-    if (!this.hasPreloadedNext) {
-      this.hasPreloadedNext = true;
-      this.preloadNextTheme();
-    }
-
-    if (this.blindBoxRemainingQuestions.length === 0) {
-      this.currentBlindBoxRoundQuestions = [];
-      this.currentQuestion = null;
-      await this.showThemeCompletion();
-      return;
-    }
-
-    this.currentBlindBoxRoundQuestions = this.getBlindBoxRoundQuestions();
-    if (this.currentBlindBoxRoundQuestions.length === 0) {
-      await this.showThemeCompletion();
-      return;
-    }
-
-    if (this.onQuestionUpdate) {
-      this.onQuestionUpdate('选择一个盲盒');
-    }
-
-    this.forceDestroyAllBlockVisuals();
-    this.blocks.clear(true, true);
-    if (this.beeContainer && this.beeContainer.active) {
-      this.beeContainer.setVisible(false);
-    }
-
-    const viewport = this.getCurrentViewportSize();
-    const width = viewport.width;
-    const height = viewport.height;
-    this.recalcLayout(width, height);
-    this.updateSceneBounds(width, height);
-
-    this.currentAnswerRatios = this.currentBlindBoxRoundQuestions.map((questionItem: ThemeQuestion) => {
-      const imageKey = this.getImageTextureKey(questionItem, this.currentTheme);
-      return this.getTextureAspectRatio(imageKey);
-    });
-    this.activeCardLayouts = this.computeAnswerCardLayouts(this.currentAnswerRatios, width, height);
-    this.LANE_X_POSITIONS = this.activeCardLayouts.map((layout) => layout.centerX);
-    this.targetLaneIndex = Phaser.Math.Clamp(this.targetLaneIndex, 0, Math.max(0, this.LANE_X_POSITIONS.length - 1));
-    if (this.activeCardLayouts.length > 0) {
-      this.updateJumpVelocityByCardHeight(this.getMaxCardHeight(this.activeCardLayouts));
-    }
-
-    const entranceDuration = 300;
-    const stagger = 80;
-    const totalSetupTime = entranceDuration + (stagger * Math.max(0, this.currentBlindBoxRoundQuestions.length - 1));
-    const blockY = this.blockCenterY;
-
-    this.currentBlindBoxRoundQuestions.forEach((questionItem: ThemeQuestion, index: number) => {
-      const rawLayout = this.activeCardLayouts[index];
-      const layout = rawLayout ? this.constrainCardLayout(rawLayout, width, height) : undefined;
-      const x = Math.round(layout?.centerX ?? this.getLaneXPosition(index));
-      const cardWidth = Math.round(layout?.cardWidth ?? this.blockHeight);
-      const cardHeight = Math.round(layout?.cardHeight ?? this.blockHeight);
-      const borderThickness = Math.max(4, Math.round(6 * this.gameScale));
-      const innerBorderThickness = Math.max(2, Math.round(3 * this.gameScale));
-      const shadowOffsetY = Math.max(4, 8 * this.gameScale);
-
-      const block = this.blocks.create(x, blockY, 'block_hitbox');
-      block.setOrigin(0.5);
-      block.setDisplaySize(cardWidth, cardHeight);
-      block.refreshBody();
-      block.setVisible(false);
-      block.setAlpha(0);
-      block.setData('answerIndex', index);
-      block.setData('questionItem', questionItem);
-      block.setData('blindBox', true);
-      block.setData('isCleaningUp', false);
-
-      const container = this.add.container(x, blockY);
-      const frameShadow = this.add
-        .rectangle(
-          0,
-          shadowOffsetY,
-          cardWidth + borderThickness * 1.4,
-          cardHeight + borderThickness * 1.6,
-          0x202432,
-          0.28
-        )
-        .setOrigin(0.5);
-      const frame = this.add
-        .rectangle(0, 0, cardWidth, cardHeight, 0xffffff, 0.98)
-        .setOrigin(0.5)
-        .setStrokeStyle(borderThickness, 0x2f3442, 1);
-      const innerFrame = this.add
-        .rectangle(
-          0,
-          0,
-          Math.max(1, cardWidth - borderThickness * 1.2),
-          Math.max(1, cardHeight - borderThickness * 1.2),
-          0xffffff,
-          0
-        )
-        .setOrigin(0.5)
-        .setStrokeStyle(innerBorderThickness, 0xd9e2f2, 0.9);
-      const icon = this.add.image(0, 0, 'tile_box');
-      if (layout) {
-        icon.setDisplaySize(layout.iconWidth, layout.iconHeight);
-      } else {
-        const fallbackInset = Math.max(2, Math.round(this.CARD_IMAGE_INSET_BASE * this.gameScale));
-        icon.setDisplaySize(
-          Math.max(1, cardWidth - fallbackInset * 2),
-          Math.max(1, cardHeight - fallbackInset * 2)
-        );
-      }
-      const questionMark = this.add.text(0, 0, '?', {
-        fontFamily: FONT_STACK,
-        fontSize: `${Math.max(24, Math.round(64 * this.gameScale))}px`,
-        fontStyle: '900',
-        color: '#ffffff',
-        stroke: '#333333',
-        strokeThickness: Math.max(3, Math.round(7 * this.gameScale))
-      }).setOrigin(0.5);
-
-      container.add([frameShadow, frame, innerFrame, icon, questionMark]);
-      block.setData('visuals', container);
-      block.setData('answerFrameShadow', frameShadow);
-      block.setData('answerFrame', frame);
-      block.setData('answerInnerFrame', innerFrame);
-      block.setData('answerIcon', icon);
-      block.setData('blindQuestionMark', questionMark);
-
-      if (!this.isMobileDevice) {
-        this.tweens.add({
-          targets: container,
-          y: Math.round(container.y - 15),
-          duration: 1500,
-          yoyo: true,
-          repeat: -1,
-          ease: 'Sine.easeInOut',
-          delay: index * 200
-        });
-      } else {
-        container.y = Math.round(container.y);
-      }
-
-      container.setScale(0);
-      this.tweens.add({
-        targets: container,
-        scaleX: 1,
-        scaleY: 1,
-        duration: entranceDuration,
-        delay: index * stagger,
-        ease: 'Back.easeOut'
-      });
-    });
-
-    this.time.delayedCall(totalSetupTime, () => {
-      if (!this.isActiveBlindBoxToken(roundToken)) return;
-      this.isInteractionActive = true;
-    });
-  }
-
-  private async spawnQuestion() {
-    this.isInteractionActive = false;
-    
-    // 如果还没加载主题图片，先加载
-    if (!this.imagesLoaded) {
-      console.log('[spawnQuestion] Waiting for theme images to load...');
-      await this.loadThemeImages();
-      console.log('[spawnQuestion] Theme images ready, proceeding with question spawn');
-    }
-    
-    // 确保下一关预加载逻辑只执行一次
-    if (!this.hasPreloadedNext) {
-      this.hasPreloadedNext = true;
-      this.preloadNextTheme();
-    }
-    
-    const question = this.generateWordQuestion();
-    
-    if (!question) {
-        this.showThemeCompletion();
-        return;
-    }
-
-    this.currentQuestion = question;
-    if (this.onQuestionUpdate) this.onQuestionUpdate(this.currentQuestion.question);
-    this.speak(this.currentQuestion.question);
-    this.questionCounter++;
-    
-    // 重置错误计数
-    this.wrongAttempts = 0;
-
-    // 更新小蜜蜂抓着的文字
-    this.updateBeeWord(this.currentQuestion.question);
-
-    // 清理旧的方块及其视觉容器
-    this.forceDestroyAllBlockVisuals();
-    this.blocks.clear(true, true);
-
-    // 如果小蜜蜂容器已经存在但被销毁了（比如场景重启），需要重置引用
-    if (this.beeContainer && !this.beeContainer.active) {
-        this.beeContainer = undefined;
-        this.beeSprite = undefined;
-        this.beeWordText = undefined;
-    }
-
-    const entranceDuration = 300;
-    const stagger = 80;
-    const totalSetupTime = entranceDuration + (stagger * 2);
-
-    const viewport = this.getCurrentViewportSize();
-    const width = viewport.width;
-    const height = viewport.height;
-    this.recalcLayout(width, height);
-    this.updateSceneBounds(width, height);
-    const blockY = this.blockCenterY;
-
-    this.currentAnswerKeys = [...this.currentQuestion.answers];
-    this.currentAnswerRatios = this.currentAnswerKeys.map((answerKey) => {
-        const imageKey = this.getImageTextureKeyByAnswer(answerKey);
-        return this.getTextureAspectRatio(imageKey);
-    });
-    this.refreshThemeFrameMode();
-    this.activeCardLayouts = this.computeAnswerCardLayouts(this.currentAnswerRatios, width, height);
-    this.LANE_X_POSITIONS = this.activeCardLayouts.map((layout) => layout.centerX);
-    this.targetLaneIndex = Phaser.Math.Clamp(this.targetLaneIndex, 0, Math.max(0, this.LANE_X_POSITIONS.length - 1));
-    if (this.activeCardLayouts.length > 0) {
-        this.updateJumpVelocityByCardHeight(this.getMaxCardHeight(this.activeCardLayouts));
-    }
-
-    this.currentQuestion.answers.forEach((answerKey, i) => {
-        const rawLayout = this.activeCardLayouts[i];
-        const layout = rawLayout ? this.constrainCardLayout(rawLayout, width, height) : undefined;
-        const x = Math.round(layout?.centerX ?? this.LANE_X_POSITIONS[i] ?? this.getLaneXPosition(1));
-        const cardWidth = Math.round(layout?.cardWidth ?? this.blockHeight);
-        const cardHeight = Math.round(layout?.cardHeight ?? this.blockHeight);
-        const imageKey = this.getImageTextureKeyByAnswer(answerKey);
-        const textureKey = imageKey && this.textures.exists(imageKey) ? imageKey : 'tile_box';
-        const borderThickness = Math.max(4, Math.round(6 * this.gameScale));
-        const innerBorderThickness = Math.max(2, Math.round(3 * this.gameScale));
-        const shadowOffsetY = Math.max(4, 8 * this.gameScale);
-
-        const block = this.blocks.create(x, blockY, 'block_hitbox');
-        block.setOrigin(0.5);
-        block.setDisplaySize(cardWidth, cardHeight);
-        block.refreshBody();
-        block.setVisible(false);
-        block.setAlpha(0);
-        block.setData('answerIndex', i);
-        block.setData('answerKey', answerKey);
-        block.setData('imageKey', textureKey);
-        block.setData('isCleaningUp', false);
-
-        const container = this.add.container(x, blockY);
-        const frameShadow = this.add
-            .rectangle(
-                0,
-                shadowOffsetY,
-                cardWidth + borderThickness * 1.4,
-                cardHeight + borderThickness * 1.6,
-                0x202432,
-                0.28
-            )
-            .setOrigin(0.5);
-        const frame = this.add
-            .rectangle(0, 0, cardWidth, cardHeight, 0xffffff, 0.98)
-            .setOrigin(0.5)
-            .setStrokeStyle(borderThickness, 0x2f3442, 1);
-        const innerFrame = this.add
-            .rectangle(
-                0,
-                0,
-                Math.max(1, cardWidth - borderThickness * 1.2),
-                Math.max(1, cardHeight - borderThickness * 1.2),
-                0xffffff,
-                0
-            )
-            .setOrigin(0.5)
-            .setStrokeStyle(innerBorderThickness, 0xd9e2f2, 0.9);
-        const icon = this.add.image(0, 0, textureKey);
-
-        if (layout) {
-            icon.setDisplaySize(layout.iconWidth, layout.iconHeight);
-        } else {
-            const fallbackInset = Math.max(2, Math.round(this.CARD_IMAGE_INSET_BASE * this.gameScale));
-            icon.setDisplaySize(
-                Math.max(1, cardWidth - fallbackInset * 2),
-                Math.max(1, cardHeight - fallbackInset * 2)
-            );
-        }
-
-        icon.setTint(0xffffff);
-        icon.setOrigin(0.5, 0.5);
-
-        container.add([frameShadow, frame, innerFrame, icon]);
-        block.setData('visuals', container);
-        block.setData('answerFrameShadow', frameShadow);
-        block.setData('answerFrame', frame);
-        block.setData('answerInnerFrame', innerFrame);
-        block.setData('answerIcon', icon);
-
-        // 移动端禁用答案卡片浮动，避免 resize/fullscreen 过渡时出现旧坐标残留导致错位
-        if (!this.isMobileDevice) {
-            this.tweens.add({
-                targets: container,
-                y: Math.round(container.y - 15),
-                duration: 1500,
-                yoyo: true,
-                repeat: -1,
-                ease: 'Sine.easeInOut',
-                delay: i * 200
-            });
-        } else {
-            container.y = Math.round(container.y);
-        }
-
-        // Entrance
-        container.setScale(0);
-        this.tweens.add({
-            targets: container,
-            scaleX: 1,
-            scaleY: 1,
-            duration: entranceDuration,
-            delay: i * stagger,
-            ease: 'Back.easeOut'
-        });
-    });
-
-    this.time.delayedCall(totalSetupTime, () => {
-        this.isInteractionActive = true;
-    });
-  }
-
-  private hitBlindBox(player: any, block: any): void {
-    if (!block.active || !this.isInteractionActive) return;
-    if (player.body.velocity.y > this.getScaledPhysicsValue(500)) return;
-
-    const playerBodyTopY = player.y - player.body.height;
-    const blockBottomY = block.y + (block.body.height / 2);
-    if (playerBodyTopY > blockBottomY) return;
-
-    this.isInteractionActive = false;
-    const recoilForce = this.getScaledPhysicsValue(400);
-    const playerBody = player.body as Phaser.Physics.Arcade.Body;
-    const pushDownPadding = Math.max(2, 6 * this.gameScale);
-    const safePlayerY = blockBottomY + player.displayHeight + pushDownPadding;
-    const clampedY = Math.min(safePlayerY, this.floorSurfaceY);
-    playerBody.reset(player.x, clampedY);
-    if (clampedY >= this.floorSurfaceY - Math.max(1, 3 * this.gameScale)) {
-      playerBody.setVelocityY(0);
-    } else {
-      playerBody.setVelocityY(recoilForce);
-    }
-    player.setAngle(0);
-
-    if (block.getData('blindBoxResolved')) return;
-    block.setData('blindBoxResolved', true);
-    this.successSound.play();
-    void this.handleBlindBoxSelection(block);
-  }
-
-  private async handleBlindBoxSelection(block: any): Promise<void> {
-    const roundToken = this.blindBoxRoundToken;
-    const questionItem = block.getData('questionItem') as ThemeQuestion | undefined;
-    if (!questionItem) {
-      this.isInteractionActive = true;
-      return;
-    }
-
-    this.blindBoxRoundPhase = 'SHOWING';
-
-    const selectedIcon = block.getData('answerIcon') as Phaser.GameObjects.Image | undefined;
-    const selectedMark = block.getData('blindQuestionMark') as Phaser.GameObjects.Text | undefined;
-    const selectedTexture = this.getImageTextureKey(questionItem, this.currentTheme);
-    if (selectedIcon) {
-      selectedIcon.setTexture(this.textures.exists(selectedTexture) ? selectedTexture : 'tile_box');
-    }
-    if (selectedMark) {
-      selectedMark.setVisible(false);
-    }
-
-    this.blocks.children.iterate((candidate: any) => {
-      if (!candidate || candidate === block) return true;
-      const visuals = candidate.getData('visuals') as Phaser.GameObjects.Container | undefined;
-      if (visuals) {
-        this.tweens.add({
-          targets: visuals,
-          alpha: 0.5,
-          duration: 200,
-          ease: 'Sine.easeOut'
-        });
-      }
-      return true;
-    });
-
-    await this.waitForDelay(240);
-    if (!this.isActiveBlindBoxToken(roundToken)) return;
-
-    await this.playQuestionAudioByItem(questionItem);
-    if (!this.isActiveBlindBoxToken(roundToken)) return;
-
-    const countdownOk = await this.runBlindBoxCountdown(roundToken);
-    if (!countdownOk) return;
-
-    this.blindBoxRoundPhase = 'RECORDING';
-    console.info('[Pronounce] Recognition started:', questionItem.question);
-    const recognitionResult = await speechScoringService.recognizeOnce({
-      lang: 'en-US',
-      maxDurationMs: 5000
-    });
-    if (!this.isActiveBlindBoxToken(roundToken)) return;
-
-    const transcript = recognitionResult.transcript.trim();
-    const score = transcript
-      ? scorePronunciation(questionItem.question, transcript)
-      : 0;
-
-    const roundResult: PronunciationRoundResult = {
-      targetText: questionItem.question,
-      transcript,
-      score,
-      reason: recognitionResult.reason,
-      durationMs: recognitionResult.durationMs
-    };
-    this.pronunciationResults.push(roundResult);
-    this.removeBlindBoxQuestionFromRemaining(questionItem);
-
-    this.score = this.pronunciationResults.length;
-    if (this.onScoreUpdate) {
-      this.onScoreUpdate(this.score, this.totalQuestions);
-    }
-
-    const averageScore = this.getPronunciationAverageScore();
-    if (this.onPronunciationProgressUpdate) {
-      this.onPronunciationProgressUpdate(this.pronunciationResults.length, this.totalQuestions, averageScore);
-    }
-    console.info('[Pronounce] Round result:', roundResult);
-
-    this.blindBoxRoundPhase = 'RESULT';
-    const resultLabel = this.ensureBlindBoxResultLabel();
-    resultLabel.setVisible(true);
-    resultLabel.setText(`Score ${score}`);
-    resultLabel.setColor(score >= 80 ? '#6BFF6B' : score >= 50 ? '#FFD700' : '#FF7A7A');
-    resultLabel.setStroke('#222222', Math.max(3, Math.round(8 * this.gameScale)));
-    resultLabel.setAlpha(1);
-    resultLabel.setScale(1.2);
-    this.tweens.add({
-      targets: resultLabel,
-      scaleX: 1,
-      scaleY: 1,
-      duration: 220,
-      ease: 'Back.easeOut'
-    });
-
-    await this.waitForDelay(1100);
-    if (!this.isActiveBlindBoxToken(roundToken)) return;
-    resultLabel.setVisible(false);
-
-    this.cleanupBlocks();
-    await this.waitForDelay(400);
-    if (!this.isActiveBlindBoxToken(roundToken)) return;
-
-    this.blindBoxRoundPhase = 'IDLE';
-    if (this.blindBoxRemainingQuestions.length === 0) {
-      await this.showThemeCompletion();
-      return;
-    }
-
-    await this.spawnBlindBoxRound();
-  }
-
-  hitBlock(player: any, block: any) {
-    if (this.sceneMode === 'BLIND_BOX_PRONUNCIATION') {
-      this.hitBlindBox(player, block);
-      return;
-    }
-
-    if (!block.active || !this.isInteractionActive) return;
-    
-    if (player.body.velocity.y > this.getScaledPhysicsValue(500)) return;
-
-    const playerBodyTopY = player.y - player.body.height;
-    const blockBottomY = block.y + (block.body.height / 2);
-    
-    if (playerBodyTopY > blockBottomY) return;
-
-    this.isInteractionActive = false;
-    
-    const recoilForce = this.getScaledPhysicsValue(400);
-    const playerBody = player.body as Phaser.Physics.Arcade.Body;
-
-    const pushDownPadding = Math.max(2, 6 * this.gameScale);
-    const safePlayerY = blockBottomY + player.displayHeight + pushDownPadding;
-    const clampedY = Math.min(safePlayerY, this.floorSurfaceY);
-    playerBody.reset(player.x, clampedY);
-    if (clampedY >= this.floorSurfaceY - Math.max(1, 3 * this.gameScale)) {
-      playerBody.setVelocityY(0);
-    } else {
-      playerBody.setVelocityY(recoilForce);
-    }
-    player.setAngle(0);
-    
-    const idx = block.getData('answerIndex');
-    const visuals = block.getData('visuals') as Phaser.GameObjects.Container;
-    
-    const isCorrect = idx === this.currentQuestion?.correctIndex;
-
-    if (isCorrect) {
-        block.disableBody(true, false); 
-        this.successSound.play();
-        
-        if (visuals) {
-            this.createBlockExplosion(block.x, block.y);
-        }
-
-        const shouldAwardStar = this.wrongAttempts < 2;
-        let scoreSettleDelayMs = 0;
-        if (shouldAwardStar) {
-            const rewards = [
-                { key: 'star_gold', score: 1, scale: 1, surprise: false, label: '星星' },
-                { key: 'mushroom_red', score: 1, scale: 1, surprise: true, label: '红蘑菇' },
-                { key: 'mushroom_brown', score: 1, scale: 1, surprise: true, label: '小蘑菇' },
-                { key: 'gem_blue', score: 1, scale: 1, surprise: true, label: '蓝宝石' },
-                { key: 'gem_red', score: 1, scale: 1, surprise: true, label: '红宝石' },
-                { key: 'gem_green', score: 1, scale: 1, surprise: true, label: '绿宝石' },
-                { key: 'gem_yellow', score: 1, scale: 1, surprise: true, label: '黄宝石' },
-                { key: 'grass', score: 1, scale: 1, surprise: true, label: '小草' },
-                { key: 'grass_purple', score: 1, scale: 1, surprise: true, label: '紫色小草' },
-            ];
-
-            const random = Math.random();
-            const reward = random < 0.6
-                ? rewards[0]
-                : rewards[Phaser.Math.Between(1, rewards.length - 1)];
-
-            const rewardItem = this.add.image(block.x, block.y, reward.key);
-            rewardItem.setDepth(100);
-            rewardItem.setScale(0);
-
-            const baseScale = (reward.scale * this.gameScale) / 4;
-            const trailTint = reward.surprise ? [0x00FFFF, 0xFF00FF, 0xFFFF00] : [C_GOLD, C_AMBER, 0xFF4500];
-
-            if (this.rewardTrailEmitter) {
-                this.rewardTrailEmitter.setParticleTint(trailTint[0]);
-                this.rewardTrailEmitter.startFollow(rewardItem);
-                this.rewardTrailEmitter.start();
-                this.rewardTrailEmitter.setFrequency(reward.surprise ? 16 : 26);
-            }
-
-            const rewardText = this.add.text(block.x, block.y - 50 * this.gameScale, `+${reward.score}`, {
-                fontSize: `${(reward.surprise ? 64 : 48) * this.gameScale}px`,
-                fontFamily: FONT_STACK,
-                fontStyle: 'bold',
-                color: reward.surprise ? '#FFD700' : '#FFFFFF',
-                stroke: '#000',
-                strokeThickness: 8 * this.gameScale
-            }).setOrigin(0.5).setDepth(110);
-
-            this.tweens.add({
-                targets: rewardText,
-                y: rewardText.y - 150 * this.gameScale,
-                alpha: 0,
-                scale: reward.surprise ? 1.5 : 1.2,
-                duration: 2500,
-                ease: 'Cubic.easeOut',
-                onComplete: () => rewardText.destroy()
-            });
-
-            if (reward.surprise) {
-                this.cameras.main.shake(200, 0.01);
-            }
-
-            const waitTime = reward.surprise ? 260 : 220;
-            const flightDuration = reward.surprise ? 1450 : 1250;
-            const launchScaleFactor = reward.surprise ? 2.2 : 1.6;
-            const launchHeight = reward.surprise ? 95 : 80;
-            scoreSettleDelayMs = 700 + waitTime + flightDuration;
-
-            this.tweens.add({
-                targets: rewardItem,
-                y: block.y - launchHeight * this.gameScale,
-                scaleX: baseScale * launchScaleFactor,
-                scaleY: baseScale * launchScaleFactor,
-                duration: 700,
-                ease: 'Back.easeOut',
-                onComplete: () => {
-                    this.time.delayedCall(waitTime, () => {
-                        const { x: targetX, y: targetY } = this.getScoreHudTarget();
-                        const startX = rewardItem.x;
-                        const startY = rewardItem.y;
-                        const controlXOffset = Phaser.Math.Clamp((startX - targetX) * 0.22, -220 * this.gameScale, 220 * this.gameScale);
-                        const controlX = (startX + targetX) / 2 + controlXOffset;
-                        const controlY = Math.min(startY, targetY) - (reward.surprise ? 230 : 190) * this.gameScale;
-                        const flightCurve = new Phaser.Curves.QuadraticBezier(
-                            new Phaser.Math.Vector2(startX, startY),
-                            new Phaser.Math.Vector2(controlX, controlY),
-                            new Phaser.Math.Vector2(targetX, targetY)
-                        );
-
-                        this.tweens.addCounter({
-                            from: 0,
-                            to: 1,
-                            duration: flightDuration,
-                            ease: 'Sine.easeInOut',
-                            onStart: () => {
-                                if (this.rewardTrailEmitter) {
-                                    this.rewardTrailEmitter.setFrequency(reward.surprise ? 10 : 14);
-                                }
-                            },
-                            onUpdate: (tween) => {
-                                const progress = tween.getValue();
-                                const point = flightCurve.getPoint(progress);
-                                rewardItem.setPosition(point.x, point.y);
-                                rewardItem.setScale(baseScale * Phaser.Math.Linear(launchScaleFactor, 0.38, progress));
-                                rewardItem.setAlpha(Phaser.Math.Linear(1, 0.45, progress));
-                                rewardItem.setAngle(Phaser.Math.Linear(0, reward.surprise ? 540 : 360, progress));
-                            },
-                            onComplete: () => {
-                                rewardItem.destroy();
-                                if (this.rewardTrailEmitter) {
-                                    this.rewardTrailEmitter.stop();
-                                    this.rewardTrailEmitter.stopFollow();
-                                }
-                                this.score += reward.score;
-                                this.themeScore += reward.score;
-                                if (this.onScoreUpdate) this.onScoreUpdate(this.score, this.totalQuestions);
-                            }
-                        });
-                    });
-                }
-            });
-        }
-
-        if (visuals) {
-            this.tweens.add({
-                targets: visuals,
-                scaleX: 1.5,
-                scaleY: 1.5,
-                alpha: 0,
-                duration: 200, 
-                onComplete: () => {
-                    this.destroyBlockVisual(visuals);
-                    block.setData('visuals', undefined);
-                }
-            });
-        }
-
-        this.handleWin(scoreSettleDelayMs);
-
-    } else {
-        this.failureSound.play();
-        
-        // 增加错误计数
-        this.wrongAttempts++;
-
-        // 每次碰撞错误都重新朗读
-        if (this.currentQuestion) {
-            this.speak(this.currentQuestion.question);
-        }
-        
-        if (visuals) {
-            this.tweens.add({
-                targets: visuals,
-                x: visuals.x + 10,
-                duration: 50,
-                yoyo: true,
-                repeat: 5,
-                ease: 'Sine.easeInOut'
-            });
-        }
-
-        player.setGravityY(this.getScaledPhysicsValue(this.GRAVITY_Y * 2));
-        
-        this.time.delayedCall(1200, () => {
-            player.setGravityY(this.getScaledPhysicsValue(this.GRAVITY_Y));
-            this.isInteractionActive = true;
-        });
-    }
-  }
-
-  handleWin(scoreSettleDelayMs: number = 0) {
-    // 当存在奖励飞行动画时，等待计分真正入账后再生成下一题，
-    // 避免最后一题结算页先打开导致文案/语音判断使用旧分数。
-    this.time.delayedCall(500, () => this.cleanupBlocks());
-    const nextQuestionDelayMs = Math.max(1500, scoreSettleDelayMs + 60);
-    this.time.delayedCall(nextQuestionDelayMs, () => this.spawnQuestion());
+  hitBlock(player: unknown, block: unknown): void {
+    if (!this.modeContext) return;
+    this.modeRegistry.onPlayerHitBlock(this.modeContext, player, block);
   }
 
   /**
@@ -2508,7 +1521,7 @@ export class MainScene extends Phaser.Scene {
     if (this.isGameOver) return;
     this.isGameOver = true;
     this.blindBoxRoundToken += 1;
-    this.destroyBlindBoxUiText();
+    this.round1Flow.destroyBlindBoxUiText();
     this.currentAnswerRatios = [];
     this.currentAnswerKeys = [];
     this.activeCardLayouts = [];
@@ -2525,10 +1538,10 @@ export class MainScene extends Phaser.Scene {
     this.blocks.clear(true, true);
     
     // 2. 触发 React 层 UI 开启 (三明治上层)
-    if (this.sceneMode === 'BLIND_BOX_PRONUNCIATION' && this.onPronunciationComplete) {
-      this.onPronunciationComplete(this.buildPronunciationSummary());
+    if (this.modeContext) {
+      this.modeRegistry.onThemeComplete(this.modeContext);
     }
-    if (this.onGameOver) this.onGameOver();
+    if (this.callbackBridge.onGameOver) this.callbackBridge.onGameOver();
   }
 
   public restartLevel() {
@@ -2597,160 +1610,16 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
-  private createBlockExplosion(x: number, y: number) {
-    // Use pooled emitters to avoid object creation overhead
-    if (this.blockDebrisEmitter) {
-        this.blockDebrisEmitter.explode(35, x, y); // Reduced from 80
-    }
-    
-    if (this.blockSmokeEmitter) {
-        this.blockSmokeEmitter.explode(10, x, y); // Reduced from 15
-    }
-
-    if (this.blockFlashEmitter) {
-        this.blockFlashEmitter.explode(15, x, y); // Reduced from 30
-    }
-  }
-
-
   /**
    * 初始化或更新小蜜蜂及其抓着的文字
    */
   private updateBeeWord(text: string) {
-    if (!text) return;
-
-    // 格式化文字：仅首字母大写
-    const formattedText = text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
-
-    const { width } = this.scale;
-    const startY = this.beeCenterY;
-
-    // 如果容器存在但已经不活跃（被销毁了），重置它
-    if (this.beeContainer && !this.beeContainer.active) {
-        this.beeContainer = undefined;
-    }
-
-    if (!this.beeContainer) {
-        console.log("Creating new bee container");
-        // 创建容器
-        this.beeContainer = this.add.container(width / 2, startY);
-        this.beeContainer.setDepth(1000); // 提高深度，确保在所有物体之上
-        this.beeContainer.setScale(0); // 初始缩放为0，用于进场动画
-
-        // 创建小蜜蜂精灵并设置动画
-         this.beeSprite = this.add.sprite(0, 0, 'bee_a');
-         this.beeSprite.play('bee_fly');
-
-        // 创建文字
-        this.beeWordText = this.add.text(0, 0, formattedText, {
-            fontFamily: FONT_STACK,
-            fontStyle: 'bold',
-            color: '#333333',
-        }).setOrigin(0.5);
-
-        this.beeContainer.add([this.beeSprite, this.beeWordText]);
-
-        // 持续的漂浮晃动动画 (针对容器内的元素，避免与缩放动画冲突)
-        this.tweens.add({
-            targets: this.beeSprite,
-            y: { from: 0, to: 15 }, // 这里使用固定值，后面 update 时会 scale 容器
-            duration: 2000,
-            yoyo: true,
-            repeat: -1,
-            ease: 'Sine.easeInOut'
-        });
-    } else {
-        console.log("Updating existing bee container");
-        // 如果已存在，强制显示并更新文字
-        this.beeContainer.setVisible(true);
-        this.beeContainer.setAlpha(1);
-        this.beeContainer.setScale(0); // 重置缩放，准备进场
-        
-        // 停止之前的进场或退场动画
-        this.tweens.killTweensOf(this.beeContainer);
-        this.beeContainer.y = startY;
-        this.beeWordText?.setText(formattedText);
-    }
-
-    // 无论新建还是更新，都刷新尺寸和偏移 (适配不同分辨率切换)
-    // 调整：蜜蜂和文字大小调小，适配长句子
-    const visualBeeSize = 80 * this.gameScale;
-    const fontSize = Math.round(40 * this.gameScale);
-    const viewport = this.getCurrentViewportSize();
-    const textOffsetY = this.getBeeTextOffsetY(viewport.width, viewport.height); // 非全屏横屏时减小文字下偏移，避免贴近卡片
-    
-    if (this.beeSprite) {
-        this.beeSprite.setDisplaySize(visualBeeSize, visualBeeSize);
-    }
-    
-    if (this.beeWordText) {
-        this.beeWordText.setFontSize(`${fontSize}px`);
-        this.beeWordText.setY(textOffsetY);
-        // this.beeWordText.setStroke('#000000', Math.max(2, 4 * this.gameScale));
-        
-        // 更新文字的晃动动画偏移 (如果是更新)
-        this.tweens.killTweensOf(this.beeWordText);
-        const floatDistance = 15 * this.gameScale;
-        this.tweens.add({
-            targets: this.beeWordText,
-            y: { from: textOffsetY, to: textOffsetY + floatDistance },
-            duration: 2000,
-            yoyo: true,
-            repeat: -1,
-            ease: 'Sine.easeInOut'
-        });
-    }
-
-    // 统一的进场动画 (与木箱一致)
-    this.tweens.add({
-        targets: this.beeContainer,
-        scaleX: 1,
-        scaleY: 1,
-        duration: 500,
-        ease: 'Back.easeOut'
-    });
+    const uiSystem = this.modeSystems?.ui as SceneUiSystem | undefined;
+    uiSystem?.updateBeeWord(text);
   }
 
   cleanupBlocks() {
-    if (!this.blocks) return;
-
-    // 1. 小蜜蜂消失 (与木箱同步)
-    if (this.beeContainer && this.beeContainer.active) {
-        this.tweens.add({
-            targets: this.beeContainer,
-            scaleX: 0,
-            scaleY: 0,
-            duration: 300,
-            ease: 'Back.easeIn',
-            onComplete: () => {
-                if (this.beeContainer) this.beeContainer.setVisible(false);
-            }
-        });
-    }
-
-    // 2. 木箱消失
-    this.blocks.children.iterate((b: any) => {
-        if (!b) return true;
-
-        b.setData('isCleaningUp', true);
-        const v = b.getData('visuals') as Phaser.GameObjects.Container | undefined;
-        if (v && v.active) {
-            this.tweens.add({
-                targets: v,
-                scaleX: 0,
-                scaleY: 0,
-                duration: 300,
-                onComplete: () => {
-                    this.destroyBlockVisual(v);
-                    b.setData('visuals', undefined);
-                }
-            });
-        }
-        return true;
-    });
-    this.time.delayedCall(350, () => {
-        this.forceDestroyAllBlockVisuals();
-        this.blocks.clear(true, true);
-    });
+    const uiSystem = this.modeSystems?.ui as SceneUiSystem | undefined;
+    uiSystem?.cleanupBlocks();
   }
 }

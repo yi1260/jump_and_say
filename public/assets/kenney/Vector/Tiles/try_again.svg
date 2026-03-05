@@ -1,0 +1,20 @@
+<svg width="360" height="120" viewBox="0 0 360 120" xmlns="http://www.w3.org/2000/svg">
+  <title>Try Again - Muted Tilted Flat 3D</title>
+  
+  <!-- 倾斜角度略微收敛，符合重试的情绪 -->
+  <g transform="translate(180, 55) rotate(-2) skewX(-8)" 
+     font-family="'Arial Rounded MT Bold', 'Nunito', 'Fredoka One', sans-serif" 
+     font-size="42" font-weight="900" text-anchor="middle" dominant-baseline="central" 
+     stroke-linejoin="round" stroke-linecap="round">
+    
+    <!-- 1. 3D 投影厚度 (深灰色，向下偏移) -->
+    <text x="0" y="7" fill="#6A7782" stroke="#6A7782" stroke-width="20">TRY AGAIN</text>
+    
+    <!-- 2. 哑光外轮廓 (雾霾蓝/石板灰) -->
+    <text x="0" y="0" fill="#8797A2" stroke="#8797A2" stroke-width="20">TRY AGAIN</text>
+    
+    <!-- 3. 文字本体 (极浅的冷灰色，避免纯白过于跳跃) -->
+    <text x="0" y="0" fill="#F4F6F8" stroke="none">TRY AGAIN</text>
+    
+  </g>
+</svg>

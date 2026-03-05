@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="100%" height="100%">
+  <title>Refined Soft Duolingo Mic with White Timer</title>
+  <defs>
+    <style>
+      /* 1. 更明显、更灵动的呼吸动效 */
+      .btn-breathe {
+        transform-origin: 100px 100px;
+        animation: breathe 1.6s ease-in-out infinite alternate;
+      }
+      @keyframes breathe {
+        0% { transform: scale(0.93); }
+        100% { transform: scale(1.07); }
+      }
+
+      /* 2. 扩散更远、对比更柔和的外围光晕 */
+      .soft-ripple {
+        fill: none;
+        stroke: #F4D35E; /* 与主色调统一的低饱和度黄 */
+        transform-origin: 100px 100px;
+        animation: softRippleAnim 1.6s ease-out infinite;
+      }
+      @keyframes softRippleAnim {
+        0% { transform: scale(0.93); opacity: 0.8; stroke-width: 10; }
+        100% { transform: scale(1.35); opacity: 0; stroke-width: 2; }
+      }
+
+      /* 3. 10秒倒计时 (r=65, 周长≈408.5) - 变为纯白色 */
+      .timer-progress {
+        fill: none;
+        stroke: #FFFFFF; /* 按照要求改为纯白色 */
+        stroke-width: 10; /* 保持加粗，增加微胖果冻感 */
+        stroke-linecap: round; /* 圆润的端点 */
+        stroke-dasharray: 408.5;
+        stroke-dashoffset: 0;
+        transform-origin: 100px 100px;
+        transform: rotate(-90deg); /* 从正上方12点钟方向开始 */
+        animation: countdown 10s linear forwards;
+      }
+      @keyframes countdown {
+        0% { stroke-dashoffset: 0; }
+        100% { stroke-dashoffset: 408.5; }
+      }
+    </style>
+  </defs>
+
+  <!-- ================= 柔和呼吸外发光 ================= -->
+  <circle cx="100" cy="100" r="80" class="soft-ripple" />
+
+  <!-- ================= 核心按钮组 (包含所有元素同步呼吸) ================= -->
+  <g class="btn-breathe">
+    
+    <!-- 降低饱和度的 3D 圆形底部阴影 -->
+    <circle cx="100" cy="106" r="80" fill="#DDB042" />
+    
+    <!-- 降低饱和度的 柔和马卡龙黄主体 -->
+    <circle cx="100" cy="100" r="80" fill="#F4D35E" />
+    
+    <!-- 顶部的平滑果冻高光 -->
+    <path d="M 45 50 A 70 70 0 0 1 155 50" fill="none" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round" opacity="0.4" />
+
+    <!-- ================= 细线倒计时系统 ================= -->
+    <!-- 倒计时底轨 (加粗且更圆润) -->
+    <circle cx="100" cy="100" r="65" fill="none" stroke="#DDB042" stroke-width="10" stroke-linecap="round" opacity="0.4" />
+    
+    <!-- 纯白色 10 秒动态消耗进度条 -->
+    <circle cx="100" cy="100" r="65" class="timer-progress" />
+
+    <!-- ================= 极简卡通麦克风 ================= -->
+    <g>
+      <!-- 麦克风的 U型固定架 -->
+      <path d="M 70 95 V 105 A 30 30 0 0 0 130 105 V 95" fill="none" stroke="#5C6A7A" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" />
+      
+      <!-- 底部支撑杆与底座 -->
+      <line x1="100" y1="135" x2="100" y2="152" stroke="#5C6A7A" stroke-width="8" stroke-linecap="round" />
+      <line x1="85" y1="152" x2="115" y2="152" stroke="#5C6A7A" stroke-width="8" stroke-linecap="round" />
+      
+      <!-- 麦克风主体 -->
+      <rect x="78" y="52" width="44" height="68" rx="22" fill="#5C6A7A" />
+      
+      <!-- 麦克风上的高光 (纯净的白光果冻胶囊) -->
+      <rect x="85" y="58" width="8" height="20" rx="4" fill="#FFFFFF" opacity="0.3" />
+    </g>
+
+  </g>
+</svg>

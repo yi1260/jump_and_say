@@ -1,0 +1,14 @@
+<!-- try_again.svg -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" width="400" height="200">
+  <title>TRY AGAIN</title>
+  <g>
+    <rect x="40" y="66" width="320" height="86" rx="43" fill="#3D5A73" />
+    <rect x="40" y="56" width="320" height="86" rx="43" fill="#6290B5" />
+    <rect x="75" y="64" width="250" height="14" rx="7" fill="#FFFFFF" opacity="0.25" />
+    <circle cx="55" cy="50" r="6" fill="#A8CDE8" />
+    <circle cx="345" cy="135" r="4" fill="#A8CDE8" />
+    <circle cx="332" cy="142" r="2.5" fill="#A8CDE8" />
+    <text x="200" y="108" font-family="Nunito, 'Arial Rounded MT Bold', Arial, sans-serif" font-size="38" font-weight="900" fill="#2E485E" stroke="#2E485E" stroke-width="10" stroke-linejoin="round" text-anchor="middle" dominant-baseline="middle" letter-spacing="2">TRY AGAIN</text>
+    <text x="200" y="104" font-family="Nunito, 'Arial Rounded MT Bold', Arial, sans-serif" font-size="38" font-weight="900" fill="#FFFFFF" text-anchor="middle" dominant-baseline="middle" letter-spacing="2">TRY AGAIN</text>
+  </g>
+</svg>

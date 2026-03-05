@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" width="400" height="200">
+  <title>Static Feedback - Excellent</title>
+  
+  <!-- 静态的点缀四角星 -->
+  <g fill="#FFC800">
+    <path d="M 0 -12 Q 0 0 12 0 Q 0 0 0 12 Q 0 0 -12 0 Q 0 0 0 -12 Z" transform="translate(60, 40)" />
+    <path d="M 0 -16 Q 0 0 16 0 Q 0 0 0 16 Q 0 0 -16 0 Q 0 0 0 -16 Z" transform="translate(340, 150)" />
+    <path d="M 0 -8 Q 0 0 8 0 Q 0 0 0 8 Q 0 0 -8 0 Q 0 0 0 -8 Z" transform="translate(350, 50)" />
+  </g>
+
+  <!-- 底部厚度阴影 (暗黄) -->
+  <rect x="30" y="68" width="340" height="80" rx="40" fill="#D69E00" />
+  
+  <!-- 顶层主体 (多邻国黄) -->
+  <rect x="30" y="58" width="340" height="80" rx="40" fill="#FFC800" />
+  
+  <!-- 顶层果冻高光 -->
+  <rect x="50" y="66" width="300" height="14" rx="7" fill="#FFFFFF" opacity="0.35" />
+
+  <!-- 文字排版 (带底色阴影) -->
+  <text x="200" y="104" font-family="'Arial Rounded MT Bold', 'Nunito', sans-serif" font-size="32" font-weight="900" text-anchor="middle" dominant-baseline="central" letter-spacing="2" fill="#D69E00">EXCELLENT !!!</text>
+  <text x="200" y="98" font-family="'Arial Rounded MT Bold', 'Nunito', sans-serif" font-size="32" font-weight="900" text-anchor="middle" dominant-baseline="central" letter-spacing="2" fill="#FFFFFF">EXCELLENT !!!</text>
+</svg>

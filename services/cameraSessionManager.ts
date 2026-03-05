@@ -47,6 +47,25 @@ type VideoFrameMetadataLike = {
   presentedFrames?: number;
 };
 
+interface CameraLeaseWindow extends Window {
+  __JAS_ACTIVE_CAMERA_STREAM__?: MediaStream | null;
+  __JAS_ACTIVE_CAMERA_OWNER__?: number;
+}
+
+interface VideoSnapshot {
+  paused: boolean;
+  ended: boolean;
+  muted: boolean;
+  readyState: number;
+  networkState: number;
+  currentTime: number;
+  videoWidth: number;
+  videoHeight: number;
+  clientWidth: number;
+  clientHeight: number;
+  isConnected: boolean;
+}
+
 const TERMINAL_GET_USER_MEDIA_ERRORS = new Set([
   'NotAllowedError',
   'NotReadableError',
@@ -62,12 +81,39 @@ const waitMs = (ms: number): Promise<void> => (
   })
 );
 
+const stopStreamTracks = (stream: MediaStream): void => {
+  stream.getTracks().forEach((track) => track.stop());
+};
+
+const clearGlobalCameraLease = (reason: string): void => {
+  const leaseWindow = window as CameraLeaseWindow;
+  const activeStream = leaseWindow.__JAS_ACTIVE_CAMERA_STREAM__;
+  if (!activeStream) return;
+  console.warn('[Camera][Diag] clearing global camera lease', { reason });
+  stopStreamTracks(activeStream);
+  leaseWindow.__JAS_ACTIVE_CAMERA_STREAM__ = null;
+  leaseWindow.__JAS_ACTIVE_CAMERA_OWNER__ = undefined;
+};
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    clearGlobalCameraLease('camera-session-manager-hmr-dispose');
+  });
+}
+
 export const isCameraPipelineError = (value: unknown): value is CameraPipelineError => (
   value instanceof CameraPipelineError
 );
 
 export class CameraSessionManager {
+  private static nextOwnerId = 1;
+  private readonly ownerId: number;
   private acquireStreamInFlight: Promise<MediaStream> | null = null;
+  private sessionSeq = 0;
+
+  constructor() {
+    this.ownerId = CameraSessionManager.nextOwnerId++;
+  }
 
   public resolvePlatformInfo(): CameraPlatformInfo {
     const ua = navigator.userAgent;
@@ -163,6 +209,7 @@ export class CameraSessionManager {
   }
 
   public cleanupSession(videoElement: HTMLVideoElement | null, stream: MediaStream | null): void {
+    this.releaseGlobalCameraLease(stream);
     if (stream) {
       stream.getTracks().forEach((track) => track.stop());
     }
@@ -172,10 +219,13 @@ export class CameraSessionManager {
 
   public async acquireRenderableStream(options: AcquireRenderableStreamOptions): Promise<MediaStream> {
     if (this.acquireStreamInFlight) {
+      this.logDiag('acquireRenderableStream reused in-flight task');
       return this.acquireStreamInFlight;
     }
 
+    this.logDiag('acquireRenderableStream start');
     this.acquireStreamInFlight = this.acquireRenderableStreamInternal(options).finally(() => {
+      this.logDiag('acquireRenderableStream finish');
       this.acquireStreamInFlight = null;
     });
 
@@ -191,13 +241,23 @@ export class CameraSessionManager {
     } = options;
     const platformInfo = this.resolvePlatformInfo();
     const profiles = this.buildConstraintProfiles(platformInfo);
+    const sessionId = ++this.sessionSeq;
+    this.logDiag('acquireRenderableStreamInternal begin', {
+      sessionId,
+      permissionTimeoutMs,
+      renderRetryCount,
+      profiles: profiles.length,
+      hasExistingStream: !!existingStream
+    });
     await this.waitForStableCameraStartWindow(platformInfo);
+    this.stopLingeringGlobalCameraLease(existingStream ?? null);
 
     if (existingStream && existingStream.active) {
       try {
         await this.ensureRenderablePreviewWithRebind(videoElement, existingStream, {
           stage: 'reuse-existing-stream'
         });
+        this.claimGlobalCameraLease(existingStream);
         return existingStream;
       } catch (error) {
         console.warn('[Camera] Existing stream reuse failed, requesting fresh stream.', {
@@ -212,8 +272,19 @@ export class CameraSessionManager {
     let lastRenderError: unknown = null;
     for (let attempt = 0; attempt <= renderRetryCount; attempt += 1) {
       const profileStartIndex = profiles.length > 0 ? attempt % profiles.length : 0;
+      this.logDiag('acquire attempt requesting stream', {
+        sessionId,
+        attempt: attempt + 1,
+        maxAttempts: renderRetryCount + 1,
+        profileStartIndex: profileStartIndex + 1
+      });
       const stream = await this.requestCameraStreamWithTimeout(profiles, permissionTimeoutMs, profileStartIndex);
       try {
+        this.logDiag('acquire attempt stream received', {
+          sessionId,
+          attempt: attempt + 1,
+          tracks: this.getVideoTrackDiagnostics(stream)
+        });
         if (platformInfo.platform === 'ios') {
           await this.waitForVideoElementVisible(videoElement, 1800, `fresh-stream-attempt-${attempt + 1}`);
           await this.ensureRenderablePreviewWithRebind(videoElement, stream, {
@@ -227,9 +298,21 @@ export class CameraSessionManager {
             stage: `fresh-stream-attempt-${attempt + 1}:bind-preview`
           });
         }
+        this.claimGlobalCameraLease(stream);
+        this.logDiag('acquire attempt success', {
+          sessionId,
+          attempt: attempt + 1,
+          tracks: this.getVideoTrackDiagnostics(stream)
+        });
         return stream;
       } catch (error) {
         lastRenderError = error;
+        this.logDiag('acquire attempt failed', {
+          sessionId,
+          attempt: attempt + 1,
+          error: this.formatError(error),
+          tracks: this.getVideoTrackDiagnostics(stream)
+        });
         stream.getTracks().forEach((track) => track.stop());
         this.detachVideoElement(videoElement, true);
 
@@ -252,6 +335,16 @@ export class CameraSessionManager {
         }
         await waitMs(platformInfo.platform === 'ios' ? 520 : 350);
       }
+    }
+
+    const emergencyRecoveredStream = await this.tryEmergencyAudioVideoRecovery(
+      videoElement,
+      platformInfo,
+      Math.max(permissionTimeoutMs, 16000)
+    );
+    if (emergencyRecoveredStream) {
+      this.logDiag('emergency recovery succeeded after all retries');
+      return emergencyRecoveredStream;
     }
 
     if (lastRenderError instanceof Error) {
@@ -299,6 +392,49 @@ export class CameraSessionManager {
     }
   }
 
+  private claimGlobalCameraLease(stream: MediaStream): void {
+    const leaseWindow = window as CameraLeaseWindow;
+    const activeStream = leaseWindow.__JAS_ACTIVE_CAMERA_STREAM__;
+    const activeOwner = leaseWindow.__JAS_ACTIVE_CAMERA_OWNER__;
+
+    if (activeStream && activeStream !== stream && activeOwner !== this.ownerId) {
+      this.logDiag('claimGlobalCameraLease stopping previous owner stream', {
+        activeOwner,
+        tracks: this.getVideoTrackDiagnostics(activeStream)
+      });
+      stopStreamTracks(activeStream);
+    }
+
+    leaseWindow.__JAS_ACTIVE_CAMERA_STREAM__ = stream;
+    leaseWindow.__JAS_ACTIVE_CAMERA_OWNER__ = this.ownerId;
+    this.logDiag('claimGlobalCameraLease set active stream', {
+      tracks: this.getVideoTrackDiagnostics(stream)
+    });
+  }
+
+  private releaseGlobalCameraLease(stream: MediaStream | null): void {
+    const leaseWindow = window as CameraLeaseWindow;
+    const activeStream = leaseWindow.__JAS_ACTIVE_CAMERA_STREAM__;
+    if (!activeStream) return;
+    if (stream && activeStream !== stream) return;
+    if (leaseWindow.__JAS_ACTIVE_CAMERA_OWNER__ !== this.ownerId) return;
+    leaseWindow.__JAS_ACTIVE_CAMERA_STREAM__ = null;
+    leaseWindow.__JAS_ACTIVE_CAMERA_OWNER__ = undefined;
+  }
+
+  private stopLingeringGlobalCameraLease(currentStream: MediaStream | null): void {
+    const leaseWindow = window as CameraLeaseWindow;
+    const activeStream = leaseWindow.__JAS_ACTIVE_CAMERA_STREAM__;
+    if (!activeStream) return;
+    if (currentStream && activeStream === currentStream) return;
+    this.logDiag('stopLingeringGlobalCameraLease stopping lingering stream', {
+      tracks: this.getVideoTrackDiagnostics(activeStream)
+    });
+    stopStreamTracks(activeStream);
+    leaseWindow.__JAS_ACTIVE_CAMERA_STREAM__ = null;
+    leaseWindow.__JAS_ACTIVE_CAMERA_OWNER__ = undefined;
+  }
+
   public async recoverForegroundPreview(videoElement: HTMLVideoElement, stream: MediaStream): Promise<void> {
     await this.waitForVideoElementVisible(videoElement, 1000, 'foreground-recover');
     await this.ensureRenderablePreviewWithRebind(videoElement, stream, {
@@ -343,11 +479,17 @@ export class CameraSessionManager {
     }
 
     let shouldDiscardLateStream = false;
+    this.logDiag('requestCameraStreamWithTimeout start', {
+      permissionTimeoutMs,
+      profiles: profiles.length,
+      profileStartIndex: profileStartIndex + 1
+    });
     const streamRequest = this.requestCameraStream(profiles, profileStartIndex).then((stream) => {
       if (shouldDiscardLateStream) {
         stream.getTracks().forEach((track) => track.stop());
         throw new CameraPipelineError('CAMERA_LATE_STREAM_DISCARDED', 'Late stream discarded after timeout');
       }
+      this.logDiag('requestCameraStreamWithTimeout stream fulfilled');
       return stream;
     });
 
@@ -364,6 +506,9 @@ export class CameraSessionManager {
       if (isCameraPipelineError(error) && error.code === 'CAMERA_PERMISSION_TIMEOUT') {
         shouldDiscardLateStream = true;
       }
+      this.logDiag('requestCameraStreamWithTimeout failed', {
+        error: this.formatError(error)
+      });
       throw error;
     } finally {
       if (timeoutId !== null) {
@@ -405,6 +550,93 @@ export class CameraSessionManager {
     }
   }
 
+  private async tryEmergencyAudioVideoRecovery(
+    videoElement: HTMLVideoElement,
+    platformInfo: CameraPlatformInfo,
+    timeoutMs: number
+  ): Promise<MediaStream | null> {
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      return null;
+    }
+
+    this.logDiag('emergency audio+video recovery start', {
+      platform: platformInfo.platform,
+      timeoutMs
+    });
+
+    if (platformInfo.platform === 'ios') {
+      await this.performIosCameraKick();
+      await waitMs(620);
+    } else {
+      await waitMs(320);
+    }
+
+    let emergencyStream: MediaStream | null = null;
+    let timeoutId: number | null = null;
+    try {
+      emergencyStream = await Promise.race([
+        navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'user' },
+            width: { ideal: 640, max: 1280 },
+            height: { ideal: 480, max: 720 }
+          },
+          audio: true
+        }),
+        new Promise<MediaStream>((_, reject) => {
+          timeoutId = window.setTimeout(() => {
+            reject(new CameraPipelineError('CAMERA_PERMISSION_TIMEOUT', 'Emergency recovery getUserMedia timeout'));
+          }, timeoutMs);
+        })
+      ]);
+    } catch (error) {
+      this.logDiag('emergency audio+video recovery getUserMedia failed', {
+        error: this.formatError(error)
+      });
+      return null;
+    } finally {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    }
+
+    const videoTracks = emergencyStream.getVideoTracks();
+    const primaryVideoTrack = videoTracks[0];
+    if (!primaryVideoTrack) {
+      stopStreamTracks(emergencyStream);
+      this.logDiag('emergency audio+video recovery missing video track');
+      return null;
+    }
+
+    // Keep only one video track; stop all audio tracks and extra video tracks.
+    emergencyStream.getAudioTracks().forEach((track) => track.stop());
+    videoTracks.slice(1).forEach((track) => track.stop());
+    const videoOnlyStream = new MediaStream([primaryVideoTrack]);
+
+    try {
+      await this.waitForVideoElementVisible(videoElement, 2000, 'emergency-audio-video-recovery');
+      await this.ensureRenderablePreviewWithRebind(videoElement, videoOnlyStream, {
+        stage: 'emergency-audio-video-recovery',
+        metadataTimeoutMs: 5200,
+        playTimeoutMs: 5600,
+        frameTimeoutMs: 5600,
+        waitUnmuteMs: 2600
+      });
+      this.claimGlobalCameraLease(videoOnlyStream);
+      this.logDiag('emergency audio+video recovery render success', {
+        tracks: this.getVideoTrackDiagnostics(videoOnlyStream)
+      });
+      return videoOnlyStream;
+    } catch (error) {
+      this.logDiag('emergency audio+video recovery render failed', {
+        error: this.formatError(error),
+        tracks: this.getVideoTrackDiagnostics(videoOnlyStream)
+      });
+      stopStreamTracks(videoOnlyStream);
+      return null;
+    }
+  }
+
   private configureVideoElement(videoElement: HTMLVideoElement): void {
     videoElement.muted = true;
     videoElement.autoplay = true;
@@ -433,42 +665,60 @@ export class CameraSessionManager {
     stream: MediaStream,
     options: EnsureRenderableOptions
   ): Promise<void> {
+    const detachTrackDebug = this.attachTrackDebugListeners(stream, options.stage);
+    this.logDiag('ensureRenderablePreview start', {
+      stage: options.stage,
+      video: this.snapshotVideo(videoElement),
+      tracks: this.getVideoTrackDiagnostics(stream)
+    });
     this.configureVideoElement(videoElement);
     if (videoElement.srcObject !== stream) {
       this.detachVideoElement(videoElement, true);
       videoElement.srcObject = stream;
-    }
-
-    const metadataTimeoutMs = options.metadataTimeoutMs ?? 4500;
-    const metadataResult = await this.waitForVideoReadiness(videoElement, metadataTimeoutMs);
-    if (metadataResult !== 'ready') {
-      console.warn('[Camera] Video readiness check did not reach ready state before play()', {
+      this.logDiag('ensureRenderablePreview bound srcObject', {
         stage: options.stage,
-        metadataResult,
-        readyState: videoElement.readyState,
-        videoWidth: videoElement.videoWidth,
-        videoHeight: videoElement.videoHeight
+        video: this.snapshotVideo(videoElement)
       });
-      this.logVideoRenderDiagnostics(`${options.stage}:metadata-${metadataResult}`, videoElement, stream);
     }
+    try {
+      const metadataTimeoutMs = options.metadataTimeoutMs ?? 4500;
+      const metadataResult = await this.waitForVideoReadiness(videoElement, metadataTimeoutMs, options.stage);
+      if (metadataResult !== 'ready') {
+        console.warn('[Camera] Video readiness check did not reach ready state before play()', {
+          stage: options.stage,
+          metadataResult,
+          readyState: videoElement.readyState,
+          videoWidth: videoElement.videoWidth,
+          videoHeight: videoElement.videoHeight
+        });
+        this.logVideoRenderDiagnostics(`${options.stage}:metadata-${metadataResult}`, videoElement, stream);
+      }
 
-    const waitUnmuteMs = options.waitUnmuteMs ?? 1800;
-    const hasLiveUnmutedTrack = await this.waitForUnmutedLiveTrack(stream, waitUnmuteMs);
-    if (!hasLiveUnmutedTrack) {
-      console.warn('[Camera] Track remained muted before play(), continuing with frame probe.', {
+      const waitUnmuteMs = options.waitUnmuteMs ?? 1800;
+      const hasLiveUnmutedTrack = await this.waitForUnmutedLiveTrack(stream, waitUnmuteMs);
+      if (!hasLiveUnmutedTrack) {
+        console.warn('[Camera] Track remained muted before play(), continuing with frame probe.', {
+          stage: options.stage,
+          tracks: this.getVideoTrackDiagnostics(stream)
+        });
+      }
+
+      const playTimeoutMs = options.playTimeoutMs ?? 4200;
+      await this.playVideoWithTimeout(videoElement, stream, playTimeoutMs, options.stage);
+
+      const frameTimeoutMs = options.frameTimeoutMs ?? 4200;
+      const hasFrameProgress = await this.waitForFrameProgress(videoElement, stream, frameTimeoutMs, options.stage);
+      if (!hasFrameProgress) {
+        this.logVideoRenderDiagnostics(`${options.stage}:frame-timeout`, videoElement, stream);
+        throw new CameraPipelineError('VIDEO_STREAM_NOT_RENDERING', 'VIDEO_STREAM_NOT_RENDERING');
+      }
+    } finally {
+      detachTrackDebug();
+      this.logDiag('ensureRenderablePreview finish', {
         stage: options.stage,
+        video: this.snapshotVideo(videoElement),
         tracks: this.getVideoTrackDiagnostics(stream)
       });
-    }
-
-    const playTimeoutMs = options.playTimeoutMs ?? 4200;
-    await this.playVideoWithTimeout(videoElement, stream, playTimeoutMs, options.stage);
-
-    const frameTimeoutMs = options.frameTimeoutMs ?? 4200;
-    const hasFrameProgress = await this.waitForFrameProgress(videoElement, stream, frameTimeoutMs);
-    if (!hasFrameProgress) {
-      this.logVideoRenderDiagnostics(`${options.stage}:frame-timeout`, videoElement, stream);
-      throw new CameraPipelineError('VIDEO_STREAM_NOT_RENDERING', 'VIDEO_STREAM_NOT_RENDERING');
     }
   }
 
@@ -536,6 +786,12 @@ export class CameraSessionManager {
     timeoutMs: number,
     stage: string
   ): Promise<void> {
+    this.logDiag('playVideoWithTimeout start', {
+      stage,
+      timeoutMs,
+      video: this.snapshotVideo(videoElement),
+      tracks: this.getVideoTrackDiagnostics(stream)
+    });
     const playPromise = videoElement.play();
     const playOutcome = await Promise.race<'played' | 'timeout'>([
       playPromise.then(() => 'played'),
@@ -563,15 +819,24 @@ export class CameraSessionManager {
         hasLiveVideoTrack,
         paused: videoElement.paused
       });
+      this.logDiag('playVideoWithTimeout timeout but continuing frame probe', {
+        stage,
+        video: this.snapshotVideo(videoElement),
+        tracks: this.getVideoTrackDiagnostics(stream)
+      });
+      return;
     }
+    this.logDiag('playVideoWithTimeout success', { stage, video: this.snapshotVideo(videoElement) });
   }
 
   private async waitForVideoReadiness(
     videoElement: HTMLVideoElement,
-    timeoutMs: number
+    timeoutMs: number,
+    stage: string
   ): Promise<'ready' | 'timeout' | 'error'> {
     return new Promise<'ready' | 'timeout' | 'error'>((resolve) => {
       if (videoElement.readyState >= 1 || (videoElement.videoWidth > 0 && videoElement.videoHeight > 0)) {
+        this.logDiag('waitForVideoReadiness immediate ready', { stage, video: this.snapshotVideo(videoElement) });
         resolve('ready');
         return;
       }
@@ -611,6 +876,7 @@ export class CameraSessionManager {
         if (resolved) return;
         resolved = true;
         cleanup();
+        this.logDiag('waitForVideoReadiness ready event', { stage, video: this.snapshotVideo(videoElement) });
         resolve('ready');
       };
 
@@ -618,6 +884,7 @@ export class CameraSessionManager {
         if (resolved) return;
         resolved = true;
         cleanup();
+        this.logDiag('waitForVideoReadiness error event', { stage, video: this.snapshotVideo(videoElement) });
         resolve('error');
       };
 
@@ -690,7 +957,8 @@ export class CameraSessionManager {
   private async waitForFrameProgress(
     videoElement: HTMLVideoElement,
     stream: MediaStream,
-    maxWaitMs: number
+    maxWaitMs: number,
+    stage: string
   ): Promise<boolean> {
     const videoWithStats = videoElement as VideoElementWithFrameStats;
     const baselineCurrentTime = Number.isFinite(videoElement.currentTime) ? videoElement.currentTime : 0;
@@ -722,6 +990,7 @@ export class CameraSessionManager {
 
     try {
       const startedAt = performance.now();
+      let lastHeartbeatAt = startedAt;
       while (performance.now() - startedAt < maxWaitMs) {
         const videoTracks = stream.getVideoTracks();
         const hasLiveTrack = videoTracks.some((track) => track.readyState === 'live' && track.enabled);
@@ -746,11 +1015,40 @@ export class CameraSessionManager {
           isVideoElementActive &&
           hasFrameProgress
         ) {
+          this.logDiag('waitForFrameProgress success', {
+            stage,
+            elapsedMs: Math.round(performance.now() - startedAt),
+            video: this.snapshotVideo(videoElement)
+          });
           return true;
+        }
+
+        const now = performance.now();
+        if (now - lastHeartbeatAt >= 700) {
+          lastHeartbeatAt = now;
+          this.logDiag('waitForFrameProgress heartbeat', {
+            stage,
+            elapsedMs: Math.round(now - startedAt),
+            hasLiveTrack,
+            hasUsableVideoSize,
+            isVideoElementActive,
+            hasTimeProgressed,
+            hasDecodedFrameCountProgress,
+            hasFrameCallbackMediaTimeProgress,
+            hasFrameCallbackPresentedFramesProgress,
+            video: this.snapshotVideo(videoElement),
+            tracks: this.getVideoTrackDiagnostics(stream)
+          });
         }
 
         await waitMs(120);
       }
+      this.logDiag('waitForFrameProgress timeout', {
+        stage,
+        maxWaitMs,
+        video: this.snapshotVideo(videoElement),
+        tracks: this.getVideoTrackDiagnostics(stream)
+      });
       return false;
     } finally {
       callbackDisposed = true;
@@ -758,6 +1056,66 @@ export class CameraSessionManager {
         videoElement.cancelVideoFrameCallback(callbackHandle);
       }
     }
+  }
+
+  private attachTrackDebugListeners(stream: MediaStream, stage: string): () => void {
+    const cleanupTasks: Array<() => void> = [];
+    const tracks = stream.getVideoTracks();
+    tracks.forEach((track, index) => {
+      const bind = (eventName: 'mute' | 'unmute' | 'ended') => {
+        const handler = () => {
+          this.logDiag('video track lifecycle event', {
+            stage,
+            event: eventName,
+            trackIndex: index,
+            enabled: track.enabled,
+            muted: track.muted,
+            readyState: track.readyState,
+            label: track.label
+          });
+        };
+        track.addEventListener(eventName, handler);
+        cleanupTasks.push(() => track.removeEventListener(eventName, handler));
+      };
+      bind('mute');
+      bind('unmute');
+      bind('ended');
+    });
+
+    return () => {
+      cleanupTasks.forEach((cleanup) => cleanup());
+    };
+  }
+
+  private snapshotVideo(videoElement: HTMLVideoElement): VideoSnapshot {
+    return {
+      paused: videoElement.paused,
+      ended: videoElement.ended,
+      muted: videoElement.muted,
+      readyState: videoElement.readyState,
+      networkState: videoElement.networkState,
+      currentTime: videoElement.currentTime,
+      videoWidth: videoElement.videoWidth,
+      videoHeight: videoElement.videoHeight,
+      clientWidth: videoElement.clientWidth,
+      clientHeight: videoElement.clientHeight,
+      isConnected: videoElement.isConnected
+    };
+  }
+
+  private logDiag(message: string, data?: Record<string, unknown>): void {
+    console.info('[Camera][Diag]', message, {
+      ownerId: this.ownerId,
+      visibilityState: document.visibilityState,
+      ...data
+    });
+  }
+
+  private formatError(error: unknown): string {
+    if (error instanceof Error) {
+      return `${error.name}:${error.message}`;
+    }
+    return String(error);
   }
 
   private async performIosCameraKick(): Promise<void> {
