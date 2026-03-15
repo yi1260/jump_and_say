@@ -169,6 +169,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
   private volumeMonitorStartAt: number = 0;
   private volumeMonitorNoiseFloor: number = 0.008;
   private volumeMonitorReferenceLevel: number = 0.032;
+  private volumeMonitorDetectedSignal: boolean = false;
   private volumeMonitorSensitivityBoost: number = 1;
   private blindBoxMicHintContainer: Phaser.GameObjects.Container | null = null;
   private blindBoxMicHintText: Phaser.GameObjects.Text | null = null;
@@ -631,6 +632,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
     this.volumeMonitorStartAt = 0;
     this.volumeMonitorNoiseFloor = 0.008;
     this.volumeMonitorReferenceLevel = 0.032;
+    this.volumeMonitorDetectedSignal = false;
     this.blindBoxVolumeInnerRect = null;
     this.blindBoxVolumeFillImage = null;
     this.round1Flow.destroyBlindBoxUiText();

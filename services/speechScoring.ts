@@ -22,6 +22,7 @@ interface SpeechRecognitionEventLike extends Event {
 
 interface SpeechRecognitionErrorEventLike extends Event {
   error: string;
+  message?: string;
 }
 
 interface SpeechRecognitionLikeEventMap {
@@ -29,6 +30,13 @@ interface SpeechRecognitionLikeEventMap {
   error: SpeechRecognitionErrorEventLike;
   end: Event;
   nomatch: Event;
+  start: Event;
+  audiostart: Event;
+  audioend: Event;
+  soundstart: Event;
+  soundend: Event;
+  speechstart: Event;
+  speechend: Event;
 }
 
 interface SpeechRecognitionLike {
@@ -36,6 +44,13 @@ interface SpeechRecognitionLike {
   continuous: boolean;
   interimResults: boolean;
   maxAlternatives: number;
+  onstart: ((event: Event) => void) | null;
+  onaudiostart: ((event: Event) => void) | null;
+  onaudioend: ((event: Event) => void) | null;
+  onsoundstart: ((event: Event) => void) | null;
+  onsoundend: ((event: Event) => void) | null;
+  onspeechstart: ((event: Event) => void) | null;
+  onspeechend: ((event: Event) => void) | null;
   onresult: ((event: SpeechRecognitionEventLike) => void) | null;
   onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
   onend: ((event: Event) => void) | null;
@@ -79,6 +94,9 @@ export interface RecognizeOnceResult {
 const getSpeechRecognitionCtor = (): SpeechRecognitionLikeConstructor | null => (
   window.SpeechRecognition || window.webkitSpeechRecognition || null
 );
+
+const RECOGNITION_START_TIMEOUT_FLOOR_MS = 300;
+const RECOGNITION_END_GRACE_MS = 180;
 
 const clampScore = (score: number): number => {
   if (!Number.isFinite(score)) return 0;
@@ -200,18 +218,61 @@ class SpeechScoringService {
       let forcedTimeout = false;
       let mappedErrorReason: SpeechRecognitionResultReason | null = null;
       let timeoutId: number | null = null;
+      let forceFinalizeId: number | null = null;
 
-      const clearTimeoutIfNeeded = (): void => {
+      const clearTimersIfNeeded = (): void => {
         if (timeoutId !== null) {
           window.clearTimeout(timeoutId);
           timeoutId = null;
         }
+        if (forceFinalizeId !== null) {
+          window.clearTimeout(forceFinalizeId);
+          forceFinalizeId = null;
+        }
+      };
+
+      const buildFinalReason = (
+        preferredReason: SpeechRecognitionResultReason | null = null
+      ): SpeechRecognitionResultReason => {
+        if (transcript.trim().length > 0) {
+          return 'ok';
+        }
+        if (forcedTimeout) {
+          return 'timeout';
+        }
+        return preferredReason || mappedErrorReason || 'no-speech';
+      };
+
+      const scheduleForceFinalize = (
+        reason: SpeechRecognitionResultReason,
+        delayMs: number,
+        cause: string
+      ): void => {
+        if (finalized || forceFinalizeId !== null) return;
+        forceFinalizeId = window.setTimeout(() => {
+          forceFinalizeId = null;
+          if (finalized) return;
+          console.warn('[Pronounce] SpeechRecognition forcing finalize after missing end event.', {
+            cause,
+            reason,
+            transcriptLength: transcript.trim().length,
+            confidence,
+            forcedTimeout,
+            mappedErrorReason
+          });
+          try {
+            recognition.abort();
+          } catch (error) {
+            console.warn('[Pronounce] SpeechRecognition abort failed during forced finalize:', error);
+          }
+          finalize(buildFinalReason(reason));
+        }, Math.max(0, delayMs));
       };
 
       const finalize = (reason: SpeechRecognitionResultReason): void => {
         if (finalized) return;
         finalized = true;
-        clearTimeoutIfNeeded();
+        clearTimersIfNeeded();
         const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
         resolve({
           transcript: transcript.trim(),
@@ -219,6 +280,37 @@ class SpeechScoringService {
           reason,
           durationMs
         });
+      };
+
+      recognition.onstart = (): void => {
+        console.info('[Pronounce] SpeechRecognition started.', {
+          lang: options.lang,
+          maxDurationMs: options.maxDurationMs
+        });
+      };
+
+      recognition.onaudiostart = (): void => {
+        console.info('[Pronounce] SpeechRecognition audio capture started.');
+      };
+
+      recognition.onaudioend = (): void => {
+        console.info('[Pronounce] SpeechRecognition audio capture ended.');
+      };
+
+      recognition.onsoundstart = (): void => {
+        console.info('[Pronounce] SpeechRecognition sound detected.');
+      };
+
+      recognition.onsoundend = (): void => {
+        console.info('[Pronounce] SpeechRecognition sound ended.');
+      };
+
+      recognition.onspeechstart = (): void => {
+        console.info('[Pronounce] SpeechRecognition speech detected.');
+      };
+
+      recognition.onspeechend = (): void => {
+        console.info('[Pronounce] SpeechRecognition speech ended.');
       };
 
       recognition.onresult = (event: SpeechRecognitionEventLike): void => {
@@ -235,38 +327,57 @@ class SpeechScoringService {
         if (chunks.length > 0) {
           transcript = chunks.join(' ').trim();
           confidence = Math.max(confidence, latestConfidence);
+          console.info('[Pronounce] SpeechRecognition result received.', {
+            transcript,
+            confidence
+          });
+          try {
+            recognition.stop();
+          } catch (error) {
+            console.warn('[Pronounce] SpeechRecognition stop failed after result:', error);
+          }
+          finalize('ok');
         }
       };
 
       recognition.onerror = (event: SpeechRecognitionErrorEventLike): void => {
         mappedErrorReason = mapRecognitionError(event.error);
+        console.warn('[Pronounce] SpeechRecognition error event received.', {
+          error: event.error,
+          message: event.message,
+          mappedErrorReason
+        });
+        scheduleForceFinalize(mappedErrorReason, RECOGNITION_END_GRACE_MS, `error:${event.error}`);
       };
 
       recognition.onnomatch = (): void => {
         mappedErrorReason = 'no-speech';
+        console.info('[Pronounce] SpeechRecognition no match.');
+        scheduleForceFinalize('no-speech', RECOGNITION_END_GRACE_MS, 'nomatch');
       };
 
       recognition.onend = (): void => {
-        if (transcript.trim().length > 0) {
-          finalize('ok');
-          return;
-        }
-        if (forcedTimeout) {
-          finalize('timeout');
-          return;
-        }
-        finalize(mappedErrorReason || 'no-speech');
+        console.info('[Pronounce] SpeechRecognition ended.', {
+          transcriptLength: transcript.trim().length,
+          forcedTimeout,
+          mappedErrorReason
+        });
+        finalize(buildFinalReason());
       };
 
       timeoutId = window.setTimeout(() => {
         forcedTimeout = true;
+        console.warn('[Pronounce] SpeechRecognition timed out, requesting stop.', {
+          maxDurationMs: options.maxDurationMs
+        });
         try {
           recognition.stop();
+          scheduleForceFinalize('timeout', RECOGNITION_END_GRACE_MS, 'timeout-stop-without-end');
         } catch (error) {
           console.warn('[Pronounce] SpeechRecognition stop failed on timeout:', error);
           finalize('timeout');
         }
-      }, Math.max(300, options.maxDurationMs));
+      }, Math.max(RECOGNITION_START_TIMEOUT_FLOOR_MS, options.maxDurationMs));
 
       try {
         recognition.start();
