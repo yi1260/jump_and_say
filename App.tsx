@@ -29,7 +29,8 @@ export enum GamePhase {
   THEME_SELECTION = 'THEME_SELECTION',
   LOADING = 'LOADING',
   TUTORIAL = 'TUTORIAL',
-  PLAYING = 'PLAYING'
+  PLAYING = 'PLAYING',
+  MODE_SELECTION = 'MODE_SELECTION'
 }
 
 type FullscreenCapableElement = HTMLElement & {
@@ -77,7 +78,7 @@ interface RoundTutorialConfig {
 
 const ROUND_TUTORIAL_CONFIG: Record<GameplayMode, RoundTutorialConfig> = {
   QUIZ: {
-    heading: 'Round One: 听音识图',
+    heading: '听音识图',
     cards: [
       {
         iconPath: 'assets/kenney/Vector/Characters/character_pink_walk_a.svg',
@@ -94,7 +95,7 @@ const ROUND_TUTORIAL_CONFIG: Record<GameplayMode, RoundTutorialConfig> = {
     ]
   },
   BLIND_BOX_PRONUNCIATION: {
-    heading: 'Round Two: 大声跟读',
+    heading: '大声跟读',
     cards: [
       {
         iconPath: 'assets/kenney/Vector/Characters/character_pink_jump.svg',
@@ -235,6 +236,7 @@ export default function App() {
   });
   const [gameplayModeIssue, setGameplayModeIssue] = useState<string>('');
   const [pronunciationSummary, setPronunciationSummary] = useState<PronunciationSummary | null>(null);
+  const [enabledRounds, setEnabledRounds] = useState<GameplayMode[]>(['QUIZ', 'BLIND_BOX_PRONUNCIATION']);
 
   const levels = React.useMemo(() => {
     const allLevels = Array.from(new Set(themes.map(t => t.level).filter(Boolean))) as string[];
@@ -259,7 +261,7 @@ export default function App() {
   ), [qualityMode]);
   const currentThemeId = selectedThemes[sessionThemeIndex] || '';
   const shouldSkipPronunciationRound = !isSpeechRecognitionSupported;
-  const firstRoundMode: GameplayMode = 'QUIZ';
+  const firstRoundMode: GameplayMode = enabledRounds.includes('QUIZ') ? 'QUIZ' : 'BLIND_BOX_PRONUNCIATION';
   const isThemeStartDisabled = selectedThemes.length === 0;
 
   useEffect(() => {
@@ -1416,9 +1418,16 @@ export default function App() {
     setGameplayMode(firstRoundMode);
     setPronunciationSummary(null);
     setGameplayModeIssue('');
-    setSelectedThemes([]); // Clear selected themes
-    setPhase(GamePhase.THEME_SELECTION);
-  }, [cleanupCameraAndMotion, clearRestCountdown, exitFullscreenSafely, firstRoundMode]);
+    
+    // Use the current phase from state at the moment the callback runs
+    // Note: We use the local 'phase' from closure here
+    if (phase === GamePhase.LOADING || phase === GamePhase.PLAYING || phase === GamePhase.TUTORIAL) {
+        setPhase(GamePhase.MODE_SELECTION);
+    } else {
+        setSelectedThemes([]); // Clear selected themes only when exiting to menu
+        setPhase(GamePhase.THEME_SELECTION);
+    }
+  }, [cleanupCameraAndMotion, clearRestCountdown, exitFullscreenSafely, firstRoundMode, phase]);
 
   const handleExitToMenu = () => {
     loadingRequestIdRef.current += 1;
@@ -1443,6 +1452,20 @@ export default function App() {
         return prev.filter(id => id !== themeId);
       } else {
         return [...prev, themeId];
+      }
+    });
+  };
+
+  const handleToggleRoundMode = (mode: GameplayMode) => {
+    setEnabledRounds(prev => {
+      if (prev.includes(mode)) {
+        if (prev.length <= 1) return prev; // Must have at least one mode
+        return prev.filter(m => m !== mode);
+      } else {
+        const next = [...prev];
+        if (mode === 'QUIZ') next.unshift('QUIZ');
+        else next.push('BLIND_BOX_PRONUNCIATION');
+        return next;
       }
     });
   };
@@ -2541,24 +2564,32 @@ export default function App() {
 
   useEffect(() => {
     if (phase !== GamePhase.TUTORIAL || !roundIntroMode) return;
-    const introText = roundIntroMode === 'QUIZ'
-      ? (shouldSkipPronunciationRound ? '听音识图。' : 'Round One，听音识图。')
-      : 'Round Two，大声跟读。';
+
+    const currentRoundSequenceIdx = enabledRounds.indexOf(roundIntroMode);
+    const activeRoundCount = enabledRounds.length;
+    
+    const roundPrefix = currentRoundSequenceIdx === 0 ? 'Round One，' : 'Round Two，';
+    const modeName = roundIntroMode === 'QUIZ' ? '听音识图。' : '大声跟读。';
+    
+    const introText = (activeRoundCount > 1 && currentRoundSequenceIdx !== -1)
+      ? `${roundPrefix}${modeName}`
+      : modeName;
+
     speakIntroText(introText);
-  }, [phase, roundIntroMode, shouldSkipPronunciationRound, speakIntroText]);
+  }, [phase, roundIntroMode, enabledRounds, speakIntroText]);
 
   const handleContinueToRound2 = useCallback(() => {
-    if (shouldSkipPronunciationRound) return;
+    if (shouldSkipPronunciationRound || !enabledRounds.includes('BLIND_BOX_PRONUNCIATION')) return;
     clearRestCountdown();
     setShowCompletion(false);
     setPronunciationSummary(null);
     setScore(0);
     setTotalQuestions(0);
     void startRoundIntro('BLIND_BOX_PRONUNCIATION');
-  }, [clearRestCountdown, shouldSkipPronunciationRound, startRoundIntro]);
+  }, [clearRestCountdown, enabledRounds, shouldSkipPronunciationRound, startRoundIntro]);
 
   const handleReplay = useCallback(() => {
-    if (gameplayMode === 'QUIZ' && !shouldSkipPronunciationRound) {
+    if (gameplayMode === 'QUIZ' && !shouldSkipPronunciationRound && enabledRounds.includes('BLIND_BOX_PRONUNCIATION')) {
       handleContinueToRound2();
       return;
     }
@@ -2567,10 +2598,10 @@ export default function App() {
     setScore(0);
     setTotalQuestions(0);
     void startRoundIntro(firstRoundMode);
-  }, [firstRoundMode, gameplayMode, handleContinueToRound2, shouldSkipPronunciationRound, startRoundIntro]);
+  }, [enabledRounds, firstRoundMode, gameplayMode, handleContinueToRound2, shouldSkipPronunciationRound, startRoundIntro]);
 
   const handleNextLevel = useCallback(() => {
-    if (gameplayMode === 'QUIZ' && !shouldSkipPronunciationRound) {
+    if (gameplayMode === 'QUIZ' && !shouldSkipPronunciationRound && enabledRounds.includes('BLIND_BOX_PRONUNCIATION')) {
       handleContinueToRound2();
       return;
     }
@@ -2640,8 +2671,13 @@ export default function App() {
   const isPlayingFullscreen = phase === GamePhase.PLAYING && isFullscreen;
   const activeTutorialMode: GameplayMode = roundIntroMode ?? gameplayMode;
   const tutorialConfig = ROUND_TUTORIAL_CONFIG[activeTutorialMode];
-  const tutorialHeading = activeTutorialMode === 'QUIZ' && shouldSkipPronunciationRound
-    ? '听音识图'
+  
+  // Dynamically calculate tutorial heading based on enabled rounds
+  const currentRoundSequenceIdx = enabledRounds.indexOf(activeTutorialMode);
+  const activeRoundCount = enabledRounds.length;
+  
+  const tutorialHeading = (activeRoundCount > 1 && currentRoundSequenceIdx !== -1)
+    ? `Round ${currentRoundSequenceIdx === 0 ? 'One' : 'Two'}: ${tutorialConfig.heading}`
     : tutorialConfig.heading;
   const tutorialProgressPercent = Math.round(
     Math.max(0, Math.min(1, roundIntroProgress ?? 1)) * 100
@@ -2723,6 +2759,8 @@ export default function App() {
                 e.stopPropagation();
                 if (phase === GamePhase.THEME_SELECTION) {
                   handleExitToMenu();
+                } else if (phase === GamePhase.MODE_SELECTION) {
+                  setPhase(GamePhase.THEME_SELECTION);
                 } else {
                   handleBackToMenu();
                 }
@@ -2732,6 +2770,8 @@ export default function App() {
                 e.stopPropagation();
                 if (phase === GamePhase.THEME_SELECTION) {
                   handleExitToMenu();
+                } else if (phase === GamePhase.MODE_SELECTION) {
+                  setPhase(GamePhase.THEME_SELECTION);
                 } else {
                   handleBackToMenu();
                 }
@@ -3109,13 +3149,100 @@ export default function App() {
                     
                     {/* START BUTTON FIXED BOTTOM - Overlay */}
                     <div className="theme-start flex justify-center px-4">
-                         <button 
-                            onClick={handleStartGame}
+                        <button 
+                            onClick={() => setPhase(GamePhase.MODE_SELECTION)}
                             disabled={isThemeStartDisabled}
                             className={`pointer-events-auto kenney-button kenney-button-handdrawn mobile-landscape-button px-8 py-3 text-xl md:text-2xl shadow-2xl transition-all transform duration-300 ${!isThemeStartDisabled ? 'scale-100 opacity-100 translate-y-0' : 'scale-90 opacity-80 translate-y-0 bg-gray-400 border-gray-600'}`}
                         >
-                            加载资源（{selectedThemes.length}）
+                            选好了，下一步（{selectedThemes.length}）
                         </button>
+                    </div>
+                </div>
+            )}
+            {/* MODE SELECTION */}
+            {phase === GamePhase.MODE_SELECTION && (
+                <div className="theme-shell non-game-scale theme-selection-container text-center w-full max-w-4xl mx-auto px-4 md:px-8 relative flex flex-col items-center justify-center min-h-[100dvh]">
+                    <h2 className="text-3xl md:text-5xl lg:text-6xl font-black text-white mb-8 md:mb-12 tracking-[0.04em] shrink-0 mobile-landscape-title drop-shadow-lg">
+                        选择玩法
+                    </h2>
+                    
+                    <div className="w-full grid grid-cols-1 sm:grid-cols-2 gap-6 md:gap-10 max-w-5xl">
+                        {/* QUIZ CARD */}
+                        <button
+                            onClick={() => handleToggleRoundMode('QUIZ')}
+                            className={`group relative kenney-panel p-6 md:p-10 flex flex-col items-center transition-all duration-300 border-[6px] rounded-[40px] shadow-[0_12px_0_rgba(0,0,0,0.2)] ${
+                                enabledRounds.includes('QUIZ') 
+                                ? 'bg-[#FFAD7D] border-kenney-dark scale-100 -rotate-1 shadow-[0_8px_0_rgba(0,0,0,0.2)]' 
+                                : 'bg-white/10 border-white/20 opacity-70 scale-95 shadow-none hover:bg-white/30 rotate-0'
+                            }`}
+                        >
+                            <div className={`w-24 h-24 md:w-32 md:h-32 mb-6 md:mb-8 rounded-3xl flex items-center justify-center transition-all ${enabledRounds.includes('QUIZ') ? 'bg-white/40 rotate-[-2deg]' : 'bg-black/5 rotate-0'}`}>
+                                <img src="/assets/icons/mode_quiz.png" className={`w-16 h-16 md:w-28 md:h-28 object-contain transition-all duration-300 ${enabledRounds.includes('QUIZ') ? 'animate-bounce-short' : 'grayscale opacity-40'}`} alt="" />
+                            </div>
+                            <h3 className={`text-2xl md:text-4xl font-black mb-2 md:mb-3 transition-colors ${enabledRounds.includes('QUIZ') ? 'text-kenney-dark' : 'text-white/60'}`}>
+                                听音识图
+                            </h3>
+                            <p className={`text-base md:text-xl font-bold max-w-[280px] leading-tight transition-colors ${enabledRounds.includes('QUIZ') ? 'text-kenney-dark/70' : 'text-white/40'}`}>
+                                听发音，跳跃选择正确的图片
+                            </p>
+                            
+                            {enabledRounds.includes('QUIZ') ? (
+                              <div className="absolute top-6 right-6 bg-kenney-dark text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center shadow-lg transform rotate-12">
+                                <svg className="w-6 h-6 md:w-8 md:h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={5}>
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                </svg>
+                              </div>
+                            ) : (
+                              <div className="mt-6 px-5 py-2 bg-white/10 text-white/40 rounded-full text-xs md:text-sm font-black uppercase tracking-wider">
+                                 未选中
+                              </div>
+                            )}
+                        </button>
+
+                        {/* PRONUNCIATION CARD */}
+                        <button
+                            onClick={() => !shouldSkipPronunciationRound && handleToggleRoundMode('BLIND_BOX_PRONUNCIATION')}
+                            disabled={shouldSkipPronunciationRound}
+                            className={`group relative kenney-panel p-6 md:p-10 flex flex-col items-center transition-all duration-300 border-[6px] rounded-[40px] shadow-[0_12px_0_rgba(0,0,0,0.2)] ${
+                                enabledRounds.includes('BLIND_BOX_PRONUNCIATION') 
+                                ? 'bg-[#98D8A0] border-kenney-dark scale-100 rotate-1 shadow-[0_8px_0_rgba(0,0,0,0.2)]' 
+                                : 'bg-white/10 border-white/20 opacity-70 scale-95 shadow-none hover:bg-white/30 rotate-0'
+                            } ${shouldSkipPronunciationRound ? 'cursor-not-allowed grayscale' : ''}`}
+                        >
+                            <div className={`w-24 h-24 md:w-32 md:h-32 mb-6 md:mb-8 rounded-3xl flex items-center justify-center transition-all ${enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? 'bg-white/40 rotate-[2deg]' : 'bg-black/5 rotate-0'}`}>
+                                <img src="/assets/icons/mode_pronunciation.png" className={`w-16 h-16 md:w-28 md:h-28 object-contain transition-all duration-300 ${enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? 'animate-pulse' : 'grayscale opacity-40'}`} alt="" />
+                            </div>
+                            <h3 className={`text-2xl md:text-4xl font-black mb-2 md:mb-3 transition-colors ${enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? 'text-kenney-dark' : 'text-white/60'}`}>
+                                大声跟读
+                            </h3>
+                            <p className={`text-base md:text-xl font-bold max-w-[280px] leading-tight transition-colors ${enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? 'text-kenney-dark/70' : 'text-white/40'}`}>
+                                模仿发音，大声跟读
+                            </p>
+                            
+                            {shouldSkipPronunciationRound ? (
+                              <span className="mt-6 px-5 py-2 bg-red-500/80 text-white rounded-full text-xs md:text-sm font-black">语音不可用</span>
+                            ) : enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? (
+                              <div className="absolute top-6 right-6 bg-kenney-dark text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center shadow-lg transform rotate-12">
+                                <svg className="w-6 h-6 md:w-8 md:h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={5}>
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                </svg>
+                              </div>
+                            ) : (
+                              <div className="mt-6 px-5 py-2 bg-white/10 text-white/40 rounded-full text-xs md:text-sm font-black uppercase tracking-wider">
+                                 未选中
+                              </div>
+                            )}
+                        </button>
+                    </div>
+
+                    <div className="flex justify-center w-full px-4 shrink-0 mt-8 md:mt-12 mb-6 z-10 relative">
+                         <button
+                             onClick={handleStartGame}
+                             disabled={enabledRounds.length === 0}
+                             className={`pointer-events-auto kenney-button kenney-button-handdrawn mobile-landscape-button px-8 py-3 text-xl md:text-2xl shadow-2xl transition-all transform duration-300 ${enabledRounds.length > 0 ? 'scale-100 opacity-100 translate-y-0 hover:scale-105 active:scale-95' : 'scale-90 opacity-80 translate-y-0 bg-gray-400 border-gray-600'}`}
+                         >
+                             选好了，下一步（{enabledRounds.length}）
+                         </button>
                     </div>
                 </div>
             )}
