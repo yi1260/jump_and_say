@@ -1,5 +1,9 @@
 import Phaser from 'phaser';
 import { scorePronunciation, speechScoringService, type RecognizeOnceResult } from '../../../services/speechScoring';
+import {
+  assessPronunciationAttempt,
+  shouldRetryRecognitionAttempt
+} from '../../../services/pronunciationAssessment';
 import type {
   PronunciationConfidenceLevel,
   PronunciationRoundResult,
@@ -53,13 +57,6 @@ const ROUND1_FEEDBACK_BADGE_MAX_DISPLAY_WIDTH = 540;
 const ROUND1_FEEDBACK_BADGE_VIEWPORT_WIDTH_RATIO = 0.66;
 const ROUND1_FEEDBACK_BADGE_VIEWPORT_HEIGHT_RATIO = 0.48;
 const ROUND1_TRY_AGAIN_SKIP_LIMIT = 3;
-const TRY_AGAIN_MIN_TEXT_SIMILARITY = 0.3;
-const TRY_AGAIN_MIN_VOLUME_PEAK = 0.07;
-const EXCELLENT_MIN_TEXT_SIMILARITY = 0.72;
-const EXCELLENT_MIN_VOLUME_PEAK = 0.14;
-const EXCELLENT_MIN_QUALITY_SCORE = 0.72;
-const QUALITY_TEXT_WEIGHT = 0.82;
-const QUALITY_VOLUME_WEIGHT = 0.18;
 const RECORDING_START_SFX_KEY = 'sfx_record_start';
 const RECORDING_START_SFX_VOLUME = 0.45;
 
@@ -179,6 +176,7 @@ interface Round1SceneInternal {
   volumeMonitorStartAt: number;
   volumeMonitorNoiseFloor: number;
   volumeMonitorReferenceLevel: number;
+  volumeMonitorDetectedSignal: boolean;
   pronunciationHudMicVisible: boolean;
   pronunciationHudVolumeLevel: number;
   pronunciationHudCountdownSeconds: number;
@@ -661,30 +659,42 @@ export class Round1PronunciationFlow {
       scene.blindBoxRoundPhase = 'RECORDING';
       console.info('[Pronounce] Recognition started:', questionItem.question);
       this.setBlindBoxMicHintVisible(true);
-      await this.startVolumeMonitor(() => {
+      const volumeMonitorReady = await this.startVolumeMonitor(() => {
         console.info('[Pronounce] Mic countdown reached 0s.');
       });
       const recognitionResult = await this.recognizeWithStableWindow(scene.PRONUNCIATION_RECORDING_TIMEOUT_MS);
+      const volumeMonitorDetectedSignal = scene.volumeMonitorDetectedSignal;
+      const volumePeak = Phaser.Math.Clamp(scene.blindBoxCurrentVolumePeak, 0, 1);
       this.stopVolumeMonitor();
       this.setBlindBoxMicHintVisible(false);
       if (!this.isActiveRoundToken(roundToken)) return;
 
       const transcript = recognitionResult.transcript.trim();
-      const volumePeak = Phaser.Math.Clamp(scene.blindBoxCurrentVolumePeak, 0, 1);
-      const confidence = this.resolveRecognitionConfidence(
-        recognitionResult.confidence,
-        transcript,
-        recognitionResult.reason,
+      const textSimilarity = this.getTextSimilarity(
         questionItem.question,
-        volumePeak
-      );
-      const confidenceLevel = this.resolveConfidenceLevel(
-        confidence,
         transcript,
-        recognitionResult.reason,
-        questionItem.question,
-        volumePeak
+        recognitionResult.reason
       );
+      const assessment = assessPronunciationAttempt({
+        rawConfidence: recognitionResult.confidence,
+        textSimilarity,
+        volumePeak,
+        volumeMonitorReady,
+        volumeMonitorDetectedSignal
+      });
+      const confidence = assessment.confidence;
+      const confidenceLevel = assessment.confidenceLevel;
+      if (assessment.usedTranscriptOnlyFallback) {
+        console.warn('[Pronounce] Falling back to transcript-only scoring because volume meter never responded.', {
+          question: questionItem.question,
+          transcript,
+          textSimilarity,
+          volumePeak,
+          volumeMonitorReady,
+          volumeMonitorDetectedSignal,
+          reason: recognitionResult.reason
+        });
+      }
 
       const roundResult: PronunciationRoundResult = {
         targetText: questionItem.question,
@@ -1910,6 +1920,7 @@ export class Round1PronunciationFlow {
     scene.volumeMonitorNoiseFloor = 0.015;
     scene.volumeMonitorReferenceLevel = 0.045;
     scene.blindBoxCurrentVolumePeak = 0;
+    scene.volumeMonitorDetectedSignal = false;
     this.setPronunciationHudVolumeLevel(0, true);
   }
 
@@ -1971,6 +1982,7 @@ export class Round1PronunciationFlow {
     scene.blindBoxVolumeCurrentLevel = 0;
     scene.blindBoxVolumePeakLevel = 0;
     scene.blindBoxVolumePeakHoldUntil = 0;
+    scene.volumeMonitorDetectedSignal = false;
     this.blindBoxVolumeDisplayLevel = 0;
     this.blindBoxVolumeShakeOffsetX = 0;
     this.blindBoxVolumeShakeOffsetY = 0;
@@ -1982,15 +1994,16 @@ export class Round1PronunciationFlow {
     this.setPronunciationHudCountdownSeconds(0, true);
   }
 
-  private async startVolumeMonitor(onCountdownComplete?: () => void): Promise<void> {
+  private async startVolumeMonitor(onCountdownComplete?: () => void): Promise<boolean> {
     const scene = this.scene;
     if (typeof window === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
-      return;
+      return false;
     }
     this.stopVolumeMonitor();
     this.ensureBlindBoxVolumeMeter();
     this.updateBlindBoxVolumeMeterPosition();
     scene.blindBoxCurrentVolumePeak = 0;
+    scene.volumeMonitorDetectedSignal = false;
     scene.blindBoxVolumeCurrentLevel = 0;
     scene.blindBoxVolumePeakLevel = 0;
     scene.blindBoxVolumePeakHoldUntil = 0;
@@ -2110,13 +2123,18 @@ export class Round1PronunciationFlow {
         const mapped = Phaser.Math.Clamp(Math.pow(softNormalized, 0.72), 0, 1);
         const normalizedLevel = isCalibrating || gatedSignal <= 0.003 || mapped < VOLUME_SILENCE_CUTOFF ? 0 : mapped;
         scene.blindBoxCurrentVolumePeak = Math.max(scene.blindBoxCurrentVolumePeak, normalizedLevel);
+        if (normalizedLevel >= VOLUME_SILENCE_CUTOFF) {
+          scene.volumeMonitorDetectedSignal = true;
+        }
         this.setBlindBoxVolumeLevel(normalizedLevel);
         scene.volumeMonitorFrameId = window.requestAnimationFrame(tick);
       };
       scene.volumeMonitorFrameId = window.requestAnimationFrame(tick);
+      return true;
     } catch (error) {
       console.warn('[Pronounce] Volume monitor unavailable:', error);
       this.stopVolumeMonitor();
+      return false;
     }
   }
 
@@ -2135,45 +2153,6 @@ export class Round1PronunciationFlow {
     }
   }
 
-  private resolveRecognitionConfidence(
-    rawConfidence: number,
-    transcript: string,
-    reason: PronunciationRoundResult['reason'],
-    targetText: string,
-    volumePeak: number
-  ): number {
-    const textSimilarity = this.getTextSimilarity(targetText, transcript, reason);
-    const volumeQuality = this.getVolumeQuality(volumePeak);
-    const qualityScore = textSimilarity * QUALITY_TEXT_WEIGHT + volumeQuality * QUALITY_VOLUME_WEIGHT;
-    const safeConfidence = Number.isFinite(rawConfidence) ? rawConfidence : 0;
-    if (safeConfidence > 0) {
-      // Prefer content quality over engine confidence to avoid "any words pass" behavior.
-      return Phaser.Math.Clamp(qualityScore * 0.9 + Phaser.Math.Clamp(safeConfidence, 0, 1) * 0.1, 0, 1);
-    }
-    return Phaser.Math.Clamp(qualityScore, 0, 1);
-  }
-
-  private resolveConfidenceLevel(
-    confidence: number,
-    transcript: string,
-    reason: PronunciationRoundResult['reason'],
-    targetText: string,
-    volumePeak: number
-  ): PronunciationConfidenceLevel {
-    const textSimilarity = this.getTextSimilarity(targetText, transcript, reason);
-    if (textSimilarity < TRY_AGAIN_MIN_TEXT_SIMILARITY || volumePeak < TRY_AGAIN_MIN_VOLUME_PEAK) {
-      return 'LOW';
-    }
-    if (
-      textSimilarity >= EXCELLENT_MIN_TEXT_SIMILARITY &&
-      volumePeak >= EXCELLENT_MIN_VOLUME_PEAK &&
-      confidence >= EXCELLENT_MIN_QUALITY_SCORE
-    ) {
-      return 'HIGH';
-    }
-    return 'MEDIUM';
-  }
-
   private getTextSimilarity(
     targetText: string,
     transcript: string,
@@ -2184,12 +2163,6 @@ export class Round1PronunciationFlow {
     }
     const textScore = scorePronunciation(targetText, transcript);
     return Phaser.Math.Clamp(textScore / 100, 0, 1);
-  }
-
-  private getVolumeQuality(volumePeak: number): number {
-    const normalizedVolumePeak = Phaser.Math.Clamp(volumePeak, 0, 1);
-    const normalized = (normalizedVolumePeak - TRY_AGAIN_MIN_VOLUME_PEAK) / (0.42 - TRY_AGAIN_MIN_VOLUME_PEAK);
-    return Phaser.Math.Clamp(normalized, 0, 1);
   }
 
   private getPronunciationAverageConfidence(): number {
@@ -2481,6 +2454,7 @@ export class Round1PronunciationFlow {
   private async recognizeWithStableWindow(maxDurationMs: number): Promise<RecognizeOnceResult> {
     const scene = this.scene;
     const startedAt = performance.now();
+    let retryCount = 0;
     let lastResult: RecognizeOnceResult = {
       transcript: '',
       confidence: 0,
@@ -2512,7 +2486,28 @@ export class Round1PronunciationFlow {
         return lastResult;
       }
 
-      if (attempt.reason === 'unsupported' || attempt.reason === 'error' || attempt.reason === 'aborted') {
+      if (attempt.reason === 'unsupported') {
+        return lastResult;
+      }
+
+      const remainingAfterAttemptMs = Math.max(0, maxDurationMs - (performance.now() - startedAt));
+      if (shouldRetryRecognitionAttempt({
+        reason: attempt.reason,
+        transcript: attempt.transcript,
+        retryCount,
+        remainingMs: remainingAfterAttemptMs
+      })) {
+        retryCount += 1;
+        console.warn('[Pronounce] Retrying recognition after transient early failure.', {
+          reason: attempt.reason,
+          retryCount,
+          remainingAfterAttemptMs
+        });
+        await this.waitForDelay(140);
+        continue;
+      }
+
+      if (attempt.reason === 'error' || attempt.reason === 'aborted') {
         return lastResult;
       }
 
