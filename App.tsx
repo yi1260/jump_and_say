@@ -1418,16 +1418,11 @@ export default function App() {
     setGameplayMode(firstRoundMode);
     setPronunciationSummary(null);
     setGameplayModeIssue('');
+    setCameraIssueMessage('');
     
-    // Use the current phase from state at the moment the callback runs
-    // Note: We use the local 'phase' from closure here
-    if (phase === GamePhase.LOADING || phase === GamePhase.PLAYING || phase === GamePhase.TUTORIAL) {
-        setPhase(GamePhase.MODE_SELECTION);
-    } else {
-        setSelectedThemes([]); // Clear selected themes only when exiting to menu
-        setPhase(GamePhase.THEME_SELECTION);
-    }
-  }, [cleanupCameraAndMotion, clearRestCountdown, exitFullscreenSafely, firstRoundMode, phase]);
+    setSelectedThemes([]);
+    setPhase(GamePhase.THEME_SELECTION);
+  }, [cleanupCameraAndMotion, clearRestCountdown, exitFullscreenSafely, firstRoundMode]);
 
   const handleExitToMenu = () => {
     loadingRequestIdRef.current += 1;
@@ -1443,6 +1438,7 @@ export default function App() {
     setGameplayMode(firstRoundMode);
     setPronunciationSummary(null);
     setGameplayModeIssue('');
+    setCameraIssueMessage('');
     setPhase(GamePhase.MENU);
   };
 
@@ -2931,11 +2927,7 @@ export default function App() {
                           </button>
                           <button
                             onClick={() => {
-                              loadingRequestIdRef.current += 1;
-                              setCameraIssueMessage('');
-                              setLoadingProgress(0);
-                              setLoadingStatus('请选择主题后重新开始');
-                              setPhase(GamePhase.THEME_SELECTION);
+                              handleBackToMenu();
                             }}
                             className="kenney-button kenney-button-handdrawn px-4 md:px-6 py-2 md:py-3 text-sm md:text-lg bg-gray-300 border-gray-500"
                           >
@@ -3161,88 +3153,92 @@ export default function App() {
             )}
             {/* MODE SELECTION */}
             {phase === GamePhase.MODE_SELECTION && (
-                <div className="theme-shell non-game-scale theme-selection-container text-center w-full max-w-4xl mx-auto px-4 md:px-8 relative flex flex-col items-center justify-center min-h-[100dvh]">
-                    <h2 className="text-3xl md:text-5xl lg:text-6xl font-black text-white mb-8 md:mb-12 tracking-[0.04em] shrink-0 mobile-landscape-title drop-shadow-lg">
-                        选择玩法
-                    </h2>
-                    
-                    <div className="w-full grid grid-cols-1 sm:grid-cols-2 gap-6 md:gap-10 max-w-5xl">
-                        {/* QUIZ CARD */}
-                        <button
-                            onClick={() => handleToggleRoundMode('QUIZ')}
-                            className={`group relative kenney-panel p-6 md:p-10 flex flex-col items-center transition-all duration-300 border-[6px] rounded-[40px] shadow-[0_12px_0_rgba(0,0,0,0.2)] ${
-                                enabledRounds.includes('QUIZ') 
-                                ? 'bg-[#FFAD7D] border-kenney-dark scale-100 -rotate-1 shadow-[0_8px_0_rgba(0,0,0,0.2)]' 
-                                : 'bg-white/10 border-white/20 opacity-70 scale-95 shadow-none hover:bg-white/30 rotate-0'
-                            }`}
-                        >
-                            <div className={`w-24 h-24 md:w-32 md:h-32 mb-6 md:mb-8 rounded-3xl flex items-center justify-center transition-all ${enabledRounds.includes('QUIZ') ? 'bg-white/40 rotate-[-2deg]' : 'bg-black/5 rotate-0'}`}>
-                                <img src="/assets/icons/mode_quiz.png" className={`w-16 h-16 md:w-28 md:h-28 object-contain transition-all duration-300 ${enabledRounds.includes('QUIZ') ? 'animate-bounce-short' : 'grayscale opacity-40'}`} alt="" />
-                            </div>
-                            <h3 className={`text-2xl md:text-4xl font-black mb-2 md:mb-3 transition-colors ${enabledRounds.includes('QUIZ') ? 'text-kenney-dark' : 'text-white/60'}`}>
-                                听音识图
-                            </h3>
-                            <p className={`text-base md:text-xl font-bold max-w-[280px] leading-tight transition-colors ${enabledRounds.includes('QUIZ') ? 'text-kenney-dark/70' : 'text-white/40'}`}>
-                                听发音，跳跃选择正确的图片
-                            </p>
+                <div className="theme-shell non-game-scale theme-selection-container text-center w-full h-full relative">
+                    <div className="absolute inset-0 w-full h-full overflow-y-auto scrollbar-hide pb-[max(20px,env(safe-area-inset-bottom))]">
+                        <div className="min-h-full w-full flex flex-col items-center justify-center px-4 sm:px-6 md:px-8 py-8 lg:py-10">
+                            <h2 className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl font-black text-white mb-6 sm:mb-8 md:mb-10 tracking-[0.04em] shrink-0 mobile-landscape-title drop-shadow-lg">
+                                选择玩法
+                            </h2>
                             
-                            {enabledRounds.includes('QUIZ') ? (
-                              <div className="absolute top-6 right-6 bg-kenney-dark text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center shadow-lg transform rotate-12">
-                                <svg className="w-6 h-6 md:w-8 md:h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={5}>
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                                </svg>
-                              </div>
-                            ) : (
-                              <div className="mt-6 px-5 py-2 bg-white/10 text-white/40 rounded-full text-xs md:text-sm font-black uppercase tracking-wider">
-                                 未选中
-                              </div>
-                            )}
-                        </button>
-
-                        {/* PRONUNCIATION CARD */}
-                        <button
-                            onClick={() => !shouldSkipPronunciationRound && handleToggleRoundMode('BLIND_BOX_PRONUNCIATION')}
-                            disabled={shouldSkipPronunciationRound}
-                            className={`group relative kenney-panel p-6 md:p-10 flex flex-col items-center transition-all duration-300 border-[6px] rounded-[40px] shadow-[0_12px_0_rgba(0,0,0,0.2)] ${
-                                enabledRounds.includes('BLIND_BOX_PRONUNCIATION') 
-                                ? 'bg-[#98D8A0] border-kenney-dark scale-100 rotate-1 shadow-[0_8px_0_rgba(0,0,0,0.2)]' 
-                                : 'bg-white/10 border-white/20 opacity-70 scale-95 shadow-none hover:bg-white/30 rotate-0'
-                            } ${shouldSkipPronunciationRound ? 'cursor-not-allowed grayscale' : ''}`}
-                        >
-                            <div className={`w-24 h-24 md:w-32 md:h-32 mb-6 md:mb-8 rounded-3xl flex items-center justify-center transition-all ${enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? 'bg-white/40 rotate-[2deg]' : 'bg-black/5 rotate-0'}`}>
-                                <img src="/assets/icons/mode_pronunciation.png" className={`w-16 h-16 md:w-28 md:h-28 object-contain transition-all duration-300 ${enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? 'animate-pulse' : 'grayscale opacity-40'}`} alt="" />
+                            <div className="w-full grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6 md:gap-10 max-w-5xl shrink-0">
+                                {/* QUIZ CARD */}
+                                <button
+                                    onClick={() => handleToggleRoundMode('QUIZ')}
+                                    className={`group relative kenney-panel p-4 sm:p-6 md:p-10 flex flex-col items-center transition-all duration-300 border-[3px] sm:border-[4px] md:border-[6px] rounded-3xl sm:rounded-[32px] md:rounded-[40px] shadow-[0_6px_0_rgba(0,0,0,0.2)] md:shadow-[0_12px_0_rgba(0,0,0,0.2)] ${
+                                        enabledRounds.includes('QUIZ') 
+                                        ? 'bg-[#FFAD7D] border-kenney-dark scale-100 -rotate-1 shadow-[0_4px_0_rgba(0,0,0,0.2)] md:shadow-[0_8px_0_rgba(0,0,0,0.2)]' 
+                                        : 'bg-white/10 border-white/20 opacity-70 scale-95 shadow-none hover:bg-white/30 rotate-0'
+                                    }`}
+                                >
+                                    <div className={`w-14 h-14 sm:w-24 sm:h-24 md:w-32 md:h-32 mb-2 sm:mb-6 md:mb-8 rounded-2xl sm:rounded-[20px] md:rounded-3xl flex items-center justify-center transition-all ${enabledRounds.includes('QUIZ') ? 'bg-white/40 rotate-[-2deg]' : 'bg-black/5 rotate-0'}`}>
+                                        <img src="/assets/icons/mode_quiz.png" className={`w-8 h-8 sm:w-16 sm:h-16 md:w-28 md:h-28 object-contain transition-all duration-300 ${enabledRounds.includes('QUIZ') ? 'animate-bounce-short' : 'grayscale opacity-40'}`} alt="" />
+                                    </div>
+                                    <h3 className={`text-lg sm:text-2xl md:text-4xl font-black mb-1 sm:mb-2 md:mb-3 transition-colors ${enabledRounds.includes('QUIZ') ? 'text-kenney-dark' : 'text-white/60'}`}>
+                                        听音识图
+                                    </h3>
+                                    <p className={`text-xs sm:text-base md:text-xl font-bold max-w-[280px] leading-tight transition-colors ${enabledRounds.includes('QUIZ') ? 'text-kenney-dark/70' : 'text-white/40'}`}>
+                                        听发音，跳跃选择正确的图片
+                                    </p>
+                                    
+                                    {enabledRounds.includes('QUIZ') ? (
+                                      <div className="absolute top-3 right-3 sm:top-4 sm:right-4 md:top-6 md:right-6 bg-kenney-dark text-white rounded-full w-6 h-6 sm:w-8 sm:h-8 md:w-12 md:h-12 flex items-center justify-center shadow-lg transform rotate-12">
+                                        <svg className="w-4 h-4 sm:w-5 sm:h-5 md:w-8 md:h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={5}>
+                                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                        </svg>
+                                      </div>
+                                    ) : (
+                                      <div className="mt-3 sm:mt-6 px-3 py-1 sm:px-5 sm:py-2 bg-white/10 text-white/40 rounded-full text-[10px] sm:text-xs md:text-sm font-black uppercase tracking-wider">
+                                         未选中
+                                      </div>
+                                    )}
+                                </button>
+    
+                                {/* PRONUNCIATION CARD */}
+                                <button
+                                    onClick={() => !shouldSkipPronunciationRound && handleToggleRoundMode('BLIND_BOX_PRONUNCIATION')}
+                                    disabled={shouldSkipPronunciationRound}
+                                    className={`group relative kenney-panel p-4 sm:p-6 md:p-10 flex flex-col items-center transition-all duration-300 border-[3px] sm:border-[4px] md:border-[6px] rounded-3xl sm:rounded-[32px] md:rounded-[40px] shadow-[0_6px_0_rgba(0,0,0,0.2)] md:shadow-[0_12px_0_rgba(0,0,0,0.2)] ${
+                                        enabledRounds.includes('BLIND_BOX_PRONUNCIATION') 
+                                        ? 'bg-[#98D8A0] border-kenney-dark scale-100 rotate-1 shadow-[0_4px_0_rgba(0,0,0,0.2)] md:shadow-[0_8px_0_rgba(0,0,0,0.2)]' 
+                                        : 'bg-white/10 border-white/20 opacity-70 scale-95 shadow-none hover:bg-white/30 rotate-0'
+                                    } ${shouldSkipPronunciationRound ? 'cursor-not-allowed grayscale' : ''}`}
+                                >
+                                    <div className={`w-14 h-14 sm:w-24 sm:h-24 md:w-32 md:h-32 mb-2 sm:mb-6 md:mb-8 rounded-2xl sm:rounded-[20px] md:rounded-3xl flex items-center justify-center transition-all ${enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? 'bg-white/40 rotate-[2deg]' : 'bg-black/5 rotate-0'}`}>
+                                        <img src="/assets/icons/mode_pronunciation.png" className={`w-8 h-8 sm:w-16 sm:h-16 md:w-28 md:h-28 object-contain transition-all duration-300 ${enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? 'animate-pulse' : 'grayscale opacity-40'}`} alt="" />
+                                    </div>
+                                    <h3 className={`text-lg sm:text-2xl md:text-4xl font-black mb-1 sm:mb-2 md:mb-3 transition-colors ${enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? 'text-kenney-dark' : 'text-white/60'}`}>
+                                        大声跟读
+                                    </h3>
+                                    <p className={`text-xs sm:text-base md:text-xl font-bold max-w-[280px] leading-tight transition-colors ${enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? 'text-kenney-dark/70' : 'text-white/40'}`}>
+                                        模仿发音，大声跟读
+                                    </p>
+                                    
+                                    {shouldSkipPronunciationRound ? (
+                                      <span className="mt-3 sm:mt-6 px-3 py-1 sm:px-5 sm:py-2 bg-red-500/80 text-white rounded-full text-[10px] sm:text-xs md:text-sm font-black">语音不可用</span>
+                                    ) : enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? (
+                                      <div className="absolute top-3 right-3 sm:top-4 sm:right-4 md:top-6 md:right-6 bg-kenney-dark text-white rounded-full w-6 h-6 sm:w-8 sm:h-8 md:w-12 md:h-12 flex items-center justify-center shadow-lg transform rotate-12">
+                                        <svg className="w-4 h-4 sm:w-5 sm:h-5 md:w-8 md:h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={5}>
+                                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                        </svg>
+                                      </div>
+                                    ) : (
+                                      <div className="mt-3 sm:mt-6 px-3 py-1 sm:px-5 sm:py-2 bg-white/10 text-white/40 rounded-full text-[10px] sm:text-xs md:text-sm font-black uppercase tracking-wider">
+                                         未选中
+                                      </div>
+                                    )}
+                                </button>
                             </div>
-                            <h3 className={`text-2xl md:text-4xl font-black mb-2 md:mb-3 transition-colors ${enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? 'text-kenney-dark' : 'text-white/60'}`}>
-                                大声跟读
-                            </h3>
-                            <p className={`text-base md:text-xl font-bold max-w-[280px] leading-tight transition-colors ${enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? 'text-kenney-dark/70' : 'text-white/40'}`}>
-                                模仿发音，大声跟读
-                            </p>
-                            
-                            {shouldSkipPronunciationRound ? (
-                              <span className="mt-6 px-5 py-2 bg-red-500/80 text-white rounded-full text-xs md:text-sm font-black">语音不可用</span>
-                            ) : enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? (
-                              <div className="absolute top-6 right-6 bg-kenney-dark text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center shadow-lg transform rotate-12">
-                                <svg className="w-6 h-6 md:w-8 md:h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={5}>
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                                </svg>
-                              </div>
-                            ) : (
-                              <div className="mt-6 px-5 py-2 bg-white/10 text-white/40 rounded-full text-xs md:text-sm font-black uppercase tracking-wider">
-                                 未选中
-                              </div>
-                            )}
-                        </button>
+                        
+                        <div className="flex justify-center w-full shrink-0 z-20 mt-8 sm:mt-10 md:mt-12 mb-6">
+                            <button
+                                onClick={handleStartGame}
+                                disabled={enabledRounds.length === 0}
+                                className={`pointer-events-auto kenney-button kenney-button-handdrawn mobile-landscape-button px-6 sm:px-8 py-3 text-lg sm:text-xl md:text-2xl shadow-[0_8px_0_rgba(0,0,0,0.5)] transition-all transform duration-300 ${enabledRounds.length > 0 ? 'scale-100 opacity-100 translate-y-0 hover:scale-105 active:scale-95' : 'scale-90 opacity-80 translate-y-0 bg-gray-400 border-gray-600'}`}
+                            >
+                                选好了，下一步（{enabledRounds.length}）
+                            </button>
+                        </div>
                     </div>
-
-                    <div className="flex justify-center w-full px-4 shrink-0 mt-8 md:mt-12 mb-6 z-10 relative">
-                         <button
-                             onClick={handleStartGame}
-                             disabled={enabledRounds.length === 0}
-                             className={`pointer-events-auto kenney-button kenney-button-handdrawn mobile-landscape-button px-8 py-3 text-xl md:text-2xl shadow-2xl transition-all transform duration-300 ${enabledRounds.length > 0 ? 'scale-100 opacity-100 translate-y-0 hover:scale-105 active:scale-95' : 'scale-90 opacity-80 translate-y-0 bg-gray-400 border-gray-600'}`}
-                         >
-                             选好了，下一步（{enabledRounds.length}）
-                         </button>
                     </div>
                 </div>
             )}
