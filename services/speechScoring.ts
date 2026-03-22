@@ -4,6 +4,8 @@ type SpeechRecognitionResultReason =
   | 'timeout'
   | 'no-speech'
   | 'aborted'
+  | 'network'
+  | 'not-allowed'
   | 'error';
 
 interface SpeechRecognitionAlternativeLike {
@@ -13,11 +15,16 @@ interface SpeechRecognitionAlternativeLike {
 
 interface SpeechRecognitionResultLike {
   [index: number]: SpeechRecognitionAlternativeLike;
+  length: number;
+  isFinal?: boolean;
 }
 
 interface SpeechRecognitionEventLike extends Event {
   resultIndex: number;
-  results: SpeechRecognitionResultLike[];
+  results: {
+    [index: number]: SpeechRecognitionResultLike;
+    length: number;
+  };
 }
 
 interface SpeechRecognitionErrorEventLike extends Event {
@@ -184,15 +191,31 @@ export const scorePronunciation = (targetText: string, transcript: string): numb
 const mapRecognitionError = (errorName: string): SpeechRecognitionResultReason => {
   if (errorName === 'aborted') return 'aborted';
   if (errorName === 'no-speech') return 'no-speech';
+  if (errorName === 'network') return 'network';
+  if (errorName === 'not-allowed' || errorName === 'service-not-allowed') return 'not-allowed';
   return 'error';
 };
 
+import { FallbackRecognizer } from './fallbackRecognizer';
+
 class SpeechScoringService {
+  private fallbackRecognizer = new FallbackRecognizer();
+  public isNativeBroken = false;
+
   isSupported(): boolean {
     return Boolean(getSpeechRecognitionCtor());
   }
 
   async recognizeOnce(options: RecognizeOnceOptions): Promise<RecognizeOnceResult> {
+    // 判断是否在本地开发模式下 (Vite 提供 import.meta.env)
+    const isDev = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.DEV;
+
+    // 如果原生 API 已经被标记为损坏 (如抛出过 network 错误) 且不是在普通本地开发模式，则走降级
+    // 本地通过 npm run dev 时没有 Vercel 函数环境，所以不强制走降级，依然优先原生的兜底逻辑
+    if (this.isNativeBroken && !isDev) {
+      return this.recognizeWithFallback(options);
+    }
+
     const RecognitionCtor = getSpeechRecognitionCtor();
     if (!RecognitionCtor) {
       return {
@@ -209,7 +232,7 @@ class SpeechScoringService {
       const recognition = new RecognitionCtor();
       recognition.lang = options.lang;
       recognition.continuous = false;
-      recognition.interimResults = false;
+      recognition.interimResults = true;
       recognition.maxAlternatives = 1;
 
       let transcript = '';
@@ -283,7 +306,7 @@ class SpeechScoringService {
       };
 
       recognition.onstart = (): void => {
-        console.info('[Pronounce] SpeechRecognition started.', {
+        console.info('[Pronounce] Native SpeechRecognition started.', {
           lang: options.lang,
           maxDurationMs: options.maxDurationMs
         });
@@ -314,34 +337,49 @@ class SpeechScoringService {
       };
 
       recognition.onresult = (event: SpeechRecognitionEventLike): void => {
-        const chunks: string[] = [];
+        let currentTranscript = '';
         let latestConfidence = 0;
+        let isFinal = false;
+
         for (let i = event.resultIndex; i < event.results.length; i += 1) {
-          const alt = event.results[i][0];
+          const result = event.results[i];
+          const alt = result[0];
           if (!alt || typeof alt.transcript !== 'string') continue;
-          chunks.push(alt.transcript);
+          currentTranscript += alt.transcript;
           if (typeof alt.confidence === 'number' && Number.isFinite(alt.confidence)) {
             latestConfidence = Math.max(latestConfidence, alt.confidence);
           }
+          if (result.isFinal) {
+            isFinal = true;
+          }
         }
-        if (chunks.length > 0) {
-          transcript = chunks.join(' ').trim();
+
+        if (currentTranscript.trim().length > 0) {
+          transcript = currentTranscript.trim();
           confidence = Math.max(confidence, latestConfidence);
           console.info('[Pronounce] SpeechRecognition result received.', {
             transcript,
-            confidence
+            confidence,
+            isFinal
           });
-          try {
-            recognition.stop();
-          } catch (error) {
-            console.warn('[Pronounce] SpeechRecognition stop failed after result:', error);
+
+          if (isFinal) {
+            try {
+              recognition.stop();
+            } catch (error) {
+              console.warn('[Pronounce] SpeechRecognition stop failed after result:', error);
+            }
+            finalize('ok');
           }
-          finalize('ok');
         }
       };
 
       recognition.onerror = (event: SpeechRecognitionErrorEventLike): void => {
         mappedErrorReason = mapRecognitionError(event.error);
+        if (mappedErrorReason === 'network') {
+          console.warn('[Pronounce] Detected network error, marking native API as broken.');
+          this.isNativeBroken = true;
+        }
         console.warn('[Pronounce] SpeechRecognition error event received.', {
           error: event.error,
           message: event.message,
@@ -386,6 +424,39 @@ class SpeechScoringService {
         finalize('error');
       }
     });
+  }
+
+  // 降级方案：使用 MediaRecorder 录制音频并发送到后端 API
+  private async recognizeWithFallback(options: RecognizeOnceOptions): Promise<RecognizeOnceResult> {
+    console.info('[Pronounce] Using Fallback API for speech recognition');
+    try {
+      await this.fallbackRecognizer.startRecording();
+      
+      // 等待指定的最大时间或者用户手动触发停止。这里做一个简单的倒计时：
+      // 在实际游戏中，可以通过外部调用控制何时停止。
+      const { transcript, durationMs } = await new Promise<{transcript: string, durationMs: number}>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.fallbackRecognizer.stopAndRecognize(options.maxDurationMs)
+            .then(resolve)
+            .catch(reject);
+        }, Math.min(options.maxDurationMs, 3500)); // 降级模式下缩短录音时间，防止网络请求过慢，这里默认录3.5秒
+      });
+
+      return {
+        transcript,
+        confidence: transcript ? 0.9 : 0, // Fallback API 暂未返回置信度，给个默认高分
+        reason: transcript ? 'ok' : 'no-speech',
+        durationMs
+      };
+    } catch (error) {
+      console.error('[Pronounce] Fallback API failed:', error);
+      return {
+        transcript: '',
+        confidence: 0,
+        reason: 'error',
+        durationMs: 0
+      };
+    }
   }
 }
 
