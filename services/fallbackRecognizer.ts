@@ -55,6 +55,11 @@ export class FallbackRecognizer {
       }
 
       this.mediaRecorder.onstop = async () => {
+        // 关键修复：录音一旦停止，立刻释放麦克风硬件资源。
+        // 如果等到 fetch 请求结束再释放，会导致手机 OS 认为仍处于“通话/录音”状态，
+        // 从而降低播放音量（Ducking）或将声音路由到听筒，导致后续的音效和 TTS 播放异常。
+        this.cleanup();
+
         try {
           const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
           const audioBlob = new Blob(this.audioChunks, { type: mimeType });
@@ -82,8 +87,6 @@ export class FallbackRecognizer {
           });
         } catch (error) {
           reject(error);
-        } finally {
-          this.cleanup();
         }
       };
 
