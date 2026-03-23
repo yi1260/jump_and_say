@@ -89,6 +89,7 @@ declare global {
 export interface RecognizeOnceOptions {
   lang: string;
   maxDurationMs: number;
+  inputStream?: MediaStream | null;
 }
 
 export interface RecognizeOnceResult {
@@ -196,7 +197,7 @@ const mapRecognitionError = (errorName: string): SpeechRecognitionResultReason =
   return 'error';
 };
 
-import { FallbackRecognizer } from './fallbackRecognizer';
+import { FallbackRecognizer } from './fallbackRecognizer.ts';
 
 class SpeechScoringService {
   private fallbackRecognizer = new FallbackRecognizer();
@@ -218,23 +219,30 @@ class SpeechScoringService {
     try {
       const { transcript, durationMs } = await new Promise<{transcript: string, durationMs: number}>((resolve, reject) => {
         let isDone = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
 
         const doStop = () => {
           if (isDone) return;
           isDone = true;
-          clearTimeout(timer);
+          if (timer !== null) {
+            clearTimeout(timer);
+            timer = null;
+          }
           this.fallbackRecognizer.stopAndRecognize(options.maxDurationMs)
             .then(resolve)
             .catch(reject);
         };
 
         // 绑定静音检测回调：一旦检测到用户说完了，立刻停止录音去请求接口
-        this.fallbackRecognizer.startRecording(() => {
-          doStop();
+        this.fallbackRecognizer.startRecording({
+          onSilence: () => {
+            doStop();
+          },
+          preferredStream: options.inputStream ?? null
         }).catch(reject);
 
         // 如果用户一直不出声或一直有杂音，最多等 5 秒强制上传
-        const timer = setTimeout(() => {
+        timer = setTimeout(() => {
           doStop();
         }, Math.min(options.maxDurationMs, 5000));
       });

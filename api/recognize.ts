@@ -4,6 +4,63 @@ export const config = {
   },
 };
 
+const ASSEMBLYAI_POLL_INTERVAL_MS = 1000;
+const ASSEMBLYAI_MAX_WAIT_MS = 2500;
+
+interface AssemblyAiPollOptions {
+  apiKey: string;
+  transcriptId: string;
+  maxWaitMs?: number;
+  pollIntervalMs?: number;
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+  sleep?: (delayMs: number) => Promise<void>;
+}
+
+interface AssemblyAiPollResponse {
+  status?: string;
+  text?: string;
+  error?: string;
+}
+
+export const pollAssemblyAiTranscript = async ({
+  apiKey,
+  transcriptId,
+  maxWaitMs = ASSEMBLYAI_MAX_WAIT_MS,
+  pollIntervalMs = ASSEMBLYAI_POLL_INTERVAL_MS,
+  fetchImpl = fetch,
+  now = () => Date.now(),
+  sleep = (delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs))
+}: AssemblyAiPollOptions): Promise<string> => {
+  const deadlineMs = now() + Math.max(0, maxWaitMs);
+
+  while (now() < deadlineMs) {
+    const pollRes = await fetchImpl(`https://api.assemblyai.com/v2/transcript/${transcriptId}`, {
+      headers: { Authorization: apiKey }
+    });
+
+    if (!pollRes.ok) {
+      throw new Error(`AssemblyAI polling failed with ${pollRes.status}`);
+    }
+
+    const pollData = await pollRes.json() as AssemblyAiPollResponse;
+    if (pollData.status === 'completed') {
+      return pollData.text || '';
+    }
+    if (pollData.status === 'error') {
+      throw new Error(pollData.error || 'AssemblyAI processing error');
+    }
+
+    const remainingMs = deadlineMs - now();
+    if (remainingMs <= 0) {
+      break;
+    }
+    await sleep(Math.min(pollIntervalMs, remainingMs));
+  }
+
+  throw new Error(`AssemblyAI polling timed out after ${maxWaitMs}ms`);
+};
+
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -79,20 +136,11 @@ export default async function handler(req: any, res: any) {
       if (!transcriptRes.ok) throw new Error('AssemblyAI transcript failed');
       const { id } = await transcriptRes.json();
 
-      // 4. 轮询转写结果
-      while (true) {
-        const pollRes = await fetch(`https://api.assemblyai.com/v2/transcript/${id}`, {
-          headers: { 'Authorization': assemblyApiKey }
-        });
-        const pollData = await pollRes.json();
-        if (pollData.status === 'completed') {
-          return res.status(200).json({ transcript: pollData.text, provider: 'assemblyai' });
-        } else if (pollData.status === 'error') {
-          throw new Error('AssemblyAI processing error');
-        }
-        // 等待 1 秒再次轮询
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
+      const transcript = await pollAssemblyAiTranscript({
+        apiKey: assemblyApiKey,
+        transcriptId: id
+      });
+      return res.status(200).json({ transcript, provider: 'assemblyai' });
     }
   } catch (error: any) {
     console.error('[Vercel] Speech recognition proxy error:', error);

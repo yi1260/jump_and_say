@@ -662,7 +662,10 @@ export class Round1PronunciationFlow {
       const volumeMonitorReady = await this.startVolumeMonitor(() => {
         console.info('[Pronounce] Mic countdown reached 0s.');
       });
-      const recognitionResult = await this.recognizeWithStableWindow(scene.PRONUNCIATION_RECORDING_TIMEOUT_MS);
+      const recognitionResult = await this.recognizeWithStableWindow(
+        scene.PRONUNCIATION_RECORDING_TIMEOUT_MS,
+        scene.volumeMonitorStream
+      );
       const volumeMonitorDetectedSignal = scene.volumeMonitorDetectedSignal;
       const volumePeak = Phaser.Math.Clamp(scene.blindBoxCurrentVolumePeak, 0, 1);
       this.stopVolumeMonitor();
@@ -2456,7 +2459,10 @@ export class Round1PronunciationFlow {
     window.restoreBGMVolume?.();
   }
 
-  private async recognizeWithStableWindow(maxDurationMs: number): Promise<RecognizeOnceResult> {
+  private async recognizeWithStableWindow(
+    maxDurationMs: number,
+    inputStream: MediaStream | null
+  ): Promise<RecognizeOnceResult> {
     const scene = this.scene;
     const startedAt = performance.now();
     let retryCount = 0;
@@ -2480,7 +2486,8 @@ export class Round1PronunciationFlow {
 
       const attempt = await speechScoringService.recognizeOnce({
         lang: 'en-US',
-        maxDurationMs: Math.max(600, remainingMs)
+        maxDurationMs: Math.max(600, remainingMs),
+        inputStream
       });
       lastResult = {
         ...attempt,
