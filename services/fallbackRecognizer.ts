@@ -3,6 +3,11 @@ export interface FallbackRecognizeOptions {
   maxDurationMs: number;
 }
 
+export interface StartRecordingOptions {
+  onSilence?: () => void;
+  preferredStream?: MediaStream | null;
+}
+
 export class FallbackRecognizer {
   private mediaRecorder: MediaRecorder | null = null;
   private audioChunks: Blob[] = [];
@@ -10,23 +15,37 @@ export class FallbackRecognizer {
   private vadContext: AudioContext | null = null;
   private vadFrameId: number | null = null;
   private onSilenceDetected: (() => void) | null = null;
+  private ownsStream: boolean = false;
+  private activeMimeType: string = 'audio/webm';
 
   /**
    * 开始录音，并附加简单的静音检测 (VAD)
    */
-  async startRecording(onSilence?: () => void): Promise<void> {
+  async startRecording(onSilence?: (() => void) | StartRecordingOptions, preferredStream?: MediaStream | null): Promise<void> {
+    this.cleanup();
     this.audioChunks = [];
-    this.onSilenceDetected = onSilence || null;
+    this.onSilenceDetected = typeof onSilence === 'function'
+      ? onSilence
+      : (onSilence?.onSilence ?? null);
+    const providedStream = typeof onSilence === 'function'
+      ? preferredStream
+      : (onSilence?.preferredStream ?? preferredStream ?? null);
 
     // 获取麦克风权限
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        sampleRate: 16000,
-        echoCancellation: true,
-        noiseSuppression: true,
-      },
-    });
+    if (providedStream) {
+      this.stream = providedStream;
+      this.ownsStream = false;
+    } else {
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      });
+      this.ownsStream = true;
+    }
 
     // --- 简单的 VAD (静音检测) 逻辑 ---
     try {
@@ -82,6 +101,7 @@ export class FallbackRecognizer {
     if (!MediaRecorder.isTypeSupported(mimeType)) {
       mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
     }
+    this.activeMimeType = mimeType;
 
     this.mediaRecorder = new MediaRecorder(this.stream, {
       mimeType,
@@ -106,13 +126,14 @@ export class FallbackRecognizer {
       if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
         return reject(new Error('Recorder not initialized or already stopped'));
       }
+      const recorder = this.mediaRecorder;
+      const mimeType = recorder.mimeType || this.activeMimeType || 'audio/webm';
 
-      this.mediaRecorder.onstop = async () => {
+      recorder.onstop = async () => {
         // 立刻释放硬件资源
         this.cleanup();
 
         try {
-          const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
           const audioBlob = new Blob(this.audioChunks, { type: mimeType });
           const durationMs = performance.now() - startedAt;
 
@@ -137,8 +158,8 @@ export class FallbackRecognizer {
       };
 
       // 停止录音触发 onstop
-      if (this.mediaRecorder.state !== 'inactive') {
-        this.mediaRecorder.stop();
+      if (recorder.state !== 'inactive') {
+        recorder.stop();
       }
     });
   }
@@ -159,11 +180,13 @@ export class FallbackRecognizer {
       this.vadContext.close().catch(() => {});
       this.vadContext = null;
     }
-    if (this.stream) {
+    if (this.stream && this.ownsStream) {
       this.stream.getTracks().forEach((track) => track.stop());
-      this.stream = null;
     }
+    this.stream = null;
+    this.ownsStream = false;
     this.mediaRecorder = null;
+    this.activeMimeType = 'audio/webm';
     this.onSilenceDetected = null;
   }
 }
