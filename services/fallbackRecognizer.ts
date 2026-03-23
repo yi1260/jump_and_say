@@ -8,6 +8,33 @@ export interface StartRecordingOptions {
   preferredStream?: MediaStream | null;
 }
 
+const RECOGNITION_PROXY_TIMEOUT_MS = 20000;
+
+const readRecognitionApiError = async (response: Response): Promise<string> => {
+  const jsonTarget = typeof response.clone === 'function' ? response.clone() : response;
+  try {
+    const payload = await jsonTarget.json() as { error?: unknown };
+    if (typeof payload.error === 'string' && payload.error.trim().length > 0) {
+      return payload.error.trim();
+    }
+  } catch (_error) {
+    // Ignore JSON parsing failures and fall back to text.
+  }
+
+  const textTarget = typeof response.clone === 'function' ? response.clone() : response;
+  try {
+    const text = await textTarget.text();
+    const normalized = text.trim();
+    if (normalized.length > 0) {
+      return normalized;
+    }
+  } catch (_error) {
+    // Ignore text parsing failures and fall back to status-only error.
+  }
+
+  return '';
+};
+
 export class FallbackRecognizer {
   private mediaRecorder: MediaRecorder | null = null;
   private audioChunks: Blob[] = [];
@@ -136,15 +163,40 @@ export class FallbackRecognizer {
         try {
           const audioBlob = new Blob(this.audioChunks, { type: mimeType });
           const durationMs = performance.now() - startedAt;
+          const requestStartedAt = performance.now();
+          const controller = new AbortController();
+          const timeoutId = window.setTimeout(() => {
+            controller.abort();
+          }, RECOGNITION_PROXY_TIMEOUT_MS);
 
-          const response = await fetch('/api/recognize', {
-            method: 'POST',
-            headers: { 'Content-Type': mimeType },
-            body: audioBlob,
-          });
+          let response: Response;
+          try {
+            console.info('[FallbackRecognizer] Posting audio to /api/recognize', {
+              mimeType,
+              size: audioBlob.size
+            });
+            response = await fetch('/api/recognize', {
+              method: 'POST',
+              headers: { 'Content-Type': mimeType },
+              body: audioBlob,
+              signal: controller.signal,
+            });
+            console.info('[FallbackRecognizer] /api/recognize completed', {
+              status: response.status,
+              durationMs: Math.max(0, Math.round(performance.now() - requestStartedAt))
+            });
+          } catch (error) {
+            if (controller.signal.aborted) {
+              throw new Error(`recognition-proxy timed out after ${RECOGNITION_PROXY_TIMEOUT_MS}ms`);
+            }
+            throw error;
+          } finally {
+            clearTimeout(timeoutId);
+          }
 
           if (!response.ok) {
-            throw new Error(`API returned ${response.status}`);
+            const errorDetail = await readRecognitionApiError(response);
+            throw new Error(errorDetail ? `API returned ${response.status}: ${errorDetail}` : `API returned ${response.status}`);
           }
 
           const result = await response.json();
