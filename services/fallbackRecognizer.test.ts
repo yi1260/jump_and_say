@@ -201,3 +201,36 @@ test('stopAndRecognize preserves the recorder mime type after cleanup', async ()
   assert.equal(result.transcript, 'apple');
   assert.equal(providedStream.__track.stopCalls, 0);
 });
+
+test('stopAndRecognize surfaces server-side stage errors from /api/recognize', async () => {
+  const recognizer = new FallbackRecognizer();
+  const providedStream = createFakeStream();
+
+  setWindowValue({
+    ...globalThis,
+    AudioContext: FakeAudioContext
+  });
+  setNavigatorValue({
+    mediaDevices: {
+      getUserMedia: async (): Promise<MediaStream> => {
+        throw new Error('getUserMedia should not run when a shared stream is available');
+      }
+    }
+  } as Navigator);
+  globalThis.MediaRecorder = FakeMediaRecorder as unknown as typeof MediaRecorder;
+  globalThis.requestAnimationFrame = () => 1;
+  globalThis.cancelAnimationFrame = () => {};
+  globalThis.fetch = (async () => ({
+    ok: false,
+    status: 504,
+    json: async () => ({ error: 'deepgram-listen timed out after 12000ms' }),
+    text: async () => 'deepgram-listen timed out after 12000ms'
+  }) as Response) as typeof fetch;
+
+  await recognizer.startRecording(undefined, providedStream);
+
+  await assert.rejects(
+    async () => recognizer.stopAndRecognize(1500),
+    /deepgram-listen timed out after 12000ms/i
+  );
+});
