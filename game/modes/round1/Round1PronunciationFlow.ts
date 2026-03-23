@@ -670,7 +670,7 @@ export class Round1PronunciationFlow {
       
       // 给手机操作系统底层留出切换音频路由（从录音模式/听筒切换回媒体播放模式）的时间
       // 避免刚刚关闭麦克风时立刻播放音效导致声音被掩盖或吞音
-      await this.waitForDelay(500);
+      await this.waitForDelay(150);
 
       if (!this.isActiveRoundToken(roundToken)) return;
 

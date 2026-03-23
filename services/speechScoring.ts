@@ -216,16 +216,27 @@ class SpeechScoringService {
   private async recognizeWithFallback(options: RecognizeOnceOptions): Promise<RecognizeOnceResult> {
     console.info('[Pronounce] Using Fallback API for speech recognition');
     try {
-      await this.fallbackRecognizer.startRecording();
-      
-      // 等待指定的最大时间或者用户手动触发停止。这里做一个简单的倒计时：
-      // 在实际游戏中，可以通过外部调用控制何时停止。
       const { transcript, durationMs } = await new Promise<{transcript: string, durationMs: number}>((resolve, reject) => {
-        const timer = setTimeout(() => {
+        let isDone = false;
+
+        const doStop = () => {
+          if (isDone) return;
+          isDone = true;
+          clearTimeout(timer);
           this.fallbackRecognizer.stopAndRecognize(options.maxDurationMs)
             .then(resolve)
             .catch(reject);
-        }, Math.min(options.maxDurationMs, 3500)); // 降级模式下缩短录音时间，防止网络请求过慢，这里默认录3.5秒
+        };
+
+        // 绑定静音检测回调：一旦检测到用户说完了，立刻停止录音去请求接口
+        this.fallbackRecognizer.startRecording(() => {
+          doStop();
+        }).catch(reject);
+
+        // 如果用户一直不出声或一直有杂音，最多等 5 秒强制上传
+        const timer = setTimeout(() => {
+          doStop();
+        }, Math.min(options.maxDurationMs, 5000));
       });
 
       return {
