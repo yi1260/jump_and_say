@@ -5,7 +5,26 @@ export const config = {
 };
 
 const ASSEMBLYAI_POLL_INTERVAL_MS = 1000;
-const ASSEMBLYAI_MAX_WAIT_MS = 2500;
+const ASSEMBLYAI_MAX_WAIT_MS = 8000;
+const DEEPGRAM_LISTEN_TIMEOUT_MS = 12000;
+const ASSEMBLYAI_UPLOAD_TIMEOUT_MS = 12000;
+const ASSEMBLYAI_TRANSCRIPT_CREATE_TIMEOUT_MS = 8000;
+const ASSEMBLYAI_POLL_REQUEST_TIMEOUT_MS = 4000;
+
+interface StageLogger {
+  info(message?: unknown, ...optionalParams: unknown[]): void;
+  warn(message?: unknown, ...optionalParams: unknown[]): void;
+}
+
+interface FetchWithStageTimeoutOptions {
+  stage: string;
+  url: string;
+  timeoutMs: number;
+  init?: RequestInit;
+  fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
+  now?: () => number;
+  logger?: StageLogger;
+}
 
 interface AssemblyAiPollOptions {
   apiKey: string;
@@ -61,6 +80,50 @@ export const pollAssemblyAiTranscript = async ({
   throw new Error(`AssemblyAI polling timed out after ${maxWaitMs}ms`);
 };
 
+export const fetchWithStageTimeout = async ({
+  stage,
+  url,
+  timeoutMs,
+  init,
+  fetchImpl = fetch,
+  now = () => Date.now(),
+  logger = console
+}: FetchWithStageTimeoutOptions): Promise<Response> => {
+  const controller = new AbortController();
+  const startedAt = now();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    logger.info('[Vercel] Speech stage start', { stage, timeoutMs });
+    const response = await fetchImpl(url, {
+      ...init,
+      signal: controller.signal
+    });
+    logger.info('[Vercel] Speech stage complete', {
+      stage,
+      status: response.status,
+      durationMs: Math.max(0, Math.round(now() - startedAt))
+    });
+    return response;
+  } catch (error) {
+    const durationMs = Math.max(0, Math.round(now() - startedAt));
+    if (controller.signal.aborted) {
+      logger.warn('[Vercel] Speech stage timeout', { stage, timeoutMs, durationMs });
+      throw new Error(`${stage} timed out after ${timeoutMs}ms`);
+    }
+    logger.warn('[Vercel] Speech stage failed', {
+      stage,
+      durationMs,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -79,15 +142,20 @@ export default async function handler(req: any, res: any) {
       // 提取前端传来的 mimetype，比如 audio/webm
       const contentType = req.headers['content-type'] || 'audio/webm';
       
-      const response = await fetch('https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&language=en', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Token ${deepgramApiKey}`,
-          'Content-Type': contentType,
-        },
-        body: req,
-        duplex: 'half',
-      } as RequestInit);
+      const response = await fetchWithStageTimeout({
+        stage: 'deepgram-listen',
+        url: 'https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&language=en',
+        timeoutMs: DEEPGRAM_LISTEN_TIMEOUT_MS,
+        init: {
+          method: 'POST',
+          headers: {
+            'Authorization': `Token ${deepgramApiKey}`,
+            'Content-Type': contentType,
+          },
+          body: req,
+          duplex: 'half',
+        } as RequestInit
+      });
 
       if (!response.ok) {
         const errText = await response.text();
@@ -110,40 +178,60 @@ export default async function handler(req: any, res: any) {
       const audioBuffer = Buffer.concat(chunks);
 
       // 2. 上传文件到 AssemblyAI
-      const uploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
-        method: 'POST',
-        headers: {
-          'Authorization': assemblyApiKey,
-          'Content-Type': 'application/octet-stream'
-        },
-        body: audioBuffer
+      const uploadRes = await fetchWithStageTimeout({
+        stage: 'assemblyai-upload',
+        url: 'https://api.assemblyai.com/v2/upload',
+        timeoutMs: ASSEMBLYAI_UPLOAD_TIMEOUT_MS,
+        init: {
+          method: 'POST',
+          headers: {
+            'Authorization': assemblyApiKey,
+            'Content-Type': 'application/octet-stream'
+          },
+          body: audioBuffer
+        }
       });
       if (!uploadRes.ok) throw new Error('AssemblyAI upload failed');
       const { upload_url } = await uploadRes.json();
 
       // 3. 提交转写任务
-      const transcriptRes = await fetch('https://api.assemblyai.com/v2/transcript', {
-        method: 'POST',
-        headers: {
-          'Authorization': assemblyApiKey,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          audio_url: upload_url,
-          language_code: 'en_us'
-        })
+      const transcriptRes = await fetchWithStageTimeout({
+        stage: 'assemblyai-transcript-create',
+        url: 'https://api.assemblyai.com/v2/transcript',
+        timeoutMs: ASSEMBLYAI_TRANSCRIPT_CREATE_TIMEOUT_MS,
+        init: {
+          method: 'POST',
+          headers: {
+            'Authorization': assemblyApiKey,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            audio_url: upload_url,
+            language_code: 'en_us'
+          })
+        }
       });
       if (!transcriptRes.ok) throw new Error('AssemblyAI transcript failed');
       const { id } = await transcriptRes.json();
 
       const transcript = await pollAssemblyAiTranscript({
         apiKey: assemblyApiKey,
-        transcriptId: id
+        transcriptId: id,
+        fetchImpl: (url, init) => fetchWithStageTimeout({
+          stage: 'assemblyai-poll',
+          url,
+          timeoutMs: ASSEMBLYAI_POLL_REQUEST_TIMEOUT_MS,
+          init
+        })
       });
       return res.status(200).json({ transcript, provider: 'assemblyai' });
     }
   } catch (error: any) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
     console.error('[Vercel] Speech recognition proxy error:', error);
-    return res.status(500).json({ error: error.message || 'Internal server error' });
+    if (/timed out/i.test(errorMessage)) {
+      return res.status(504).json({ error: errorMessage });
+    }
+    return res.status(500).json({ error: errorMessage || 'Internal server error' });
   }
 }
