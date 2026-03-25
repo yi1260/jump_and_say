@@ -14,6 +14,7 @@
     "@fontsource/zcool-kuaile": "^5.2.7",
     "@mediapipe/camera_utils": "^0.3.1675466862",
     "@mediapipe/pose": "^0.5.1675469404",
+    "@vercel/analytics": "^2.0.1",
     "assemblyai": "^4.27.0",
     "framer-motion": "^12.23.26",
     "phaser": "3.80.0",
