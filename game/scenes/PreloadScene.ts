@@ -7,6 +7,7 @@ import {
 } from '@/src/config/r2Config';
 import Phaser from 'phaser';
 import { Theme, ThemeId } from '../../types';
+import { extractThemesFromThemeList } from '../runtime/themeListUtils';
 
 const REWARD_VOICE_WORDS = ['perfect', 'super', 'great', 'amazing', 'awesome', 'excellent', 'try_again'] as const;
 const ROUND1_VOLUME_BORDER_SVG_CACHE_BUSTER = 'v=20260303_volume_border_split';
@@ -35,9 +36,10 @@ export class PreloadScene extends Phaser.Scene {
     super({ key: 'PreloadScene' });
   }
 
-  private ensureThemesListCached(themesList: { themes: Theme[] }) {
+  private ensureThemesListCached(themesList: unknown) {
     // Keep MainScene in sync: it relies on Phaser JSON cache for theme data.
-    this.cache.json.add('themes_list', themesList);
+    const themes = extractThemesFromThemeList(themesList);
+    this.cache.json.add('themes_list', { themes });
   }
 
   init(data: { theme?: ThemeId }) {
@@ -379,7 +381,7 @@ export class PreloadScene extends Phaser.Scene {
   }
 
   private loadThemeAssets(themesList: any) {
-    const themes = themesList.themes || [];
+    const themes = extractThemesFromThemeList(themesList);
     const targetTheme = themes.find((t: Theme) => t.id === this.currentTheme);
 
     if (!targetTheme) {

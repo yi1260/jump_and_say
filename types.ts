@@ -28,7 +28,8 @@ export interface QuestionData {
 
 export const GAMEPLAY_MODE = {
   QUIZ: 'QUIZ',
-  BLIND_BOX_PRONUNCIATION: 'BLIND_BOX_PRONUNCIATION'
+  BLIND_BOX_PRONUNCIATION: 'BLIND_BOX_PRONUNCIATION',
+  BUBBLE_POP: 'BUBBLE_POP'
 } as const;
 
 export type GameplayMode = (typeof GAMEPLAY_MODE)[keyof typeof GAMEPLAY_MODE];

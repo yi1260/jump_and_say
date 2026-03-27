@@ -1,7 +1,7 @@
 import type { PronunciationSummary, Theme } from '../../../types';
 
-export type GameplayModeId = 'QUIZ' | 'BLIND_BOX_PRONUNCIATION';
-export type ResponsiveLayoutStrategyId = 'round1-pronunciation' | 'round2-quiz';
+export type GameplayModeId = 'QUIZ' | 'BLIND_BOX_PRONUNCIATION' | 'BUBBLE_POP';
+export type ResponsiveLayoutStrategyId = 'round1-pronunciation' | 'round2-quiz' | 'round3-bubble-pop';
 
 export interface ModeVisualProfile {
   pronunciationFlowEnabled: boolean;
@@ -48,6 +48,7 @@ export interface GameplayModeHost {
   onModeResize(width: number, height: number): void;
   setupRound1ThemeData(theme: Theme): void;
   setupRound2ThemeData(theme: Theme): void;
+  setupRound3ThemeData(theme: Theme): void;
   getPronunciationSummarySnapshot(): PronunciationSummary;
   getGameScaleValue(): number;
   getScoreHudTargetPoint(): { x: number; y: number };
@@ -55,6 +56,7 @@ export interface GameplayModeHost {
   runLegacyUpdateLoop(time: number, delta: number): void;
   handleRound1PlayerHitBlock(player: unknown, block: unknown): void;
   handleRound2PlayerHitBlock(player: unknown, block: unknown): void;
+  handleRound3PlayerHitBubble(player: unknown, bubble: unknown): void;
   cleanupBlocksForModeSwitch?(): void;
   resetPronunciationModeUi?(): void;
   logModeRuntime(message: string, extra?: Record<string, unknown>): void;

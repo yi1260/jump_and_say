@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import { motionController } from '../../services/motionController';
 
 interface PlayerControlSceneHost {
+  activeModeId: string;
   player: Phaser.Physics.Arcade.Sprite;
   floorSurfaceY: number;
   stableViewportWidth: number;
@@ -62,16 +63,29 @@ export class PlayerControlSystem {
 
     const motionState = motionController.state;
     const effectiveState = motionController.smoothedState || motionState;
+    let bubbleModeVelocityX = 0;
     if (isOnGround) {
       const bodyX = Phaser.Math.Clamp(
         typeof effectiveState.bodyX === 'number' ? effectiveState.bodyX : (1 - effectiveState.rawNoseX),
         0,
         1
       );
-      const newLane = this.getHysteresisLane(bodyX, scene.targetLaneIndex);
-      scene.targetLaneIndex = newLane;
-      const targetX = scene.getLaneXPosition(scene.targetLaneIndex);
-      scene.player.x = Phaser.Math.Linear(scene.player.x, targetX, 0.28);
+
+      if (scene.activeModeId === 'BUBBLE_POP') {
+        const targetX = bodyX * scene.stableViewportWidth;
+        const deltaX = targetX - scene.player.x;
+        bubbleModeVelocityX = Phaser.Math.Clamp(
+          deltaX * 10,
+          -scene.stableViewportWidth * 1.15,
+          scene.stableViewportWidth * 1.15
+        );
+        scene.player.setVelocityX(bubbleModeVelocityX);
+      } else {
+        const newLane = this.getHysteresisLane(bodyX, scene.targetLaneIndex);
+        scene.targetLaneIndex = newLane;
+        const targetX = scene.getLaneXPosition(scene.targetLaneIndex);
+        scene.player.x = Phaser.Math.Linear(scene.player.x, targetX, 0.28);
+      }
 
       if (scene.player.anims.currentAnim?.key !== 'p1_walk') {
         scene.player.play('p1_walk', true);
@@ -89,9 +103,21 @@ export class PlayerControlSystem {
       scene.player.setTexture('p1_stand');
     }
 
-    scene.player.setVelocityX(0);
+    if (scene.activeModeId !== 'BUBBLE_POP') {
+      scene.player.setVelocityX(0);
+    }
 
-    const targetXForAngle = scene.getLaneXPosition(scene.targetLaneIndex);
+    let targetXForAngle: number;
+    if (scene.activeModeId === 'BUBBLE_POP') {
+      const bodyX = Phaser.Math.Clamp(
+        typeof effectiveState.bodyX === 'number' ? effectiveState.bodyX : (1 - effectiveState.rawNoseX),
+        0,
+        1
+      );
+      targetXForAngle = bodyX * scene.stableViewportWidth;
+    } else {
+      targetXForAngle = scene.getLaneXPosition(scene.targetLaneIndex);
+    }
     const diff = targetXForAngle - scene.player.x;
     const laneSpacing = Math.max(1, Math.abs(scene.getLaneXPosition(1) - scene.getLaneXPosition(0)));
     const normalizedDiff = Phaser.Math.Clamp(diff / laneSpacing, -1, 1);
@@ -101,11 +127,23 @@ export class PlayerControlSystem {
 
     const cursors = scene.input.keyboard?.createCursorKeys();
     if (!cursors) return;
-    if (Phaser.Input.Keyboard.JustDown(cursors.left)) {
-      scene.targetLaneIndex = Math.max(0, scene.targetLaneIndex - 1);
-    } else if (Phaser.Input.Keyboard.JustDown(cursors.right)) {
-      scene.targetLaneIndex = Math.min(2, scene.targetLaneIndex + 1);
+    
+    if (scene.activeModeId === 'BUBBLE_POP') {
+      const continuousSpeed = scene.stableViewportWidth * 0.55;
+      if (cursors.left.isDown) {
+        bubbleModeVelocityX = -continuousSpeed;
+      } else if (cursors.right.isDown) {
+        bubbleModeVelocityX = continuousSpeed;
+      }
+      scene.player.setVelocityX(bubbleModeVelocityX);
+    } else {
+      if (Phaser.Input.Keyboard.JustDown(cursors.left)) {
+        scene.targetLaneIndex = Math.max(0, scene.targetLaneIndex - 1);
+      } else if (Phaser.Input.Keyboard.JustDown(cursors.right)) {
+        scene.targetLaneIndex = Math.min(2, scene.targetLaneIndex + 1);
+      }
     }
+
     if ((Phaser.Input.Keyboard.JustDown(cursors.up) || Phaser.Input.Keyboard.JustDown(cursors.space)) && isOnGround) {
       scene.player.setVelocityY(-scene.jumpVelocity);
       scene.player.setTexture('p1_jump');
@@ -181,4 +219,3 @@ export class PlayerControlSystem {
     return 1;
   }
 }
-

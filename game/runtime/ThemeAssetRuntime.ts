@@ -1,6 +1,7 @@
 import type Phaser from 'phaser';
 import { prioritizeThemeInQueue } from '../../gameConfig';
 import type { Theme, ThemeList } from '../../types';
+import { extractThemesFromThemeList, findThemeById } from './themeListUtils';
 
 interface ThemeAssetRuntimeSceneHost {
   cache: Phaser.Cache.CacheManager;
@@ -31,8 +32,7 @@ export class ThemeAssetRuntime {
   public initThemeDataFromCache(): void {
     const scene = this.scene;
     const themeList = scene.cache.json.get('themes_list');
-    const themes = themeList?.themes || [];
-    const theme = themes.find((item: Theme) => item.id === scene.currentTheme);
+    const theme = findThemeById(themeList, scene.currentTheme);
 
     if (!theme) {
       console.warn(`[MainScene] Theme ${scene.currentTheme} not found in cache. Attempting fallback fetch...`);
@@ -63,8 +63,7 @@ export class ThemeAssetRuntime {
       }
 
       scene.cache.json.add('themes_list', themeList);
-      const allThemes = Object.values(themeList.levels).flatMap((level) => level.themes);
-      const theme = allThemes.find((item: Theme) => item.id === scene.currentTheme);
+      const theme = findThemeById(themeList, scene.currentTheme);
       if (theme) {
         console.log(`[MainScene] Fallback load successful for ${scene.currentTheme}`);
         scene.setupThemeData(theme);
@@ -93,8 +92,7 @@ export class ThemeAssetRuntime {
       console.warn('[loadThemeImages] Themes list not loaded yet');
       return;
     }
-    const themes = themesList.themes || [];
-    const targetTheme = themes.find((item: Theme) => item.id === targetThemeId);
+    const targetTheme = findThemeById(themesList, targetThemeId);
     if (!targetTheme) {
       console.warn(`[loadThemeImages] Theme ${targetThemeId} not found`);
       return;
@@ -198,7 +196,7 @@ export class ThemeAssetRuntime {
       } else {
         const themesList = scene.cache.json.get('themes_list');
         if (!themesList) return;
-        const themes = themesList.themes || [];
+        const themes = extractThemesFromThemeList(themesList);
         const currentIndex = themes.findIndex((item: Theme) => item.id === scene.currentTheme);
         if (currentIndex === -1 || currentIndex >= themes.length - 1) return;
         nextThemeId = themes[currentIndex + 1].id;
@@ -211,4 +209,3 @@ export class ThemeAssetRuntime {
     }
   }
 }
-

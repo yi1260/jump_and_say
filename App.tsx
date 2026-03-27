@@ -110,6 +110,23 @@ const ROUND_TUTORIAL_CONFIG: Record<GameplayMode, RoundTutorialConfig> = {
         iconAnimationClass: 'animate-pulse'
       }
     ]
+  },
+  BUBBLE_POP: {
+    heading: '泡泡消除',
+    cards: [
+      {
+        iconPath: 'assets/kenney/Vector/Characters/character_pink_walk_a.svg',
+        title: '左右移动',
+        subtitle: '平移对准目标泡泡',
+        iconAnimationClass: 'animate-wiggle'
+      },
+      {
+        iconPath: 'assets/kenney/Vector/Characters/character_pink_jump.svg',
+        title: '向上跳跃',
+        subtitle: '顶破正确答案',
+        iconAnimationClass: 'animate-bounce'
+      }
+    ]
   }
 };
 
@@ -261,7 +278,7 @@ export default function App() {
   ), [qualityMode]);
   const currentThemeId = selectedThemes[sessionThemeIndex] || '';
   const shouldSkipPronunciationRound = !isSpeechRecognitionSupported;
-  const firstRoundMode: GameplayMode = enabledRounds.includes('QUIZ') ? 'QUIZ' : 'BLIND_BOX_PRONUNCIATION';
+  const firstRoundMode: GameplayMode = enabledRounds.includes('QUIZ') ? 'QUIZ' : enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? 'BLIND_BOX_PRONUNCIATION' : 'BUBBLE_POP';
   const isThemeStartDisabled = selectedThemes.length === 0;
 
   useEffect(() => {
@@ -1458,10 +1475,9 @@ export default function App() {
         if (prev.length <= 1) return prev; // Must have at least one mode
         return prev.filter(m => m !== mode);
       } else {
-        const next = [...prev];
-        if (mode === 'QUIZ') next.unshift('QUIZ');
-        else next.push('BLIND_BOX_PRONUNCIATION');
-        return next;
+        const next = [...prev, mode];
+        const order = ['QUIZ', 'BLIND_BOX_PRONUNCIATION', 'BUBBLE_POP'];
+        return next.sort((a, b) => order.indexOf(a) - order.indexOf(b));
       }
     });
   };
@@ -2563,10 +2579,10 @@ export default function App() {
 
     const currentRoundSequenceIdx = enabledRounds.indexOf(roundIntroMode);
     const activeRoundCount = enabledRounds.length;
-    
-    const roundPrefix = currentRoundSequenceIdx === 0 ? 'Round One，' : 'Round Two，';
-    const modeName = roundIntroMode === 'QUIZ' ? '听音识图。' : '大声跟读。';
-    
+
+    const roundPrefix = currentRoundSequenceIdx === 0 ? 'Round One，' : currentRoundSequenceIdx === 1 ? 'Round Two，' : 'Round Three，';
+    const modeName = roundIntroMode === 'QUIZ' ? '听音识图。' : roundIntroMode === 'BLIND_BOX_PRONUNCIATION' ? '大声跟读。' : '戳泡泡。';
+
     const introText = (activeRoundCount > 1 && currentRoundSequenceIdx !== -1)
       ? `${roundPrefix}${modeName}`
       : modeName;
@@ -2574,37 +2590,42 @@ export default function App() {
     speakIntroText(introText);
   }, [phase, roundIntroMode, enabledRounds, speakIntroText]);
 
-  const handleContinueToRound2 = useCallback(() => {
-    if (shouldSkipPronunciationRound || !enabledRounds.includes('BLIND_BOX_PRONUNCIATION')) return;
+  const handleContinueToNextRound = useCallback(() => {
+    const currentRoundSequenceIdx = enabledRounds.indexOf(gameplayMode);
+    let nextMode: GameplayMode | null = null;
+
+    for (let i = currentRoundSequenceIdx + 1; i < enabledRounds.length; i++) {
+      if (!(enabledRounds[i] === 'BLIND_BOX_PRONUNCIATION' && shouldSkipPronunciationRound)) {
+        nextMode = enabledRounds[i];
+        break;
+      }
+    }
+
+    if (!nextMode) return false;
+
     clearRestCountdown();
     setShowCompletion(false);
     setPronunciationSummary(null);
     setScore(0);
     setTotalQuestions(0);
-    void startRoundIntro('BLIND_BOX_PRONUNCIATION');
-  }, [clearRestCountdown, enabledRounds, shouldSkipPronunciationRound, startRoundIntro]);
+    void startRoundIntro(nextMode);
+    return true;
+  }, [clearRestCountdown, enabledRounds, gameplayMode, shouldSkipPronunciationRound, startRoundIntro]);
 
   const handleReplay = useCallback(() => {
-    if (gameplayMode === 'QUIZ' && !shouldSkipPronunciationRound && enabledRounds.includes('BLIND_BOX_PRONUNCIATION')) {
-      handleContinueToRound2();
-      return;
-    }
+    if (handleContinueToNextRound()) return;
     setShowCompletion(false);
     setPronunciationSummary(null);
     setScore(0);
     setTotalQuestions(0);
     void startRoundIntro(firstRoundMode);
-  }, [enabledRounds, firstRoundMode, gameplayMode, handleContinueToRound2, shouldSkipPronunciationRound, startRoundIntro]);
+  }, [firstRoundMode, handleContinueToNextRound, startRoundIntro]);
 
   const handleNextLevel = useCallback(() => {
-    if (gameplayMode === 'QUIZ' && !shouldSkipPronunciationRound && enabledRounds.includes('BLIND_BOX_PRONUNCIATION')) {
-      handleContinueToRound2();
-      return;
-    }
+    if (handleContinueToNextRound()) return;
     if (isThemeSwitchTransitioningRef.current) {
       return;
-    }
-    setShowCompletion(false);
+    }    setShowCompletion(false);
     setPronunciationSummary(null);
     setScore(0);
     setTotalQuestions(0);
@@ -2639,7 +2660,7 @@ export default function App() {
 
       setRestCountdownSeconds(remainingSeconds);
     }, 1000);
-  }, [firstRoundMode, gameplayMode, handleBackToMenu, handleContinueToRound2, selectedThemes.length, sessionThemeIndex, shouldSkipPronunciationRound, startRoundIntro]);
+  }, [firstRoundMode, gameplayMode, handleBackToMenu, handleContinueToNextRound, selectedThemes.length, sessionThemeIndex, shouldSkipPronunciationRound, startRoundIntro]);
 
   useEffect(() => {
     if (!showCompletion || phase !== GamePhase.PLAYING) {
@@ -3160,7 +3181,7 @@ export default function App() {
                                 选择玩法
                             </h2>
                             
-                            <div className="w-full grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6 md:gap-10 max-w-5xl shrink-0">
+                            <div className="w-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 md:gap-10 max-w-6xl shrink-0">
                                 {/* QUIZ CARD */}
                                 <button
                                     onClick={() => handleToggleRoundMode('QUIZ')}
@@ -3216,6 +3237,38 @@ export default function App() {
                                     {shouldSkipPronunciationRound ? (
                                       <span className="mt-3 sm:mt-6 px-3 py-1 sm:px-5 sm:py-2 bg-red-500/80 text-white rounded-full text-[10px] sm:text-xs md:text-sm font-black">语音不可用</span>
                                     ) : enabledRounds.includes('BLIND_BOX_PRONUNCIATION') ? (
+                                      <div className="absolute top-3 right-3 sm:top-4 sm:right-4 md:top-6 md:right-6 bg-kenney-dark text-white rounded-full w-6 h-6 sm:w-8 sm:h-8 md:w-12 md:h-12 flex items-center justify-center shadow-lg transform rotate-12">
+                                        <svg className="w-4 h-4 sm:w-5 sm:h-5 md:w-8 md:h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={5}>
+                                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                        </svg>
+                                      </div>
+                                    ) : (
+                                      <div className="mt-3 sm:mt-6 px-3 py-1 sm:px-5 sm:py-2 bg-white/10 text-white/40 rounded-full text-[10px] sm:text-xs md:text-sm font-black uppercase tracking-wider">
+                                         未选中
+                                      </div>
+                                    )}
+                                </button>
+
+                                {/* BUBBLE POP CARD */}
+                                <button
+                                    onClick={() => handleToggleRoundMode('BUBBLE_POP')}
+                                    className={`group relative kenney-panel p-4 sm:p-6 md:p-10 flex flex-col items-center transition-all duration-300 border-[3px] sm:border-[4px] md:border-[6px] rounded-3xl sm:rounded-[32px] md:rounded-[40px] shadow-[0_6px_0_rgba(0,0,0,0.2)] md:shadow-[0_12px_0_rgba(0,0,0,0.2)] ${
+                                        enabledRounds.includes('BUBBLE_POP') 
+                                        ? 'bg-[#FF9B9B] border-kenney-dark scale-100 -rotate-1 shadow-[0_4px_0_rgba(0,0,0,0.2)] md:shadow-[0_8px_0_rgba(0,0,0,0.2)]' 
+                                        : 'bg-white/10 border-white/20 opacity-70 scale-95 shadow-none hover:bg-white/30 rotate-0'
+                                    }`}
+                                >
+                                    <div className={`w-14 h-14 sm:w-24 sm:h-24 md:w-32 md:h-32 mb-2 sm:mb-6 md:mb-8 rounded-2xl sm:rounded-[20px] md:rounded-3xl flex items-center justify-center transition-all ${enabledRounds.includes('BUBBLE_POP') ? 'bg-white/40 rotate-[-2deg]' : 'bg-black/5 rotate-0'}`}>
+                                        <img src="/assets/icons/mode_quiz.png" className={`w-8 h-8 sm:w-16 sm:h-16 md:w-28 md:h-28 object-contain transition-all duration-300 ${enabledRounds.includes('BUBBLE_POP') ? 'animate-bounce-short' : 'grayscale opacity-40'}`} alt="" />
+                                    </div>
+                                    <h3 className={`text-lg sm:text-2xl md:text-4xl font-black mb-1 sm:mb-2 md:mb-3 transition-colors ${enabledRounds.includes('BUBBLE_POP') ? 'text-kenney-dark' : 'text-white/60'}`}>
+                                        戳泡泡
+                                    </h3>
+                                    <p className={`text-xs sm:text-base md:text-xl font-bold max-w-[280px] leading-tight transition-colors ${enabledRounds.includes('BUBBLE_POP') ? 'text-kenney-dark/70' : 'text-white/40'}`}>
+                                        戳破正确的泡泡
+                                    </p>
+                                    
+                                    {enabledRounds.includes('BUBBLE_POP') ? (
                                       <div className="absolute top-3 right-3 sm:top-4 sm:right-4 md:top-6 md:right-6 bg-kenney-dark text-white rounded-full w-6 h-6 sm:w-8 sm:h-8 md:w-12 md:h-12 flex items-center justify-center shadow-lg transform rotate-12">
                                         <svg className="w-4 h-4 sm:w-5 sm:h-5 md:w-8 md:h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={5}>
                                           <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />

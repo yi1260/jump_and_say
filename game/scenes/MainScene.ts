@@ -3,6 +3,8 @@ import { Round1PronunciationFlow } from '../modes/round1/Round1PronunciationFlow
 import { Round1PronunciationMode } from '../modes/round1/Round1PronunciationMode';
 import { Round2QuizFlow } from '../modes/round2/Round2QuizFlow';
 import { Round2QuizMode } from '../modes/round2/Round2QuizMode';
+import { Round3BubblePopFlow } from '../modes/round3/Round3BubblePopFlow';
+import { Round3BubblePopMode } from '../modes/round3/Round3BubblePopMode';
 import type {
   GameplayModeHost,
   GameplayModeId,
@@ -21,6 +23,7 @@ import { RewardSystem } from '../systems/RewardSystem';
 import { SceneUiSystem } from '../systems/SceneUiSystem';
 import { PlayerControlSystem } from '../systems/PlayerControlSystem';
 import { ThemeAssetRuntime } from '../runtime/ThemeAssetRuntime';
+import { extractThemesFromThemeList } from '../runtime/themeListUtils';
 import { pauseBackgroundPreloading, resumeBackgroundPreloading } from '../../gameConfig';
 import { getLocalAssetUrl } from '../../src/config/r2Config';
 import {
@@ -56,7 +59,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
   private player!: Phaser.Physics.Arcade.Sprite;
   private playerTrailEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
   private jumpBurstEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
-  private blockDebrisEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
+  public blockDebrisEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
   private blockSmokeEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
   private blockFlashEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
   private rewardTrailEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
@@ -91,7 +94,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
   private currentThemes: ThemeId[] = [];
   private currentThemeIndex: number = 0;
   private currentTheme: ThemeId = ''; 
-  private themeData: Theme | null = null;
+  public themeData: Theme | null = null;
   private beeContainer?: Phaser.GameObjects.Container;
   private beeSprite?: Phaser.GameObjects.Sprite;
   private beeWordText?: Phaser.GameObjects.Text;
@@ -112,7 +115,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
   private totalQuestions: number = 0;
   
   private callbackBridge: RuntimeCallbackBridge = {};
-  private activeModeId: GameplayModeId = 'QUIZ';
+  public activeModeId: GameplayModeId = 'QUIZ';
   private responsiveLayoutStrategy: ResponsiveLayoutStrategyId = 'round2-quiz';
   private modeVisualProfile: ModeVisualProfile = { pronunciationFlowEnabled: false };
   private runtimeState: SceneRuntimeState | null = null;
@@ -121,6 +124,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
   private modeContext: ModeContext | null = null;
   private readonly round1Flow: Round1PronunciationFlow;
   private readonly round2Flow: Round2QuizFlow;
+  private readonly round3Flow: Round3BubblePopFlow;
   private readonly playerControlSystem: PlayerControlSystem;
   private readonly themeAssetRuntime: ThemeAssetRuntime;
   private blindBoxRoundPhase: 'IDLE' | 'SELECTING' | 'SHOWING' | 'COUNTDOWN' | 'RECORDING' | 'RESULT' = 'IDLE';
@@ -201,7 +205,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
   // private lastMoveDirection: 'left' | 'right' | null = null;
   
   // Interaction Lock
-  private isInteractionActive: boolean = false;
+  public isInteractionActive: boolean = false;
   private isGameOver: boolean = false;
   private imagesLoading: boolean = false;
   private imagesLoaded: boolean = false;
@@ -247,6 +251,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
     super({ key: 'MainScene' });
     this.round1Flow = new Round1PronunciationFlow(this);
     this.round2Flow = new Round2QuizFlow(this);
+    this.round3Flow = new Round3BubblePopFlow(this);
     this.playerControlSystem = new PlayerControlSystem(this);
     this.themeAssetRuntime = new ThemeAssetRuntime(this);
   }
@@ -344,6 +349,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
     if (!this.physics?.world) return;
     const physicsBottom = Math.max(1, Math.round(this.floorSurfaceY));
     this.physics.world.setBounds(0, 0, width, physicsBottom);
+    this.physics.world.setBoundsCollision(true, true, false, true);
     this.cameras.main.setBounds(0, 0, width, height);
   }
 
@@ -456,6 +462,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
     this.modeRegistry = new ModeRegistry();
     this.modeRegistry.register('BLIND_BOX_PRONUNCIATION', new Round1PronunciationMode());
     this.modeRegistry.register('QUIZ', new Round2QuizMode());
+    this.modeRegistry.register('BUBBLE_POP', new Round3BubblePopMode());
     this.activeModeId = initialModeId;
   }
 
@@ -494,6 +501,9 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
     if (modeId === 'BLIND_BOX_PRONUNCIATION') {
       return 'round1-pronunciation';
     }
+    if (modeId === 'BUBBLE_POP') {
+      return 'round3-bubble-pop';
+    }
     return 'round2-quiz';
   }
 
@@ -524,10 +534,15 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
 
   public onModeEnter(modeId: GameplayModeId, reason: ModeTransitionReason): void {
     this.activeModeId = modeId;
+    this.configurePlayerPhysicsForMode(modeId);
     this.logModeRuntime('mode-enter', { modeId, reason });
   }
 
   public onModeExit(modeId: GameplayModeId, reason: ModeTransitionReason): void {
+    if (modeId === 'BUBBLE_POP') {
+      this.round3Flow.clear();
+    }
+    this.configurePlayerPhysicsForMode('QUIZ');
     this.logModeRuntime('mode-exit', { modeId, reason });
   }
 
@@ -547,6 +562,10 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
       player as Phaser.Types.Physics.Arcade.GameObjectWithBody,
       block as Phaser.Types.Physics.Arcade.GameObjectWithBody
     );
+  }
+
+  public handleRound3PlayerHitBubble(player: unknown, bubble: unknown): void {
+    this.round3Flow.handleHit(player, bubble);
   }
 
   public cleanupBlocksForModeSwitch(): void {
@@ -578,7 +597,8 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
     this.round1Flow.resetPronunciationHudState();
     const registryMode = this.registry.get('gameplayMode');
     const initialModeId: GameplayModeId =
-      registryMode === 'BLIND_BOX_PRONUNCIATION' ? 'BLIND_BOX_PRONUNCIATION' : 'QUIZ';
+      registryMode === 'BLIND_BOX_PRONUNCIATION' ? 'BLIND_BOX_PRONUNCIATION' : 
+      registryMode === 'BUBBLE_POP' ? 'BUBBLE_POP' : 'QUIZ';
     this.activeModeId = initialModeId;
     this.modeVisualProfile = this.getVisualProfileByMode(initialModeId);
     this.initializeModeRuntime(initialModeId);
@@ -665,6 +685,11 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
   public setupRound2ThemeData(theme: Theme): void {
     this.themeData = theme;
     this.round2Flow.setupThemeData(theme);
+  }
+
+  public setupRound3ThemeData(theme: Theme): void {
+    this.themeData = theme;
+    this.round3Flow.setupThemeData(theme);
   }
 
   private getScoreHudTarget(): { x: number; y: number } {
@@ -778,6 +803,18 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
     const maxHeightByViewport = Math.min(sceneHeight * 0.5, 560 * this.gameScale);
     const minHeight = Math.max(150 * this.gameScale, sceneHeight * 0.18);
     return Math.round(Phaser.Math.Clamp(maxHeightByWidth, minHeight, maxHeightByViewport));
+  }
+
+  private configurePlayerPhysicsForMode(modeId: GameplayModeId): void {
+    if (!this.player?.body) {
+      return;
+    }
+
+    const body = this.player.body as Phaser.Physics.Arcade.Body;
+    const isBubbleMode = modeId === 'BUBBLE_POP';
+    body.setDirectControl(false);
+    this.player.setPushable(!isBubbleMode);
+    this.player.setImmovable(isBubbleMode);
   }
 
   private refreshThemeFrameMode(): void {
@@ -1051,6 +1088,15 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
     this.beeCenterY = this.blockCenterY - minBeeBlockGap - beeLiftOffset;
 
     this.updateJumpVelocityByCardHeight(this.blockHeight);
+
+    // BUBBLE_POP 模式覆盖 - player 尽量靠底部, 跳跃高度 = 屏幕高度的 50%
+    if (this.activeModeId === 'BUBBLE_POP') {
+      const bubbleBottomMargin = Math.max(6, 10 * this.gameScale);
+      this.floorSurfaceY = safeHeight - bubbleBottomMargin;
+      this.floorHeight = bubbleBottomMargin;
+      const jumpHeight = safeHeight * 0.5;
+      this.jumpVelocity = Math.sqrt(2 * this.getScaledPhysicsValue(this.GRAVITY_Y) * jumpHeight);
+    }
   }
 
   preload() {
@@ -1136,7 +1182,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
     bot.destroy();
 
     // 4. Bubble Texture (Optimized)
-    const bSize = 320;
+    const bSize = 512;
     const bubble = this.make.graphics({x: 0, y: 0});
     bubble.fillStyle(C_GOLD, 0.3);
     bubble.fillCircle(bSize/2, bSize/2, bSize/2 - 2);
@@ -1287,12 +1333,13 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
     this.player.setCollideWorldBounds(true);
     this.player.setGravityY(this.getScaledPhysicsValue(this.GRAVITY_Y));
     
-    const bodyWidth = visualPlayerSize * 0.6;
-    const bodyHeight = visualPlayerSize * 0.8;
+    const bodyWidth = visualPlayerSize * 0.5;
+    const bodyHeight = visualPlayerSize * 0.95;
     this.player.body?.setSize(bodyWidth, bodyHeight);
     this.player.body?.setOffset((visualPlayerSize - bodyWidth) / 2, visualPlayerSize - bodyHeight);
     this.player.setDepth(20);
     this.player.play('p1_walk');
+    this.configurePlayerPhysicsForMode(this.activeModeId);
 
     this.scale.on('resize', this.handleResize, this);
     this.events.once('shutdown', () => {
@@ -1300,6 +1347,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
       this.scale.off('resize', this.handleResize, this);
       this.blindBoxRoundToken += 1;
       this.teardownModeRuntime('shutdown');
+      this.round3Flow.destroy();
       this.round1Flow.destroyBlindBoxUiText();
       this.stopPronunciationSound(true);
     });
@@ -1308,12 +1356,16 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
       this.scale.off('resize', this.handleResize, this);
       this.blindBoxRoundToken += 1;
       this.teardownModeRuntime('destroy');
+      this.round3Flow.destroy();
       this.round1Flow.destroyBlindBoxUiText();
       this.stopPronunciationSound(true);
     });
 
     this.physics.add.collider(this.player, platforms);
     this.physics.add.overlap(this.player, this.blocks, this.hitBlock, undefined, this);
+    // Bubble pop mode uses manual hit qualification in Round3BubblePopFlow.
+    // Keep this as overlap-only so Arcade Physics doesn't separate the player on any broad contact first.
+    this.physics.add.overlap(this.player, this.round3Flow.bubbleSystem.bubbleGroup, this.hitBlock, undefined, this);
     this.applyResponsiveLayout(width, height);
     // Force one post-create resize pass. On iPad Edge we may receive a transient
     // viewport during scene create and not get another resize event immediately.
@@ -1440,8 +1492,8 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
           const visualPlayerSize = 180 * this.gameScale;
           this.player.setDisplaySize(visualPlayerSize, visualPlayerSize);
 
-          const bodyWidth = visualPlayerSize * 0.6;
-          const bodyHeight = visualPlayerSize * 0.8;
+          const bodyWidth = visualPlayerSize * 0.5;
+          const bodyHeight = visualPlayerSize * 0.95;
           this.player.body.setSize(bodyWidth, bodyHeight);
           this.player.body.setOffset((visualPlayerSize - bodyWidth) / 2, visualPlayerSize - bodyHeight);
           this.player.setGravityY(this.getScaledPhysicsValue(this.GRAVITY_Y));
@@ -1468,6 +1520,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
       this.modeSystems?.ui.syncBeeLayout(safeWidth, safeHeight);
 
       this.round1Flow.onSceneResize();
+      this.round3Flow.handleSceneResize();
   }
 
   handleResize(_gameSize: Phaser.Structs.Size) {
@@ -1497,9 +1550,11 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
   }
   
   public runLegacyUpdateLoop(_time: number, _delta: number): void {
-    void _time;
     void _delta;
     this.playerControlSystem.update();
+    if (this.activeModeId === 'BUBBLE_POP') {
+      this.round3Flow.update(_time);
+    }
   }
 
   update(time: number, delta: number): void {
@@ -1538,6 +1593,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
     // 1. 停止所有方块的生成逻辑
     this.isInteractionActive = false;
     this.blocks.clear(true, true);
+    this.round3Flow.clear();
     
     // 2. 触发 React 层 UI 开启 (三明治上层)
     if (this.modeContext) {
@@ -1556,7 +1612,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
     }
 
     const themeList = this.cache.json.get('themes_list');
-    const themes = themeList?.themes || [];
+    const themes = extractThemesFromThemeList(themeList);
     const currentIndex = themes.findIndex((t: Theme) => t.id === this.currentTheme);
     return currentIndex >= 0 && currentIndex < themes.length - 1;
   }
@@ -1572,7 +1628,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
       nextTheme = this.currentThemes[nextIndex];
     } else {
       const themeList = this.cache.json.get('themes_list');
-      const themes = themeList?.themes || [];
+      const themes = extractThemesFromThemeList(themeList);
       const currentIndex = themes.findIndex((t: Theme) => t.id === this.currentTheme);
       const nextIndex = currentIndex >= 0 ? currentIndex + 1 : 0;
       nextTheme = themes[nextIndex]?.id || this.currentTheme;
@@ -1615,7 +1671,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
   /**
    * 初始化或更新小蜜蜂及其抓着的文字
    */
-  private updateBeeWord(text: string) {
+  public updateBeeWord(text: string) {
     const uiSystem = this.modeSystems?.ui as SceneUiSystem | undefined;
     uiSystem?.updateBeeWord(text);
   }
