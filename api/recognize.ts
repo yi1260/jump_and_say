@@ -42,6 +42,30 @@ interface AssemblyAiPollResponse {
   error?: string;
 }
 
+interface RecognitionSuccessPayload {
+  transcript: string;
+  provider: 'deepgram' | 'assemblyai';
+}
+
+const getContentType = (value: string | string[] | undefined): string => {
+  if (Array.isArray(value)) {
+    return value[0] || 'audio/webm';
+  }
+  return value || 'audio/webm';
+};
+
+const readRequestBody = async (req: AsyncIterable<Uint8Array | Buffer | string>): Promise<Buffer> => {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+};
+
+const toErrorMessage = (error: unknown): string => (
+  error instanceof Error ? error.message : String(error)
+);
+
 export const pollAssemblyAiTranscript = async ({
   apiKey,
   transcriptId,
@@ -124,6 +148,94 @@ export const fetchWithStageTimeout = async ({
   }
 };
 
+const transcribeWithDeepgram = async (
+  apiKey: string,
+  audioBuffer: Buffer,
+  contentType: string
+): Promise<RecognitionSuccessPayload> => {
+  const response = await fetchWithStageTimeout({
+    stage: 'deepgram-listen',
+    url: 'https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&language=en',
+    timeoutMs: DEEPGRAM_LISTEN_TIMEOUT_MS,
+    init: {
+      method: 'POST',
+      headers: {
+        'Authorization': `Token ${apiKey}`,
+        'Content-Type': contentType,
+      },
+      body: audioBuffer,
+      duplex: 'half',
+    } as RequestInit
+  });
+
+  if (!response.ok) {
+    const errorText = (await response.text()).trim();
+    throw new Error(errorText ? `Deepgram API error: ${errorText}` : `Deepgram API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  return {
+    transcript: data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '',
+    provider: 'deepgram'
+  };
+};
+
+const transcribeWithAssemblyAi = async (
+  apiKey: string,
+  audioBuffer: Buffer
+): Promise<RecognitionSuccessPayload> => {
+  const uploadRes = await fetchWithStageTimeout({
+    stage: 'assemblyai-upload',
+    url: 'https://api.assemblyai.com/v2/upload',
+    timeoutMs: ASSEMBLYAI_UPLOAD_TIMEOUT_MS,
+    init: {
+      method: 'POST',
+      headers: {
+        'Authorization': apiKey,
+        'Content-Type': 'application/octet-stream'
+      },
+      body: audioBuffer
+    }
+  });
+  if (!uploadRes.ok) throw new Error('AssemblyAI upload failed');
+  const { upload_url } = await uploadRes.json();
+
+  const transcriptRes = await fetchWithStageTimeout({
+    stage: 'assemblyai-transcript-create',
+    url: 'https://api.assemblyai.com/v2/transcript',
+    timeoutMs: ASSEMBLYAI_TRANSCRIPT_CREATE_TIMEOUT_MS,
+    init: {
+      method: 'POST',
+      headers: {
+        'Authorization': apiKey,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        audio_url: upload_url,
+        language_code: 'en_us'
+      })
+    }
+  });
+  if (!transcriptRes.ok) throw new Error('AssemblyAI transcript failed');
+  const { id } = await transcriptRes.json();
+
+  const transcript = await pollAssemblyAiTranscript({
+    apiKey,
+    transcriptId: id,
+    fetchImpl: (url, init) => fetchWithStageTimeout({
+      stage: 'assemblyai-poll',
+      url,
+      timeoutMs: ASSEMBLYAI_POLL_REQUEST_TIMEOUT_MS,
+      init
+    })
+  });
+
+  return {
+    transcript,
+    provider: 'assemblyai'
+  };
+};
+
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -137,97 +249,40 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    // 使用 Deepgram (首选，因为它是真正的实时同步返回，速度极快)
+    const contentType = getContentType(req.headers['content-type']);
+    const audioBuffer = await readRequestBody(req);
+    const providerErrors: string[] = [];
+    let sawTimeout = false;
+
     if (deepgramApiKey) {
-      // 提取前端传来的 mimetype，比如 audio/webm
-      const contentType = req.headers['content-type'] || 'audio/webm';
-      
-      const response = await fetchWithStageTimeout({
-        stage: 'deepgram-listen',
-        url: 'https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&language=en',
-        timeoutMs: DEEPGRAM_LISTEN_TIMEOUT_MS,
-        init: {
-          method: 'POST',
-          headers: {
-            'Authorization': `Token ${deepgramApiKey}`,
-            'Content-Type': contentType,
-          },
-          body: req,
-          duplex: 'half',
-        } as RequestInit
-      });
-
-      if (!response.ok) {
-        const errText = await response.text();
-        console.error('[Vercel] Deepgram error:', errText);
-        return res.status(response.status).json({ error: 'Deepgram API error' });
+      try {
+        const result = await transcribeWithDeepgram(deepgramApiKey, audioBuffer, contentType);
+        return res.status(200).json(result);
+      } catch (error) {
+        const message = toErrorMessage(error);
+        console.warn('[Vercel] Deepgram recognition failed, trying next provider.', { message });
+        providerErrors.push(`Deepgram: ${message}`);
+        sawTimeout = sawTimeout || /timed out/i.test(message);
       }
-
-      const data = await response.json();
-      const transcript = data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
-      return res.status(200).json({ transcript, provider: 'deepgram' });
     }
 
-    // 使用 AssemblyAI (备选，需要上传 -> 发起转写 -> 轮询，稍微慢一点)
     if (assemblyApiKey) {
-      // 1. 获取完整的音频 buffer (因为我们要先上传)
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) {
-        chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+      try {
+        const result = await transcribeWithAssemblyAi(assemblyApiKey, audioBuffer);
+        return res.status(200).json(result);
+      } catch (error) {
+        const message = toErrorMessage(error);
+        console.warn('[Vercel] AssemblyAI recognition failed.', { message });
+        providerErrors.push(`AssemblyAI: ${message}`);
+        sawTimeout = sawTimeout || /timed out/i.test(message);
       }
-      const audioBuffer = Buffer.concat(chunks);
+    }
 
-      // 2. 上传文件到 AssemblyAI
-      const uploadRes = await fetchWithStageTimeout({
-        stage: 'assemblyai-upload',
-        url: 'https://api.assemblyai.com/v2/upload',
-        timeoutMs: ASSEMBLYAI_UPLOAD_TIMEOUT_MS,
-        init: {
-          method: 'POST',
-          headers: {
-            'Authorization': assemblyApiKey,
-            'Content-Type': 'application/octet-stream'
-          },
-          body: audioBuffer
-        }
-      });
-      if (!uploadRes.ok) throw new Error('AssemblyAI upload failed');
-      const { upload_url } = await uploadRes.json();
-
-      // 3. 提交转写任务
-      const transcriptRes = await fetchWithStageTimeout({
-        stage: 'assemblyai-transcript-create',
-        url: 'https://api.assemblyai.com/v2/transcript',
-        timeoutMs: ASSEMBLYAI_TRANSCRIPT_CREATE_TIMEOUT_MS,
-        init: {
-          method: 'POST',
-          headers: {
-            'Authorization': assemblyApiKey,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            audio_url: upload_url,
-            language_code: 'en_us'
-          })
-        }
-      });
-      if (!transcriptRes.ok) throw new Error('AssemblyAI transcript failed');
-      const { id } = await transcriptRes.json();
-
-      const transcript = await pollAssemblyAiTranscript({
-        apiKey: assemblyApiKey,
-        transcriptId: id,
-        fetchImpl: (url, init) => fetchWithStageTimeout({
-          stage: 'assemblyai-poll',
-          url,
-          timeoutMs: ASSEMBLYAI_POLL_REQUEST_TIMEOUT_MS,
-          init
-        })
-      });
-      return res.status(200).json({ transcript, provider: 'assemblyai' });
+    if (providerErrors.length > 0) {
+      return res.status(sawTimeout ? 504 : 502).json({ error: providerErrors.join(' | ') });
     }
   } catch (error: any) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = toErrorMessage(error);
     console.error('[Vercel] Speech recognition proxy error:', error);
     if (/timed out/i.test(errorMessage)) {
       return res.status(504).json({ error: errorMessage });

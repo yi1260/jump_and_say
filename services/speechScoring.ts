@@ -1,3 +1,5 @@
+import { FallbackRecognizer } from './fallbackRecognizer.ts';
+
 type SpeechRecognitionResultReason =
   | 'ok'
   | 'unsupported'
@@ -100,7 +102,9 @@ export interface RecognizeOnceResult {
 }
 
 const getSpeechRecognitionCtor = (): SpeechRecognitionLikeConstructor | null => (
-  window.SpeechRecognition || window.webkitSpeechRecognition || null
+  typeof window === 'undefined'
+    ? null
+    : (window.SpeechRecognition || window.webkitSpeechRecognition || null)
 );
 
 const RECOGNITION_START_TIMEOUT_FLOOR_MS = 300;
@@ -197,20 +201,273 @@ const mapRecognitionError = (errorName: string): SpeechRecognitionResultReason =
   return 'error';
 };
 
-import { FallbackRecognizer } from './fallbackRecognizer.ts';
+const canUseFallbackRecognition = (): boolean => {
+  if (typeof navigator === 'undefined') return false;
+  const hasMediaRecorder = typeof MediaRecorder !== 'undefined';
+  const hasGetUserMedia = Boolean(
+    navigator.mediaDevices &&
+    typeof navigator.mediaDevices.getUserMedia === 'function'
+  );
+  return hasMediaRecorder && hasGetUserMedia;
+};
 
 class SpeechScoringService {
   private fallbackRecognizer = new FallbackRecognizer();
-  // FORCE TRUE FOR TESTING: Disable native API and force the use of 3rd party fallback
-  public isNativeBroken = true;
+  public isNativeBroken = false;
 
   isSupported(): boolean {
-    return true; // Force support to true so the flow continues
+    return Boolean(getSpeechRecognitionCtor()) || canUseFallbackRecognition();
   }
 
   async recognizeOnce(options: RecognizeOnceOptions): Promise<RecognizeOnceResult> {
-    // 强制走降级方案，用于测试 Vercel + Deepgram / AssemblyAI
-    return this.recognizeWithFallback(options);
+    const RecognitionCtor = getSpeechRecognitionCtor();
+    if (RecognitionCtor && !this.isNativeBroken) {
+      const nativeResult = await this.recognizeWithNative(options, RecognitionCtor);
+      if (nativeResult.transcript.trim().length > 0) {
+        this.isNativeBroken = false;
+        return nativeResult;
+      }
+
+      if (!this.shouldFallbackAfterNativeFailure(nativeResult.reason)) {
+        return nativeResult;
+      }
+
+      if (canUseFallbackRecognition()) {
+        console.info('[Pronounce] Native recognition failed; falling back to cloud recognition.', {
+          reason: nativeResult.reason
+        });
+        const fallbackResult = await this.recognizeWithFallback(options);
+        if (fallbackResult.transcript.trim().length > 0) {
+          return fallbackResult;
+        }
+        return fallbackResult.reason === 'error' ? nativeResult : fallbackResult;
+      }
+
+      return nativeResult;
+    }
+
+    if (canUseFallbackRecognition()) {
+      console.info('[Pronounce] Native recognition unavailable; using cloud fallback directly.', {
+        hasNativeRecognition: Boolean(RecognitionCtor),
+        isNativeBroken: this.isNativeBroken
+      });
+      return this.recognizeWithFallback(options);
+    }
+
+    return {
+      transcript: '',
+      confidence: 0,
+      reason: 'unsupported',
+      durationMs: 0
+    };
+  }
+
+  private shouldFallbackAfterNativeFailure(reason: SpeechRecognitionResultReason): boolean {
+    return reason === 'unsupported' || reason === 'network' || reason === 'error' || reason === 'aborted';
+  }
+
+  private async recognizeWithNative(
+    options: RecognizeOnceOptions,
+    RecognitionCtor: SpeechRecognitionLikeConstructor
+  ): Promise<RecognizeOnceResult> {
+    const startedAt = performance.now();
+
+    return new Promise<RecognizeOnceResult>((resolve) => {
+      const recognition = new RecognitionCtor();
+      recognition.lang = options.lang;
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
+
+      let transcript = '';
+      let confidence = 0;
+      let finalized = false;
+      let forcedTimeout = false;
+      let mappedErrorReason: SpeechRecognitionResultReason | null = null;
+      let timeoutId: number | null = null;
+      let forceFinalizeId: number | null = null;
+
+      const clearTimersIfNeeded = (): void => {
+        if (timeoutId !== null) {
+          window.clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        if (forceFinalizeId !== null) {
+          window.clearTimeout(forceFinalizeId);
+          forceFinalizeId = null;
+        }
+      };
+
+      const buildFinalReason = (
+        preferredReason: SpeechRecognitionResultReason | null = null
+      ): SpeechRecognitionResultReason => {
+        if (transcript.trim().length > 0) {
+          return 'ok';
+        }
+        if (forcedTimeout) {
+          return 'timeout';
+        }
+        return preferredReason || mappedErrorReason || 'no-speech';
+      };
+
+      const finalize = (reason: SpeechRecognitionResultReason): void => {
+        if (finalized) return;
+        finalized = true;
+        clearTimersIfNeeded();
+        const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
+        resolve({
+          transcript: transcript.trim(),
+          confidence: Math.max(0, Math.min(1, confidence)),
+          reason,
+          durationMs
+        });
+      };
+
+      const scheduleForceFinalize = (
+        reason: SpeechRecognitionResultReason,
+        delayMs: number,
+        cause: string
+      ): void => {
+        if (finalized || forceFinalizeId !== null) return;
+        forceFinalizeId = window.setTimeout(() => {
+          forceFinalizeId = null;
+          if (finalized) return;
+          console.warn('[Pronounce] SpeechRecognition forcing finalize after missing end event.', {
+            cause,
+            reason,
+            transcriptLength: transcript.trim().length,
+            confidence,
+            forcedTimeout,
+            mappedErrorReason
+          });
+          try {
+            recognition.abort();
+          } catch (error) {
+            console.warn('[Pronounce] SpeechRecognition abort failed during forced finalize:', error);
+          }
+          finalize(buildFinalReason(reason));
+        }, Math.max(0, delayMs));
+      };
+
+      recognition.onstart = (): void => {
+        console.info('[Pronounce] Native SpeechRecognition started.', {
+          lang: options.lang,
+          maxDurationMs: options.maxDurationMs
+        });
+      };
+
+      recognition.onaudiostart = (): void => {
+        console.info('[Pronounce] SpeechRecognition audio capture started.');
+      };
+
+      recognition.onaudioend = (): void => {
+        console.info('[Pronounce] SpeechRecognition audio capture ended.');
+      };
+
+      recognition.onsoundstart = (): void => {
+        console.info('[Pronounce] SpeechRecognition sound detected.');
+      };
+
+      recognition.onsoundend = (): void => {
+        console.info('[Pronounce] SpeechRecognition sound ended.');
+      };
+
+      recognition.onspeechstart = (): void => {
+        console.info('[Pronounce] SpeechRecognition speech detected.');
+      };
+
+      recognition.onspeechend = (): void => {
+        console.info('[Pronounce] SpeechRecognition speech ended.');
+      };
+
+      recognition.onresult = (event: SpeechRecognitionEventLike): void => {
+        let currentTranscript = '';
+        let latestConfidence = 0;
+        let isFinal = false;
+
+        for (let i = event.resultIndex; i < event.results.length; i += 1) {
+          const result = event.results[i];
+          const alt = result[0];
+          if (!alt || typeof alt.transcript !== 'string') continue;
+          currentTranscript += alt.transcript;
+          if (typeof alt.confidence === 'number' && Number.isFinite(alt.confidence)) {
+            latestConfidence = Math.max(latestConfidence, alt.confidence);
+          }
+          if (result.isFinal) {
+            isFinal = true;
+          }
+        }
+
+        if (currentTranscript.trim().length > 0) {
+          transcript = currentTranscript.trim();
+          confidence = Math.max(confidence, latestConfidence);
+          console.info('[Pronounce] SpeechRecognition result received.', {
+            transcript,
+            confidence,
+            isFinal
+          });
+
+          if (isFinal) {
+            try {
+              recognition.stop();
+            } catch (error) {
+              console.warn('[Pronounce] SpeechRecognition stop failed after result:', error);
+            }
+            finalize('ok');
+          }
+        }
+      };
+
+      recognition.onerror = (event: SpeechRecognitionErrorEventLike): void => {
+        mappedErrorReason = mapRecognitionError(event.error);
+        if (mappedErrorReason === 'network') {
+          console.warn('[Pronounce] Detected native network error, marking native recognition as broken.');
+          this.isNativeBroken = true;
+        }
+        console.warn('[Pronounce] SpeechRecognition error event received.', {
+          error: event.error,
+          message: event.message,
+          mappedErrorReason
+        });
+        scheduleForceFinalize(mappedErrorReason, RECOGNITION_END_GRACE_MS, `error:${event.error}`);
+      };
+
+      recognition.onnomatch = (): void => {
+        mappedErrorReason = 'no-speech';
+        console.info('[Pronounce] SpeechRecognition no match.');
+        scheduleForceFinalize('no-speech', RECOGNITION_END_GRACE_MS, 'nomatch');
+      };
+
+      recognition.onend = (): void => {
+        console.info('[Pronounce] SpeechRecognition ended.', {
+          transcriptLength: transcript.trim().length,
+          forcedTimeout,
+          mappedErrorReason
+        });
+        finalize(buildFinalReason());
+      };
+
+      timeoutId = window.setTimeout(() => {
+        forcedTimeout = true;
+        console.warn('[Pronounce] SpeechRecognition timed out, requesting stop.', {
+          maxDurationMs: options.maxDurationMs
+        });
+        try {
+          recognition.stop();
+          scheduleForceFinalize('timeout', RECOGNITION_END_GRACE_MS, 'timeout-stop-without-end');
+        } catch (error) {
+          console.warn('[Pronounce] SpeechRecognition stop failed on timeout:', error);
+          finalize('timeout');
+        }
+      }, Math.max(RECOGNITION_START_TIMEOUT_FLOOR_MS, options.maxDurationMs));
+
+      try {
+        recognition.start();
+      } catch (error) {
+        console.warn('[Pronounce] SpeechRecognition start failed:', error);
+        finalize('error');
+      }
+    });
   }
 
   // 降级方案：使用 MediaRecorder 录制音频并发送到后端 API

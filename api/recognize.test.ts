@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { Readable } from 'node:stream';
 import test from 'node:test';
 
-import { fetchWithStageTimeout, pollAssemblyAiTranscript } from './recognize.ts';
+import handler, { fetchWithStageTimeout, pollAssemblyAiTranscript } from './recognize.ts';
 
 test('fetchWithStageTimeout aborts stalled third-party requests with stage context', async () => {
   await assert.rejects(
@@ -56,4 +57,97 @@ test('pollAssemblyAiTranscript times out when AssemblyAI never completes', async
   );
 
   assert.equal(pollCount, 3);
+});
+
+test('handler falls back to AssemblyAI when Deepgram request fails', async () => {
+  const originalFetch = global.fetch;
+  const originalDeepgramApiKey = process.env.DEEPGRAM_API_KEY;
+  const originalAssemblyApiKey = process.env.ASSEMBLYAI_API_KEY;
+  const fetchCalls: string[] = [];
+
+  process.env.DEEPGRAM_API_KEY = 'deepgram-key';
+  process.env.ASSEMBLYAI_API_KEY = 'assembly-key';
+
+  global.fetch = async (input: string | URL | Request): Promise<Response> => {
+    const url = String(input);
+    fetchCalls.push(url);
+
+    if (url.includes('deepgram.com')) {
+      return {
+        ok: false,
+        status: 503,
+        text: async () => 'temporary deepgram failure'
+      } as Response;
+    }
+
+    if (url.endsWith('/upload')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ upload_url: 'https://upload.example/audio.wav' })
+      } as Response;
+    }
+
+    if (url.endsWith('/transcript')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'transcript-123' })
+      } as Response;
+    }
+
+    if (url.includes('/transcript/transcript-123')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ status: 'completed', text: 'fallback transcript' })
+      } as Response;
+    }
+
+    throw new Error(`Unexpected fetch URL: ${url}`);
+  };
+
+  const req = Readable.from([Buffer.from('fake-audio')]) as Readable & {
+    method: string;
+    headers: Record<string, string>;
+  };
+  req.method = 'POST';
+  req.headers = {
+    'content-type': 'audio/webm'
+  };
+
+  const responseState: {
+    statusCode: number;
+    payload: unknown;
+  } = {
+    statusCode: 200,
+    payload: null
+  };
+
+  const res = {
+    status(code: number) {
+      responseState.statusCode = code;
+      return this;
+    },
+    json(payload: unknown) {
+      responseState.payload = payload;
+      return this;
+    }
+  };
+
+  try {
+    await handler(req, res);
+
+    assert.equal(responseState.statusCode, 200);
+    assert.deepEqual(responseState.payload, {
+      transcript: 'fallback transcript',
+      provider: 'assemblyai'
+    });
+    assert.equal(fetchCalls.some((url) => url.includes('deepgram.com')), true);
+    assert.equal(fetchCalls.some((url) => url.includes('assemblyai.com')), true);
+  } finally {
+    global.fetch = originalFetch;
+    process.env.DEEPGRAM_API_KEY = originalDeepgramApiKey;
+    process.env.ASSEMBLYAI_API_KEY = originalAssemblyApiKey;
+  }
 });
