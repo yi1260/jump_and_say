@@ -662,11 +662,19 @@ export class Round1PronunciationFlow {
       const volumeMonitorReady = await this.startVolumeMonitor(() => {
         console.info('[Pronounce] Mic countdown reached 0s.');
       });
-      const recognitionResult = await this.recognizeWithStableWindow(scene.PRONUNCIATION_RECORDING_TIMEOUT_MS);
+      const recognitionResult = await this.recognizeWithStableWindow(
+        scene.PRONUNCIATION_RECORDING_TIMEOUT_MS,
+        scene.volumeMonitorStream
+      );
       const volumeMonitorDetectedSignal = scene.volumeMonitorDetectedSignal;
       const volumePeak = Phaser.Math.Clamp(scene.blindBoxCurrentVolumePeak, 0, 1);
       this.stopVolumeMonitor();
       this.setBlindBoxMicHintVisible(false);
+      
+      // 给手机操作系统底层留出切换音频路由（从录音模式/听筒切换回媒体播放模式）的时间
+      // 避免刚刚关闭麦克风时立刻播放音效导致声音被掩盖或吞音
+      await this.waitForDelay(150);
+
       if (!this.isActiveRoundToken(roundToken)) return;
 
       const transcript = recognitionResult.transcript.trim();
@@ -2451,7 +2459,10 @@ export class Round1PronunciationFlow {
     window.restoreBGMVolume?.();
   }
 
-  private async recognizeWithStableWindow(maxDurationMs: number): Promise<RecognizeOnceResult> {
+  private async recognizeWithStableWindow(
+    maxDurationMs: number,
+    inputStream: MediaStream | null
+  ): Promise<RecognizeOnceResult> {
     const scene = this.scene;
     const startedAt = performance.now();
     let retryCount = 0;
@@ -2475,7 +2486,8 @@ export class Round1PronunciationFlow {
 
       const attempt = await speechScoringService.recognizeOnce({
         lang: 'en-US',
-        maxDurationMs: Math.max(600, remainingMs)
+        maxDurationMs: Math.max(600, remainingMs),
+        inputStream
       });
       lastResult = {
         ...attempt,

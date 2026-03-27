@@ -42,7 +42,7 @@ export interface PronunciationRoundResult {
   confidence: number;
   confidenceLevel: PronunciationConfidenceLevel;
   volumePeak: number;
-  reason: 'ok' | 'unsupported' | 'timeout' | 'no-speech' | 'aborted' | 'error';
+  reason: 'ok' | 'unsupported' | 'timeout' | 'no-speech' | 'aborted' | 'network' | 'not-allowed' | 'error';
   durationMs: number;
 }
 

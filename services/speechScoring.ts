@@ -1,9 +1,13 @@
+import { FallbackRecognizer } from './fallbackRecognizer.ts';
+
 type SpeechRecognitionResultReason =
   | 'ok'
   | 'unsupported'
   | 'timeout'
   | 'no-speech'
   | 'aborted'
+  | 'network'
+  | 'not-allowed'
   | 'error';
 
 interface SpeechRecognitionAlternativeLike {
@@ -13,11 +17,16 @@ interface SpeechRecognitionAlternativeLike {
 
 interface SpeechRecognitionResultLike {
   [index: number]: SpeechRecognitionAlternativeLike;
+  length: number;
+  isFinal?: boolean;
 }
 
 interface SpeechRecognitionEventLike extends Event {
   resultIndex: number;
-  results: SpeechRecognitionResultLike[];
+  results: {
+    [index: number]: SpeechRecognitionResultLike;
+    length: number;
+  };
 }
 
 interface SpeechRecognitionErrorEventLike extends Event {
@@ -82,6 +91,7 @@ declare global {
 export interface RecognizeOnceOptions {
   lang: string;
   maxDurationMs: number;
+  inputStream?: MediaStream | null;
 }
 
 export interface RecognizeOnceResult {
@@ -92,7 +102,9 @@ export interface RecognizeOnceResult {
 }
 
 const getSpeechRecognitionCtor = (): SpeechRecognitionLikeConstructor | null => (
-  window.SpeechRecognition || window.webkitSpeechRecognition || null
+  typeof window === 'undefined'
+    ? null
+    : (window.SpeechRecognition || window.webkitSpeechRecognition || null)
 );
 
 const RECOGNITION_START_TIMEOUT_FLOOR_MS = 300;
@@ -184,32 +196,87 @@ export const scorePronunciation = (targetText: string, transcript: string): numb
 const mapRecognitionError = (errorName: string): SpeechRecognitionResultReason => {
   if (errorName === 'aborted') return 'aborted';
   if (errorName === 'no-speech') return 'no-speech';
+  if (errorName === 'network') return 'network';
+  if (errorName === 'not-allowed' || errorName === 'service-not-allowed') return 'not-allowed';
   return 'error';
 };
 
+const canUseFallbackRecognition = (): boolean => {
+  if (typeof navigator === 'undefined') return false;
+  const hasMediaRecorder = typeof MediaRecorder !== 'undefined';
+  const hasGetUserMedia = Boolean(
+    navigator.mediaDevices &&
+    typeof navigator.mediaDevices.getUserMedia === 'function'
+  );
+  return hasMediaRecorder && hasGetUserMedia;
+};
+
 class SpeechScoringService {
+  private fallbackRecognizer = new FallbackRecognizer();
+  public isNativeBroken = false;
+
   isSupported(): boolean {
-    return Boolean(getSpeechRecognitionCtor());
+    return Boolean(getSpeechRecognitionCtor()) || canUseFallbackRecognition();
   }
 
   async recognizeOnce(options: RecognizeOnceOptions): Promise<RecognizeOnceResult> {
     const RecognitionCtor = getSpeechRecognitionCtor();
-    if (!RecognitionCtor) {
-      return {
-        transcript: '',
-        confidence: 0,
-        reason: 'unsupported',
-        durationMs: 0
-      };
+    if (RecognitionCtor && !this.isNativeBroken) {
+      const nativeResult = await this.recognizeWithNative(options, RecognitionCtor);
+      if (nativeResult.transcript.trim().length > 0) {
+        this.isNativeBroken = false;
+        return nativeResult;
+      }
+
+      if (!this.shouldFallbackAfterNativeFailure(nativeResult.reason)) {
+        return nativeResult;
+      }
+
+      if (canUseFallbackRecognition()) {
+        console.info('[Pronounce] Native recognition failed; falling back to cloud recognition.', {
+          reason: nativeResult.reason
+        });
+        const fallbackResult = await this.recognizeWithFallback(options);
+        if (fallbackResult.transcript.trim().length > 0) {
+          return fallbackResult;
+        }
+        return fallbackResult.reason === 'error' ? nativeResult : fallbackResult;
+      }
+
+      return nativeResult;
     }
 
+    if (canUseFallbackRecognition()) {
+      console.info('[Pronounce] Native recognition unavailable; using cloud fallback directly.', {
+        hasNativeRecognition: Boolean(RecognitionCtor),
+        isNativeBroken: this.isNativeBroken
+      });
+      return this.recognizeWithFallback(options);
+    }
+
+    return {
+      transcript: '',
+      confidence: 0,
+      reason: 'unsupported',
+      durationMs: 0
+    };
+  }
+
+  private shouldFallbackAfterNativeFailure(reason: SpeechRecognitionResultReason): boolean {
+    return reason === 'unsupported' || reason === 'network' || reason === 'error' || reason === 'aborted';
+  }
+
+  private async recognizeWithNative(
+    options: RecognizeOnceOptions,
+    RecognitionCtor: SpeechRecognitionLikeConstructor
+  ): Promise<RecognizeOnceResult> {
     const startedAt = performance.now();
 
     return new Promise<RecognizeOnceResult>((resolve) => {
       const recognition = new RecognitionCtor();
       recognition.lang = options.lang;
       recognition.continuous = false;
-      recognition.interimResults = false;
+      recognition.interimResults = true;
       recognition.maxAlternatives = 1;
 
       let transcript = '';
@@ -243,6 +310,19 @@ class SpeechScoringService {
         return preferredReason || mappedErrorReason || 'no-speech';
       };
 
+      const finalize = (reason: SpeechRecognitionResultReason): void => {
+        if (finalized) return;
+        finalized = true;
+        clearTimersIfNeeded();
+        const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
+        resolve({
+          transcript: transcript.trim(),
+          confidence: Math.max(0, Math.min(1, confidence)),
+          reason,
+          durationMs
+        });
+      };
+
       const scheduleForceFinalize = (
         reason: SpeechRecognitionResultReason,
         delayMs: number,
@@ -269,21 +349,8 @@ class SpeechScoringService {
         }, Math.max(0, delayMs));
       };
 
-      const finalize = (reason: SpeechRecognitionResultReason): void => {
-        if (finalized) return;
-        finalized = true;
-        clearTimersIfNeeded();
-        const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
-        resolve({
-          transcript: transcript.trim(),
-          confidence: Math.max(0, Math.min(1, confidence)),
-          reason,
-          durationMs
-        });
-      };
-
       recognition.onstart = (): void => {
-        console.info('[Pronounce] SpeechRecognition started.', {
+        console.info('[Pronounce] Native SpeechRecognition started.', {
           lang: options.lang,
           maxDurationMs: options.maxDurationMs
         });
@@ -314,34 +381,49 @@ class SpeechScoringService {
       };
 
       recognition.onresult = (event: SpeechRecognitionEventLike): void => {
-        const chunks: string[] = [];
+        let currentTranscript = '';
         let latestConfidence = 0;
+        let isFinal = false;
+
         for (let i = event.resultIndex; i < event.results.length; i += 1) {
-          const alt = event.results[i][0];
+          const result = event.results[i];
+          const alt = result[0];
           if (!alt || typeof alt.transcript !== 'string') continue;
-          chunks.push(alt.transcript);
+          currentTranscript += alt.transcript;
           if (typeof alt.confidence === 'number' && Number.isFinite(alt.confidence)) {
             latestConfidence = Math.max(latestConfidence, alt.confidence);
           }
+          if (result.isFinal) {
+            isFinal = true;
+          }
         }
-        if (chunks.length > 0) {
-          transcript = chunks.join(' ').trim();
+
+        if (currentTranscript.trim().length > 0) {
+          transcript = currentTranscript.trim();
           confidence = Math.max(confidence, latestConfidence);
           console.info('[Pronounce] SpeechRecognition result received.', {
             transcript,
-            confidence
+            confidence,
+            isFinal
           });
-          try {
-            recognition.stop();
-          } catch (error) {
-            console.warn('[Pronounce] SpeechRecognition stop failed after result:', error);
+
+          if (isFinal) {
+            try {
+              recognition.stop();
+            } catch (error) {
+              console.warn('[Pronounce] SpeechRecognition stop failed after result:', error);
+            }
+            finalize('ok');
           }
-          finalize('ok');
         }
       };
 
       recognition.onerror = (event: SpeechRecognitionErrorEventLike): void => {
         mappedErrorReason = mapRecognitionError(event.error);
+        if (mappedErrorReason === 'network') {
+          console.warn('[Pronounce] Detected native network error, marking native recognition as broken.');
+          this.isNativeBroken = true;
+        }
         console.warn('[Pronounce] SpeechRecognition error event received.', {
           error: event.error,
           message: event.message,
@@ -386,6 +468,57 @@ class SpeechScoringService {
         finalize('error');
       }
     });
+  }
+
+  // 降级方案：使用 MediaRecorder 录制音频并发送到后端 API
+  private async recognizeWithFallback(options: RecognizeOnceOptions): Promise<RecognizeOnceResult> {
+    console.info('[Pronounce] Using Fallback API for speech recognition');
+    try {
+      const { transcript, durationMs } = await new Promise<{transcript: string, durationMs: number}>((resolve, reject) => {
+        let isDone = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+
+        const doStop = () => {
+          if (isDone) return;
+          isDone = true;
+          if (timer !== null) {
+            clearTimeout(timer);
+            timer = null;
+          }
+          this.fallbackRecognizer.stopAndRecognize(options.maxDurationMs)
+            .then(resolve)
+            .catch(reject);
+        };
+
+        // 绑定静音检测回调：一旦检测到用户说完了，立刻停止录音去请求接口
+        this.fallbackRecognizer.startRecording({
+          onSilence: () => {
+            doStop();
+          },
+          preferredStream: options.inputStream ?? null
+        }).catch(reject);
+
+        // 如果用户一直不出声或一直有杂音，最多等 5 秒强制上传
+        timer = setTimeout(() => {
+          doStop();
+        }, Math.min(options.maxDurationMs, 5000));
+      });
+
+      return {
+        transcript,
+        confidence: transcript ? 0.9 : 0, // Fallback API 暂未返回置信度，给个默认高分
+        reason: transcript ? 'ok' : 'no-speech',
+        durationMs
+      };
+    } catch (error) {
+      console.error('[Pronounce] Fallback API failed:', error);
+      return {
+        transcript: '',
+        confidence: 0,
+        reason: 'error',
+        durationMs: 0
+      };
+    }
   }
 }
 
