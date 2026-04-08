@@ -8,7 +8,7 @@ type RecorderLike = {
     options?: { onSilence?: () => void; preferredStream?: MediaStream | null } | (() => void),
     preferredStream?: MediaStream | null
   ) => Promise<void>;
-  stopAndRecognize: (maxDurationMs: number) => Promise<{ transcript: string; durationMs: number }>;
+  stopAndRecognize: (maxDurationMs: number) => Promise<{ transcript: string; durationMs: number; provider: 'tencent' | 'deepgram' | 'assemblyai' | 'unknown' }>;
   abort: () => void;
 };
 
@@ -17,7 +17,7 @@ type SpeechScoringServiceTestAccess = {
   isNativeBroken: boolean;
 };
 
-test('recognizeOnce prefers native recognition before cloud fallback', async () => {
+test('recognizeOnce returns unsupported when native recognition is intentionally disabled and fallback is unavailable', async () => {
   const originalWindow = globalThis.window;
   const scoringService = speechScoringService as unknown as SpeechScoringServiceTestAccess;
   const originalRecognizer = scoringService.fallbackRecognizer;
@@ -79,7 +79,8 @@ test('recognizeOnce prefers native recognition before cloud fallback', async () 
     },
     stopAndRecognize: async () => ({
       transcript: 'fallback apple',
-      durationMs: 500
+      durationMs: 500,
+      provider: 'tencent'
     }),
     abort: () => {}
   };
@@ -102,9 +103,10 @@ test('recognizeOnce prefers native recognition before cloud fallback', async () 
     });
 
     assert.equal(fallbackUsed, false);
-    assert.equal(result.reason, 'ok');
-    assert.equal(result.transcript, 'native apple');
-    assert.equal(result.confidence, 0.84);
+    assert.equal(result.reason, 'unsupported');
+    assert.equal(result.transcript, '');
+    assert.equal(result.confidence, 0);
+    assert.equal(result.provider, 'unknown');
   } finally {
     scoringService.fallbackRecognizer = originalRecognizer;
     scoringService.isNativeBroken = originalIsNativeBroken;
@@ -135,7 +137,8 @@ test('recognizeOnce forwards the existing mic stream to fallback recording', asy
     },
     stopAndRecognize: async (maxDurationMs: number) => ({
       transcript: `spoken within ${maxDurationMs}ms`,
-      durationMs: 321
+      durationMs: 321,
+      provider: 'tencent'
     }),
     abort: () => {}
   };
@@ -178,6 +181,7 @@ test('recognizeOnce forwards the existing mic stream to fallback recording', asy
     assert.equal(result.reason, 'ok');
     assert.equal(result.transcript, 'spoken within 1200ms');
     assert.equal(result.durationMs, 321);
+    assert.equal(result.provider, 'tencent');
   } finally {
     scoringService.fallbackRecognizer = originalRecognizer;
     scoringService.isNativeBroken = originalIsNativeBroken;

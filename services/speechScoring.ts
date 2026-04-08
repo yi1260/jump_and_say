@@ -1,4 +1,4 @@
-import { FallbackRecognizer } from './fallbackRecognizer.ts';
+import { FallbackRecognizer, type CloudRecognitionProvider } from './fallbackRecognizer.ts';
 
 type SpeechRecognitionResultReason =
   | 'ok'
@@ -99,6 +99,7 @@ export interface RecognizeOnceResult {
   confidence: number;
   reason: SpeechRecognitionResultReason;
   durationMs: number;
+  provider?: 'native' | CloudRecognitionProvider;
 }
 
 const getSpeechRecognitionCtor = (): SpeechRecognitionLikeConstructor | null => (
@@ -260,7 +261,8 @@ class SpeechScoringService {
       transcript: '',
       confidence: 0,
       reason: 'unsupported',
-      durationMs: 0
+      durationMs: 0,
+      provider: 'unknown'
     };
   }
 
@@ -321,7 +323,8 @@ class SpeechScoringService {
           transcript: transcript.trim(),
           confidence: Math.max(0, Math.min(1, confidence)),
           reason,
-          durationMs
+          durationMs,
+          provider: 'native'
         });
       };
 
@@ -476,7 +479,7 @@ class SpeechScoringService {
   private async recognizeWithFallback(options: RecognizeOnceOptions): Promise<RecognizeOnceResult> {
     console.info('[Pronounce] Using Fallback API for speech recognition');
     try {
-      const { transcript, durationMs } = await new Promise<{transcript: string, durationMs: number}>((resolve, reject) => {
+      const { transcript, durationMs, provider } = await new Promise<{transcript: string, durationMs: number, provider: CloudRecognitionProvider}>((resolve, reject) => {
         let isDone = false;
         let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -506,11 +509,18 @@ class SpeechScoringService {
         }, Math.min(options.maxDurationMs, 5000));
       });
 
+      console.info('[Pronounce] Fallback API recognition completed.', {
+        provider,
+        transcriptLength: transcript.trim().length,
+        durationMs
+      });
+
       return {
         transcript,
         confidence: transcript ? 0.9 : 0, // Fallback API 暂未返回置信度，给个默认高分
         reason: transcript ? 'ok' : 'no-speech',
-        durationMs
+        durationMs,
+        provider
       };
     } catch (error) {
       console.error('[Pronounce] Fallback API failed:', error);
@@ -518,7 +528,8 @@ class SpeechScoringService {
         transcript: '',
         confidence: 0,
         reason: 'error',
-        durationMs: 0
+        durationMs: 0,
+        provider: 'unknown'
       };
     }
   }

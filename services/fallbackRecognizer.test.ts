@@ -189,7 +189,7 @@ test('stopAndRecognize preserves the recorder mime type after cleanup', async ()
     postedBodyType = init?.body instanceof Blob ? init.body.type : '';
     return {
       ok: true,
-      json: async () => ({ transcript: 'apple' })
+      json: async () => ({ transcript: 'apple', provider: 'tencent' })
     } as Response;
   }) as typeof fetch;
 
@@ -199,6 +199,7 @@ test('stopAndRecognize preserves the recorder mime type after cleanup', async ()
   assert.equal(postedContentType, 'audio/mp4');
   assert.equal(postedBodyType, 'audio/mp4');
   assert.equal(result.transcript, 'apple');
+  assert.equal(result.provider, 'tencent');
   assert.equal(providedStream.__track.stopCalls, 0);
 });
 

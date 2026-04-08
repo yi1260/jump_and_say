@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import { Readable } from 'node:stream';
 import test from 'node:test';
 
 import handler, { fetchWithStageTimeout, pollAssemblyAiTranscript } from './recognize.ts';
+
+const require = createRequire(import.meta.url);
 
 test('fetchWithStageTimeout aborts stalled third-party requests with stage context', async () => {
   await assert.rejects(
@@ -149,5 +152,80 @@ test('handler falls back to AssemblyAI when Deepgram request fails', async () =>
     global.fetch = originalFetch;
     process.env.DEEPGRAM_API_KEY = originalDeepgramApiKey;
     process.env.ASSEMBLYAI_API_KEY = originalAssemblyApiKey;
+  }
+});
+
+test('handler does not silently fall back when Tencent is forced and Tencent fails', async () => {
+  const sdk = require('tencentcloud-sdk-nodejs');
+  const originalTencentClient = sdk.asr.v20190614.Client;
+  const originalFetch = global.fetch;
+  const originalTencentSecretId = process.env.TENCENT_SECRET_ID;
+  const originalTencentSecretKey = process.env.TENCENT_SECRET_KEY;
+  const originalDeepgramApiKey = process.env.DEEPGRAM_API_KEY;
+  const originalForcedProvider = process.env.SPEECH_RECOGNITION_PROVIDER;
+  let fetchCalled = false;
+
+  process.env.TENCENT_SECRET_ID = 'tencent-id';
+  process.env.TENCENT_SECRET_KEY = 'tencent-key';
+  process.env.DEEPGRAM_API_KEY = 'deepgram-key';
+  process.env.SPEECH_RECOGNITION_PROVIDER = 'tencent';
+
+  sdk.asr.v20190614.Client = class FakeTencentClient {
+    SentenceRecognition(
+      _request: unknown,
+      cb: (error: Error | null, response?: { Result?: string }) => void
+    ): void {
+      cb(new Error('invalid tencent signature'));
+    }
+  };
+
+  global.fetch = (async () => {
+    fetchCalled = true;
+    throw new Error('Deepgram should not run when Tencent is forced');
+  }) as typeof fetch;
+
+  const req = Readable.from([Buffer.from('fake-wav-audio')]) as Readable & {
+    method: string;
+    headers: Record<string, string>;
+  };
+  req.method = 'POST';
+  req.headers = {
+    'content-type': 'audio/wav'
+  };
+
+  const responseState: {
+    statusCode: number;
+    payload: unknown;
+  } = {
+    statusCode: 200,
+    payload: null
+  };
+
+  const res = {
+    status(code: number) {
+      responseState.statusCode = code;
+      return this;
+    },
+    json(payload: unknown) {
+      responseState.payload = payload;
+      return this;
+    }
+  };
+
+  try {
+    await handler(req, res);
+
+    assert.equal(fetchCalled, false);
+    assert.equal(responseState.statusCode, 502);
+    assert.deepEqual(responseState.payload, {
+      error: 'Tencent: invalid tencent signature'
+    });
+  } finally {
+    sdk.asr.v20190614.Client = originalTencentClient;
+    global.fetch = originalFetch;
+    process.env.TENCENT_SECRET_ID = originalTencentSecretId;
+    process.env.TENCENT_SECRET_KEY = originalTencentSecretKey;
+    process.env.DEEPGRAM_API_KEY = originalDeepgramApiKey;
+    process.env.SPEECH_RECOGNITION_PROVIDER = originalForcedProvider;
   }
 });

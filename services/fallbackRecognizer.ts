@@ -8,6 +8,8 @@ export interface StartRecordingOptions {
   preferredStream?: MediaStream | null;
 }
 
+export type CloudRecognitionProvider = 'tencent' | 'deepgram' | 'assemblyai' | 'unknown';
+
 const RECOGNITION_PROXY_TIMEOUT_MS = 20000;
 
 const readRecognitionApiError = async (response: Response): Promise<string> => {
@@ -147,7 +149,7 @@ export class FallbackRecognizer {
   /**
    * 停止录音并请求云端 API
    */
-  async stopAndRecognize(maxDurationMs: number): Promise<{ transcript: string; durationMs: number }> {
+  async stopAndRecognize(maxDurationMs: number): Promise<{ transcript: string; durationMs: number; provider: CloudRecognitionProvider }> {
     const startedAt = performance.now();
     return new Promise((resolve, reject) => {
       if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
@@ -199,10 +201,22 @@ export class FallbackRecognizer {
             throw new Error(errorDetail ? `API returned ${response.status}: ${errorDetail}` : `API returned ${response.status}`);
           }
 
-          const result = await response.json();
+          const result = await response.json() as {
+            transcript?: string;
+            provider?: CloudRecognitionProvider;
+            requestId?: string;
+            audioDurationMs?: number;
+          };
+          console.info('[FallbackRecognizer] Recognition payload received', {
+            provider: result.provider || 'unknown',
+            transcriptLength: result.transcript?.trim().length || 0,
+            requestId: result.requestId,
+            audioDurationMs: result.audioDurationMs
+          });
           resolve({
             transcript: result.transcript || '',
             durationMs: Math.round(durationMs),
+            provider: result.provider || 'unknown',
           });
         } catch (error) {
           reject(error);
