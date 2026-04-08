@@ -34,3 +34,5 @@ skills/*
 *.sw?
 
 # Backup folders
+.vercel
+.env*.local

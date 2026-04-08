@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import React, { useEffect, useRef } from 'react';
 import { bindActivePhaserGame, ensurePhaserAudioUnlocked, getPhaserAudioConfig } from '../services/audioController';
 import { MainScene } from '../game/scenes/MainScene';
+import { PlatformScene } from '../game/scenes/PlatformScene';
 import { PreloadScene } from '../game/scenes/PreloadScene';
 import { GameplayMode, PronunciationSummary, Theme, ThemeId } from '../types';
 
@@ -662,7 +663,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             qualityStep = result.appliedQualityStep;
           }
         },
-        scene: [PreloadScene, MainScene],
+        scene: [PreloadScene, MainScene, PlatformScene],
         input: {
           keyboard: true
         }

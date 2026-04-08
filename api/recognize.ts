@@ -1,6 +1,9 @@
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+
 export const config = {
   api: {
-    bodyParser: false, // 禁用默认的 body 解析，直接处理音频流
+    bodyParser: false,
   },
 };
 
@@ -10,6 +13,7 @@ const DEEPGRAM_LISTEN_TIMEOUT_MS = 12000;
 const ASSEMBLYAI_UPLOAD_TIMEOUT_MS = 12000;
 const ASSEMBLYAI_TRANSCRIPT_CREATE_TIMEOUT_MS = 8000;
 const ASSEMBLYAI_POLL_REQUEST_TIMEOUT_MS = 4000;
+const TENCENT_TIMEOUT_MS = 10000;
 
 interface StageLogger {
   info(message?: unknown, ...optionalParams: unknown[]): void;
@@ -44,7 +48,7 @@ interface AssemblyAiPollResponse {
 
 interface RecognitionSuccessPayload {
   transcript: string;
-  provider: 'deepgram' | 'assemblyai';
+  provider: 'tencent' | 'deepgram' | 'assemblyai';
 }
 
 const getContentType = (value: string | string[] | undefined): string => {
@@ -148,6 +152,50 @@ export const fetchWithStageTimeout = async ({
   }
 };
 
+const transcribeWithTencent = async (
+  secretId: string,
+  secretKey: string,
+  audioBuffer: Buffer,
+  voiceFormat: string
+): Promise<RecognitionSuccessPayload> => {
+  // 使用新版 SDK API (v4.x)
+  const { ProfileCredential } = require('tencentcloud-sdk-nodejs/tencentcloud/common');
+  const AsrClient = require('tencentcloud-sdk-nodejs').asr.v20190614.Client;
+
+  const cred = new ProfileCredential(secretId, secretKey);
+  const client = new AsrClient({ credential: cred, region: 'ap-shanghai' });
+
+  const startTime = Date.now();
+  console.info('[Vercel] Tencent ASR start', { voiceFormat, audioLen: audioBuffer.length });
+
+  // 使用 Promise 包装 callback 风格的 API
+  const resp = await new Promise<{ Result: string }>((resolve, reject) => {
+    client.SentenceRecognition({
+      EngSerViceType: '16k_en',
+      VoiceFormat: voiceFormat,
+      SourceType: 1,
+      Data: audioBuffer.toString('base64'),
+      DataLen: audioBuffer.length,
+    }, (err: Error | null, response: { Result: string }) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(response);
+      }
+    });
+  });
+
+  console.info('[Vercel] Tencent ASR complete', {
+    resultLen: resp.Result?.length || 0,
+    durationMs: Date.now() - startTime
+  });
+
+  return {
+    transcript: resp.Result || '',
+    provider: 'tencent'
+  };
+};
+
 const transcribeWithDeepgram = async (
   apiKey: string,
   audioBuffer: Buffer,
@@ -236,15 +284,63 @@ const transcribeWithAssemblyAi = async (
   };
 };
 
+const isWebmFormat = (contentType: string): boolean => {
+  const normalized = contentType.toLowerCase();
+  return normalized.includes('webm') || normalized.includes('opus');
+};
+
+const convertWebmToWav = async (webmBuffer: Buffer): Promise<Buffer> => {
+  // 使用 createRequire 兼容 ESM 模块
+  const ffmpeg = require('fluent-ffmpeg');
+
+  // 优先使用系统 FFmpeg（本地开发），回退到 @ffmpeg-installer（生产环境）
+  let ffmpegPath: string;
+  try {
+    const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
+    ffmpegPath = ffmpegInstaller.path;
+  } catch {
+    // 本地开发环境，使用系统 FFmpeg
+    ffmpegPath = 'ffmpeg';
+  }
+  ffmpeg.setFfmpegPath(ffmpegPath);
+
+  const stream = require('stream');
+
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    const readable = new stream.PassThrough();
+    readable.end(webmBuffer);
+
+    ffmpeg(readable)
+      .inputFormat('webm')
+      .audioFrequency(16000)
+      .audioChannels(1)
+      .audioCodec('pcm_s16le')
+      .format('wav')
+      .on('error', (err: Error) => {
+        reject(err);
+      })
+      .on('end', () => {
+        resolve(Buffer.concat(chunks));
+      })
+      .pipe()
+      .on('data', (chunk: Buffer) => {
+        chunks.push(chunk);
+      });
+  });
+};
+
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
+  const tencentSecretId = process.env.TENCENT_SECRET_ID;
+  const tencentSecretKey = process.env.TENCENT_SECRET_KEY;
   const deepgramApiKey = process.env.DEEPGRAM_API_KEY;
   const assemblyApiKey = process.env.ASSEMBLYAI_API_KEY;
 
-  if (!deepgramApiKey && !assemblyApiKey) {
+  if (!tencentSecretId && !tencentSecretKey && !deepgramApiKey && !assemblyApiKey) {
     return res.status(500).json({ error: 'No Speech API Key configured' });
   }
 
@@ -253,6 +349,32 @@ export default async function handler(req: any, res: any) {
     const audioBuffer = await readRequestBody(req);
     const providerErrors: string[] = [];
     let sawTimeout = false;
+
+    const isWebm = isWebmFormat(contentType);
+
+    if (tencentSecretId && tencentSecretKey) {
+      try {
+        if (isWebm) {
+          console.info('[Vercel] WebM format detected, converting to WAV for Tencent ASR');
+          try {
+            const wavBuffer = await convertWebmToWav(audioBuffer);
+            const result = await transcribeWithTencent(tencentSecretId, tencentSecretKey, wavBuffer, 'wav');
+            return res.status(200).json(result);
+          } catch (convertError) {
+            console.warn('[Vercel] WebM to WAV conversion failed, falling back to Deepgram:', convertError);
+            providerErrors.push(`Tencent: ${toErrorMessage(convertError)}`);
+          }
+        } else {
+          const result = await transcribeWithTencent(tencentSecretId, tencentSecretKey, audioBuffer, 'wav');
+          return res.status(200).json(result);
+        }
+      } catch (error) {
+        const message = toErrorMessage(error);
+        console.warn('[Vercel] Tencent recognition failed, trying next provider.', { message });
+        providerErrors.push(`Tencent: ${message}`);
+        sawTimeout = sawTimeout || /timed out|timeout/i.test(message);
+      }
+    }
 
     if (deepgramApiKey) {
       try {

@@ -2,6 +2,8 @@ import type Phaser from 'phaser';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BugReportButton } from './components/BugReportButton';
 import CompletionOverlay from './components/CompletionOverlay';
+import { FeedbackButton } from './components/FeedbackButton';
+import { FeedbackModal } from './components/FeedbackModal';
 import GameBackground from './components/GameBackground';
 import { GameCanvas, type QualityMode } from './components/GameCanvas';
 import { LoadingScreen } from './components/LoadingScreen';
@@ -226,6 +228,7 @@ export default function App() {
   const [selectedLevel, setSelectedLevel] = useState<string>('AA');
   const [qualityMode, setQualityMode] = useState<QualityMode>('adaptive');
   const [isQualityPickerOpen, setIsQualityPickerOpen] = useState<boolean>(false);
+  const [isFeedbackModalOpen, setIsFeedbackModalOpen] = useState<boolean>(false);
   const [isSpeechRecognitionSupported, setIsSpeechRecognitionSupported] = useState<boolean>(() => {
     try {
       return speechScoringService.isSupported();
@@ -2944,7 +2947,10 @@ export default function App() {
             {phase === GamePhase.MENU && (
               <div className="menu-shell non-game-scale text-center w-full max-w-4xl px-4 md:px-8 relative flex flex-col items-center justify-between lg:justify-center min-h-0 h-full max-h-screen overflow-y-auto py-2 md:py-12 lg:gap-6 scrollbar-hide">
                   
-                  {/* Title and Character Group */}
+                  {/* Feedback Button - 右上角 */}
+          <FeedbackButton onClick={() => setIsFeedbackModalOpen(true)} />
+
+        {/* Title and Character Group */}
                   <div className="flex flex-row lg:flex-col items-center justify-center gap-2 lg:gap-6 shrink-0 w-full flex-1 lg:flex-none">
                       {/* Title */}
                       <div className="flex flex-col items-center px-0 lg:px-10 overflow-hidden shrink-0 order-1 lg:order-2">
@@ -3294,6 +3300,12 @@ export default function App() {
       )}
 
       <BugReportButton />
+
+      {/* Feedback Modal */}
+      <FeedbackModal
+        isVisible={isFeedbackModalOpen}
+        onClose={() => setIsFeedbackModalOpen(false)}
+      />
     </div>
   );
 }
