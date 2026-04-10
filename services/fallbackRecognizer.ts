@@ -10,6 +10,12 @@ export interface StartRecordingOptions {
 
 export type CloudRecognitionProvider = 'tencent' | 'deepgram' | 'assemblyai' | 'unknown';
 
+interface RecognitionRoutingMetadata {
+  attemptedProviders?: CloudRecognitionProvider[];
+  providerErrors?: string[];
+  forcedProvider?: CloudRecognitionProvider | 'auto';
+}
+
 const RECOGNITION_PROXY_TIMEOUT_MS = 20000;
 
 const readRecognitionApiError = async (response: Response): Promise<string> => {
@@ -164,7 +170,6 @@ export class FallbackRecognizer {
 
         try {
           const audioBlob = new Blob(this.audioChunks, { type: mimeType });
-          const durationMs = performance.now() - startedAt;
           const requestStartedAt = performance.now();
           const controller = new AbortController();
           const timeoutId = window.setTimeout(() => {
@@ -206,16 +211,29 @@ export class FallbackRecognizer {
             provider?: CloudRecognitionProvider;
             requestId?: string;
             audioDurationMs?: number;
+            routing?: RecognitionRoutingMetadata;
           };
           console.info('[FallbackRecognizer] Recognition payload received', {
             provider: result.provider || 'unknown',
             transcriptLength: result.transcript?.trim().length || 0,
             requestId: result.requestId,
-            audioDurationMs: result.audioDurationMs
+            audioDurationMs: result.audioDurationMs,
+            attemptedProviders: result.routing?.attemptedProviders || [],
+            providerErrors: result.routing?.providerErrors || [],
+            forcedProvider: result.routing?.forcedProvider || 'auto',
+            totalDurationMs: Math.max(0, Math.round(performance.now() - startedAt))
           });
+          if ((result.routing?.providerErrors?.length || 0) > 0) {
+            console.warn('[FallbackRecognizer] Cloud provider fallback occurred.', {
+              finalProvider: result.provider || 'unknown',
+              attemptedProviders: result.routing?.attemptedProviders || [],
+              providerErrors: result.routing?.providerErrors || [],
+              forcedProvider: result.routing?.forcedProvider || 'auto'
+            });
+          }
           resolve({
             transcript: result.transcript || '',
-            durationMs: Math.round(durationMs),
+            durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
             provider: result.provider || 'unknown',
           });
         } catch (error) {

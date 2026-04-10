@@ -51,6 +51,11 @@ interface RecognitionSuccessPayload {
   provider: 'tencent' | 'deepgram' | 'assemblyai';
   requestId?: string;
   audioDurationMs?: number;
+  routing?: {
+    attemptedProviders: RecognitionProvider[];
+    providerErrors: string[];
+    forcedProvider: RecognitionProvider | 'auto';
+  };
 }
 
 type RecognitionProvider = RecognitionSuccessPayload['provider'];
@@ -87,6 +92,20 @@ const getForcedProvider = (): RecognitionProvider | null => {
   }
   return null;
 };
+
+const withRoutingMetadata = (
+  payload: RecognitionSuccessPayload,
+  attemptedProviders: RecognitionProvider[],
+  providerErrors: string[],
+  forcedProvider: RecognitionProvider | null
+): RecognitionSuccessPayload => ({
+  ...payload,
+  routing: {
+    attemptedProviders,
+    providerErrors,
+    forcedProvider: forcedProvider || 'auto'
+  }
+});
 
 const withTimeout = async <T>(
   label: string,
@@ -405,11 +424,22 @@ export default async function handler(req: any, res: any) {
     const contentType = getContentType(req.headers['content-type']);
     const audioBuffer = await readRequestBody(req);
     const providerErrors: string[] = [];
+    const attemptedProviders: RecognitionProvider[] = [];
     let sawTimeout = false;
 
     const isWebm = isWebmFormat(contentType);
+    console.info('[Vercel] Speech provider routing', {
+      forcedProvider: forcedProvider || 'auto',
+      hasTencentConfig,
+      hasDeepgramConfig: Boolean(deepgramApiKey),
+      hasAssemblyConfig: Boolean(assemblyApiKey),
+      contentType,
+      audioLen: audioBuffer.length,
+      isWebm
+    });
 
     if (hasTencentConfig && (!forcedProvider || forcedProvider === 'tencent')) {
+      attemptedProviders.push('tencent');
       try {
         if (isWebm) {
           console.info('[Vercel] WebM format detected, converting to WAV for Tencent ASR');
@@ -421,7 +451,7 @@ export default async function handler(req: any, res: any) {
               ffmpegPath
             });
             const result = await transcribeWithTencent(tencentSecretId!, tencentSecretKey!, wavBuffer, 'wav');
-            return res.status(200).json(result);
+            return res.status(200).json(withRoutingMetadata(result, attemptedProviders, providerErrors, forcedProvider));
           } catch (convertError) {
             console.warn('[Vercel] WebM to WAV conversion failed before Tencent ASR.', {
               message: toErrorMessage(convertError)
@@ -433,7 +463,7 @@ export default async function handler(req: any, res: any) {
           }
         } else {
           const result = await transcribeWithTencent(tencentSecretId!, tencentSecretKey!, audioBuffer, 'wav');
-          return res.status(200).json(result);
+          return res.status(200).json(withRoutingMetadata(result, attemptedProviders, providerErrors, forcedProvider));
         }
       } catch (error) {
         const message = toErrorMessage(error);
@@ -452,9 +482,10 @@ export default async function handler(req: any, res: any) {
     }
 
     if (deepgramApiKey && (!forcedProvider || forcedProvider === 'deepgram')) {
+      attemptedProviders.push('deepgram');
       try {
         const result = await transcribeWithDeepgram(deepgramApiKey, audioBuffer, contentType);
-        return res.status(200).json(result);
+        return res.status(200).json(withRoutingMetadata(result, attemptedProviders, providerErrors, forcedProvider));
       } catch (error) {
         const message = toErrorMessage(error);
         console.warn('[Vercel] Deepgram recognition failed, trying next provider.', { message });
@@ -470,9 +501,10 @@ export default async function handler(req: any, res: any) {
     }
 
     if (assemblyApiKey && (!forcedProvider || forcedProvider === 'assemblyai')) {
+      attemptedProviders.push('assemblyai');
       try {
         const result = await transcribeWithAssemblyAi(assemblyApiKey, audioBuffer);
-        return res.status(200).json(result);
+        return res.status(200).json(withRoutingMetadata(result, attemptedProviders, providerErrors, forcedProvider));
       } catch (error) {
         const message = toErrorMessage(error);
         console.warn('[Vercel] AssemblyAI recognition failed.', { message });
