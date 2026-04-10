@@ -8,6 +8,14 @@ export interface StartRecordingOptions {
   preferredStream?: MediaStream | null;
 }
 
+export type CloudRecognitionProvider = 'tencent' | 'deepgram' | 'assemblyai' | 'unknown';
+
+interface RecognitionRoutingMetadata {
+  attemptedProviders?: CloudRecognitionProvider[];
+  providerErrors?: string[];
+  forcedProvider?: CloudRecognitionProvider | 'auto';
+}
+
 const RECOGNITION_PROXY_TIMEOUT_MS = 20000;
 
 const readRecognitionApiError = async (response: Response): Promise<string> => {
@@ -147,7 +155,7 @@ export class FallbackRecognizer {
   /**
    * 停止录音并请求云端 API
    */
-  async stopAndRecognize(maxDurationMs: number): Promise<{ transcript: string; durationMs: number }> {
+  async stopAndRecognize(maxDurationMs: number): Promise<{ transcript: string; durationMs: number; provider: CloudRecognitionProvider }> {
     const startedAt = performance.now();
     return new Promise((resolve, reject) => {
       if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
@@ -162,7 +170,6 @@ export class FallbackRecognizer {
 
         try {
           const audioBlob = new Blob(this.audioChunks, { type: mimeType });
-          const durationMs = performance.now() - startedAt;
           const requestStartedAt = performance.now();
           const controller = new AbortController();
           const timeoutId = window.setTimeout(() => {
@@ -199,10 +206,35 @@ export class FallbackRecognizer {
             throw new Error(errorDetail ? `API returned ${response.status}: ${errorDetail}` : `API returned ${response.status}`);
           }
 
-          const result = await response.json();
+          const result = await response.json() as {
+            transcript?: string;
+            provider?: CloudRecognitionProvider;
+            requestId?: string;
+            audioDurationMs?: number;
+            routing?: RecognitionRoutingMetadata;
+          };
+          console.info('[FallbackRecognizer] Recognition payload received', {
+            provider: result.provider || 'unknown',
+            transcriptLength: result.transcript?.trim().length || 0,
+            requestId: result.requestId,
+            audioDurationMs: result.audioDurationMs,
+            attemptedProviders: result.routing?.attemptedProviders || [],
+            providerErrors: result.routing?.providerErrors || [],
+            forcedProvider: result.routing?.forcedProvider || 'auto',
+            totalDurationMs: Math.max(0, Math.round(performance.now() - startedAt))
+          });
+          if ((result.routing?.providerErrors?.length || 0) > 0) {
+            console.warn('[FallbackRecognizer] Cloud provider fallback occurred.', {
+              finalProvider: result.provider || 'unknown',
+              attemptedProviders: result.routing?.attemptedProviders || [],
+              providerErrors: result.routing?.providerErrors || [],
+              forcedProvider: result.routing?.forcedProvider || 'auto'
+            });
+          }
           resolve({
             transcript: result.transcript || '',
-            durationMs: Math.round(durationMs),
+            durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+            provider: result.provider || 'unknown',
           });
         } catch (error) {
           reject(error);
