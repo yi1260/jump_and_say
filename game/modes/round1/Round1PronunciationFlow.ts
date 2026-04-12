@@ -90,6 +90,8 @@ interface BlindBoxRevealLayout {
   height: number;
 }
 
+type PronunciationHudStage = 'HIDDEN' | 'LISTENING' | 'RECORDING';
+
 interface BlindBoxCollisionPlayer {
   x: number;
   y: number;
@@ -178,6 +180,7 @@ interface Round1SceneInternal {
   volumeMonitorReferenceLevel: number;
   volumeMonitorDetectedSignal: boolean;
   pronunciationHudMicVisible: boolean;
+  pronunciationHudStage: PronunciationHudStage;
   pronunciationHudVolumeLevel: number;
   pronunciationHudCountdownSeconds: number;
   pronunciationHudMicAnchorX: number;
@@ -327,6 +330,7 @@ export class Round1PronunciationFlow {
     const scene = this.scene;
     this.stopMicCountdown();
     scene.pronunciationHudMicVisible = false;
+    scene.pronunciationHudStage = 'HIDDEN';
     scene.pronunciationHudVolumeLevel = 0;
     scene.pronunciationHudCountdownSeconds = 0;
     scene.pronunciationHudMicAnchorX = 0.5;
@@ -650,6 +654,7 @@ export class Round1PronunciationFlow {
     await this.waitForDelay(360);
     if (!this.isActiveRoundToken(roundToken)) return;
 
+    this.setBlindBoxListenHintVisible(true);
     await this.playQuestionAudioByItem(questionItem);
     if (!this.isActiveRoundToken(roundToken)) return;
 
@@ -813,10 +818,12 @@ export class Round1PronunciationFlow {
     this.updateBlindBoxVolumeMeterPosition();
   }
 
-  private setPronunciationHudMicVisible(visible: boolean): void {
+  private setPronunciationHudStage(stage: PronunciationHudStage): void {
     const scene = this.scene;
-    if (scene.pronunciationHudMicVisible === visible) return;
-    scene.pronunciationHudMicVisible = visible;
+    const micVisible = stage === 'RECORDING';
+    if (scene.pronunciationHudStage === stage && scene.pronunciationHudMicVisible === micVisible) return;
+    scene.pronunciationHudStage = stage;
+    scene.pronunciationHudMicVisible = micVisible;
     this.emitPronunciationHudState();
   }
 
@@ -1044,7 +1051,7 @@ export class Round1PronunciationFlow {
 
   private positionBlindBoxMicHintIcon(): void {
     const scene = this.scene;
-    const shouldShowMicHint = scene.isPronunciationFlowEnabled() && scene.pronunciationHudMicVisible;
+    const shouldShowMicHint = scene.isPronunciationFlowEnabled() && scene.pronunciationHudStage !== 'HIDDEN';
     if (!shouldShowMicHint) {
       if (scene.blindBoxMicPulseTween) {
         scene.blindBoxMicPulseTween.remove();
@@ -1128,7 +1135,10 @@ export class Round1PronunciationFlow {
     }
 
     if (scene.blindBoxMicHintText && scene.blindBoxMicHintText.active) {
-      scene.blindBoxMicHintText.setText(`录音中（倒计时${Math.max(0, Math.round(scene.pronunciationHudCountdownSeconds))}秒）`);
+      const hintText = scene.pronunciationHudStage === 'LISTENING'
+        ? '请先听示范'
+        : `录音中（倒计时${Math.max(0, Math.round(scene.pronunciationHudCountdownSeconds))}秒）`;
+      scene.blindBoxMicHintText.setText(hintText);
     }
 
     this.refreshMicCountdownRingLayout(iconDisplaySize);
@@ -1179,7 +1189,15 @@ export class Round1PronunciationFlow {
         scene.blindBoxMicPulseTween = null;
       }
     }
-    this.setPronunciationHudMicVisible(visible);
+    this.setPronunciationHudStage(visible ? 'RECORDING' : 'HIDDEN');
+  }
+
+  private setBlindBoxListenHintVisible(visible: boolean): void {
+    if (!visible) {
+      this.setPronunciationHudStage('HIDDEN');
+      return;
+    }
+    this.setPronunciationHudStage('LISTENING');
   }
 
   private destroyBlindBoxRevealVisuals(): void {

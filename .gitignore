@@ -19,6 +19,7 @@ dist-ssr
 .tmp_*
 output/*
 skills/*
+!.qwen/skills/*
 
 # Editor directories and files
 .vscode/*
