@@ -174,6 +174,7 @@ export class MainScene extends Phaser.Scene implements GameplayModeHost {
   private blindBoxMicHintContainer: Phaser.GameObjects.Container | null = null;
   private blindBoxMicHintText: Phaser.GameObjects.Text | null = null;
   private pronunciationHudMicVisible: boolean = false;
+  private pronunciationHudStage: 'HIDDEN' | 'LISTENING' | 'RECORDING' = 'HIDDEN';
   private pronunciationHudVolumeLevel: number = 0;
   private pronunciationHudCountdownSeconds: number = 0;
   private pronunciationHudMicAnchorX: number = 0.5;
