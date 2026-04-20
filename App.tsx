@@ -1,6 +1,7 @@
 import type Phaser from 'phaser';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BugReportButton } from './components/BugReportButton';
+import { SpeedInsights } from '@vercel/speed-insights/react';
 import CompletionOverlay from './components/CompletionOverlay';
 import GameBackground from './components/GameBackground';
 import { GameCanvas, type QualityMode } from './components/GameCanvas';
@@ -3294,6 +3295,7 @@ export default function App() {
       )}
 
       <BugReportButton />
+      <SpeedInsights />
     </div>
   );
 }
