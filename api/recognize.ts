@@ -59,6 +59,15 @@ interface RecognitionSuccessPayload {
 }
 
 type RecognitionProvider = RecognitionSuccessPayload['provider'];
+const PROVIDER_ORDER: RecognitionProvider[] = ['tencent', 'deepgram', 'assemblyai'];
+
+export const normalizeEnvValue = (value: string | undefined): string | undefined => {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const normalized = value.replace(/\r/g, '').trim();
+  return normalized.length > 0 ? normalized : undefined;
+};
 
 const getContentType = (value: string | string[] | undefined): string => {
   if (Array.isArray(value)) {
@@ -80,17 +89,26 @@ const toErrorMessage = (error: unknown): string => (
 );
 
 const getForcedProvider = (): RecognitionProvider | null => {
-  const rawValue = (
+  const rawValue = normalizeEnvValue(
     process.env.SPEECH_RECOGNITION_PROVIDER ||
     process.env.SPEECH_PROVIDER ||
-    process.env.FORCE_SPEECH_PROVIDER ||
-    ''
-  ).trim().toLowerCase();
+    process.env.FORCE_SPEECH_PROVIDER
+  )?.toLowerCase();
 
   if (rawValue === 'tencent' || rawValue === 'deepgram' || rawValue === 'assemblyai') {
     return rawValue;
   }
   return null;
+};
+
+const buildProviderOrder = (
+  availableProviders: RecognitionProvider[],
+  forcedProvider: RecognitionProvider | null
+): RecognitionProvider[] => {
+  if (forcedProvider) {
+    return availableProviders.includes(forcedProvider) ? [forcedProvider] : [];
+  }
+  return PROVIDER_ORDER.filter((provider) => availableProviders.includes(provider));
 };
 
 const withRoutingMetadata = (
@@ -215,12 +233,23 @@ const transcribeWithTencent = async (
   audioBuffer: Buffer,
   voiceFormat: string
 ): Promise<RecognitionSuccessPayload> => {
-  // 使用新版 SDK API (v4.x)
-  const { ProfileCredential } = require('tencentcloud-sdk-nodejs/tencentcloud/common');
   const AsrClient = require('tencentcloud-sdk-nodejs').asr.v20190614.Client;
 
-  const cred = new ProfileCredential(secretId, secretKey);
-  const client = new AsrClient({ credential: cred, region: 'ap-shanghai' });
+  const client = new AsrClient({
+    credential: {
+      secretId,
+      secretKey,
+    },
+    region: 'ap-shanghai',
+    profile: {
+      signMethod: 'TC3-HMAC-SHA256',
+      httpProfile: {
+        endpoint: 'asr.tencentcloudapi.com',
+        reqMethod: 'POST',
+        reqTimeout: 30,
+      },
+    },
+  });
 
   const startTime = Date.now();
   console.info('[Vercel] Tencent ASR start', { voiceFormat, audioLen: audioBuffer.length });
@@ -401,10 +430,10 @@ export default async function handler(req: any, res: any) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const tencentSecretId = process.env.TENCENT_SECRET_ID;
-  const tencentSecretKey = process.env.TENCENT_SECRET_KEY;
-  const deepgramApiKey = process.env.DEEPGRAM_API_KEY;
-  const assemblyApiKey = process.env.ASSEMBLYAI_API_KEY;
+  const tencentSecretId = normalizeEnvValue(process.env.TENCENT_SECRET_ID);
+  const tencentSecretKey = normalizeEnvValue(process.env.TENCENT_SECRET_KEY);
+  const deepgramApiKey = normalizeEnvValue(process.env.DEEPGRAM_API_KEY);
+  const assemblyApiKey = normalizeEnvValue(process.env.ASSEMBLYAI_API_KEY);
   const forcedProvider = getForcedProvider();
   const hasTencentConfig = Boolean(tencentSecretId && tencentSecretKey);
   const hasPartialTencentConfig = Boolean((tencentSecretId || tencentSecretKey) && !hasTencentConfig);
@@ -428,8 +457,21 @@ export default async function handler(req: any, res: any) {
     let sawTimeout = false;
 
     const isWebm = isWebmFormat(contentType);
+    const availableProviders: RecognitionProvider[] = [];
+    if (hasTencentConfig) {
+      availableProviders.push('tencent');
+    }
+    if (deepgramApiKey) {
+      availableProviders.push('deepgram');
+    }
+    if (assemblyApiKey) {
+      availableProviders.push('assemblyai');
+    }
+    const providerOrder = buildProviderOrder(availableProviders, forcedProvider);
+
     console.info('[Vercel] Speech provider routing', {
       forcedProvider: forcedProvider || 'auto',
+      providerOrder,
       hasTencentConfig,
       hasDeepgramConfig: Boolean(deepgramApiKey),
       hasAssemblyConfig: Boolean(assemblyApiKey),
@@ -438,85 +480,67 @@ export default async function handler(req: any, res: any) {
       isWebm
     });
 
-    if (hasTencentConfig && (!forcedProvider || forcedProvider === 'tencent')) {
-      attemptedProviders.push('tencent');
+    if (forcedProvider && providerOrder.length === 0) {
+      if (forcedProvider === 'tencent') {
+        providerErrors.push(hasPartialTencentConfig
+          ? 'Tencent: incomplete credentials'
+          : 'Tencent: provider not configured');
+      } else if (forcedProvider === 'deepgram') {
+        providerErrors.push('Deepgram: provider not configured');
+      } else {
+        providerErrors.push('AssemblyAI: provider not configured');
+      }
+      return res.status(500).json({ error: providerErrors.join(' | ') });
+    }
+
+    for (const provider of providerOrder) {
+      attemptedProviders.push(provider);
       try {
-        if (isWebm) {
-          console.info('[Vercel] WebM format detected, converting to WAV for Tencent ASR');
-          try {
-            const { wavBuffer, ffmpegPath } = await convertWebmToWav(audioBuffer);
-            console.info('[Vercel] WebM to WAV conversion complete', {
-              inputLen: audioBuffer.length,
-              wavLen: wavBuffer.length,
-              ffmpegPath
-            });
-            const result = await transcribeWithTencent(tencentSecretId!, tencentSecretKey!, wavBuffer, 'wav');
-            return res.status(200).json(withRoutingMetadata(result, attemptedProviders, providerErrors, forcedProvider));
-          } catch (convertError) {
-            console.warn('[Vercel] WebM to WAV conversion failed before Tencent ASR.', {
-              message: toErrorMessage(convertError)
-            });
-            providerErrors.push(`Tencent: ${toErrorMessage(convertError)}`);
-            if (forcedProvider === 'tencent') {
-              return res.status(502).json({ error: providerErrors.join(' | ') });
+        if (provider === 'tencent') {
+          if (isWebm) {
+            console.info('[Vercel] WebM format detected, converting to WAV for Tencent ASR');
+            try {
+              const { wavBuffer, ffmpegPath } = await convertWebmToWav(audioBuffer);
+              console.info('[Vercel] WebM to WAV conversion complete', {
+                inputLen: audioBuffer.length,
+                wavLen: wavBuffer.length,
+                ffmpegPath
+              });
+              const result = await transcribeWithTencent(tencentSecretId!, tencentSecretKey!, wavBuffer, 'wav');
+              return res.status(200).json(withRoutingMetadata(result, attemptedProviders, providerErrors, forcedProvider));
+            } catch (convertError) {
+              console.warn('[Vercel] WebM to WAV conversion failed before Tencent ASR.', {
+                message: toErrorMessage(convertError)
+              });
+              providerErrors.push(`Tencent: ${toErrorMessage(convertError)}`);
+              if (forcedProvider === provider) {
+                return res.status(502).json({ error: providerErrors.join(' | ') });
+              }
+              continue;
             }
           }
-        } else {
+
           const result = await transcribeWithTencent(tencentSecretId!, tencentSecretKey!, audioBuffer, 'wav');
           return res.status(200).json(withRoutingMetadata(result, attemptedProviders, providerErrors, forcedProvider));
         }
+
+        if (provider === 'deepgram') {
+          const result = await transcribeWithDeepgram(deepgramApiKey!, audioBuffer, contentType);
+          return res.status(200).json(withRoutingMetadata(result, attemptedProviders, providerErrors, forcedProvider));
+        }
+
+        const result = await transcribeWithAssemblyAi(assemblyApiKey!, audioBuffer);
+        return res.status(200).json(withRoutingMetadata(result, attemptedProviders, providerErrors, forcedProvider));
       } catch (error) {
         const message = toErrorMessage(error);
-        console.warn('[Vercel] Tencent recognition failed, trying next provider.', { message });
-        providerErrors.push(`Tencent: ${message}`);
+        const providerLabel = provider === 'tencent' ? 'Tencent' : provider === 'deepgram' ? 'Deepgram' : 'AssemblyAI';
+        console.warn(`[Vercel] ${providerLabel} recognition failed, trying next provider.`, { message });
+        providerErrors.push(`${providerLabel}: ${message}`);
         sawTimeout = sawTimeout || /timed out|timeout/i.test(message);
-        if (forcedProvider === 'tencent') {
+        if (forcedProvider === provider) {
           return res.status(sawTimeout ? 504 : 502).json({ error: providerErrors.join(' | ') });
         }
       }
-    } else if (forcedProvider === 'tencent') {
-      providerErrors.push(hasPartialTencentConfig
-        ? 'Tencent: incomplete credentials'
-        : 'Tencent: provider not configured');
-      return res.status(500).json({ error: providerErrors.join(' | ') });
-    }
-
-    if (deepgramApiKey && (!forcedProvider || forcedProvider === 'deepgram')) {
-      attemptedProviders.push('deepgram');
-      try {
-        const result = await transcribeWithDeepgram(deepgramApiKey, audioBuffer, contentType);
-        return res.status(200).json(withRoutingMetadata(result, attemptedProviders, providerErrors, forcedProvider));
-      } catch (error) {
-        const message = toErrorMessage(error);
-        console.warn('[Vercel] Deepgram recognition failed, trying next provider.', { message });
-        providerErrors.push(`Deepgram: ${message}`);
-        sawTimeout = sawTimeout || /timed out/i.test(message);
-        if (forcedProvider === 'deepgram') {
-          return res.status(sawTimeout ? 504 : 502).json({ error: providerErrors.join(' | ') });
-        }
-      }
-    } else if (forcedProvider === 'deepgram') {
-      providerErrors.push('Deepgram: provider not configured');
-      return res.status(500).json({ error: providerErrors.join(' | ') });
-    }
-
-    if (assemblyApiKey && (!forcedProvider || forcedProvider === 'assemblyai')) {
-      attemptedProviders.push('assemblyai');
-      try {
-        const result = await transcribeWithAssemblyAi(assemblyApiKey, audioBuffer);
-        return res.status(200).json(withRoutingMetadata(result, attemptedProviders, providerErrors, forcedProvider));
-      } catch (error) {
-        const message = toErrorMessage(error);
-        console.warn('[Vercel] AssemblyAI recognition failed.', { message });
-        providerErrors.push(`AssemblyAI: ${message}`);
-        sawTimeout = sawTimeout || /timed out/i.test(message);
-        if (forcedProvider === 'assemblyai') {
-          return res.status(sawTimeout ? 504 : 502).json({ error: providerErrors.join(' | ') });
-        }
-      }
-    } else if (forcedProvider === 'assemblyai') {
-      providerErrors.push('AssemblyAI: provider not configured');
-      return res.status(500).json({ error: providerErrors.join(' | ') });
     }
 
     if (providerErrors.length > 0) {

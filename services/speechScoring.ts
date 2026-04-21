@@ -221,9 +221,7 @@ class SpeechScoringService {
   }
 
   async recognizeOnce(options: RecognizeOnceOptions): Promise<RecognizeOnceResult> {
-    // TODO: 临时禁用本地语音识别，强制使用云端 API（腾讯云）
-    // const RecognitionCtor = getSpeechRecognitionCtor();
-    const RecognitionCtor = null; // 强制跳过本地识别
+    const RecognitionCtor = getSpeechRecognitionCtor();
     if (RecognitionCtor && !this.isNativeBroken) {
       const nativeResult = await this.recognizeWithNative(options, RecognitionCtor);
       if (nativeResult.transcript.trim().length > 0) {

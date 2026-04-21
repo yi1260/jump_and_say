@@ -17,7 +17,7 @@ type SpeechScoringServiceTestAccess = {
   isNativeBroken: boolean;
 };
 
-test('recognizeOnce returns unsupported when native recognition is intentionally disabled and fallback is unavailable', async () => {
+test('recognizeOnce prefers native recognition when available', async () => {
   const originalWindow = globalThis.window;
   const scoringService = speechScoringService as unknown as SpeechScoringServiceTestAccess;
   const originalRecognizer = scoringService.fallbackRecognizer;
@@ -103,10 +103,10 @@ test('recognizeOnce returns unsupported when native recognition is intentionally
     });
 
     assert.equal(fallbackUsed, false);
-    assert.equal(result.reason, 'unsupported');
-    assert.equal(result.transcript, '');
-    assert.equal(result.confidence, 0);
-    assert.equal(result.provider, 'unknown');
+    assert.equal(result.reason, 'ok');
+    assert.equal(result.transcript, 'native apple');
+    assert.equal(result.confidence, 0.84);
+    assert.equal(result.provider, 'native');
   } finally {
     scoringService.fallbackRecognizer = originalRecognizer;
     scoringService.isNativeBroken = originalIsNativeBroken;

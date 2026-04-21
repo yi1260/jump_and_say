@@ -3,9 +3,23 @@ import { createRequire } from 'node:module';
 import { Readable } from 'node:stream';
 import test from 'node:test';
 
-import handler, { fetchWithStageTimeout, pollAssemblyAiTranscript } from './recognize.ts';
+import handler, { fetchWithStageTimeout, normalizeEnvValue, pollAssemblyAiTranscript } from './recognize.ts';
 
 const require = createRequire(import.meta.url);
+
+const restoreEnv = (key: string, value: string | undefined): void => {
+  if (value === undefined) {
+    delete process.env[key];
+    return;
+  }
+  process.env[key] = value;
+};
+
+test('normalizeEnvValue trims whitespace and carriage returns from env vars', () => {
+  assert.equal(normalizeEnvValue('  abc123  \r\n'), 'abc123');
+  assert.equal(normalizeEnvValue(' \r\n '), undefined);
+  assert.equal(normalizeEnvValue(undefined), undefined);
+});
 
 test('fetchWithStageTimeout aborts stalled third-party requests with stage context', async () => {
   await assert.rejects(
@@ -64,12 +78,18 @@ test('pollAssemblyAiTranscript times out when AssemblyAI never completes', async
 
 test('handler falls back to AssemblyAI when Deepgram request fails', async () => {
   const originalFetch = global.fetch;
+  const originalTencentSecretId = process.env.TENCENT_SECRET_ID;
+  const originalTencentSecretKey = process.env.TENCENT_SECRET_KEY;
   const originalDeepgramApiKey = process.env.DEEPGRAM_API_KEY;
   const originalAssemblyApiKey = process.env.ASSEMBLYAI_API_KEY;
+  const originalForcedProvider = process.env.SPEECH_RECOGNITION_PROVIDER;
   const fetchCalls: string[] = [];
 
+  delete process.env.TENCENT_SECRET_ID;
+  delete process.env.TENCENT_SECRET_KEY;
   process.env.DEEPGRAM_API_KEY = 'deepgram-key';
   process.env.ASSEMBLYAI_API_KEY = 'assembly-key';
+  delete process.env.SPEECH_RECOGNITION_PROVIDER;
 
   global.fetch = async (input: string | URL | Request): Promise<Response> => {
     const url = String(input);
@@ -155,8 +175,11 @@ test('handler falls back to AssemblyAI when Deepgram request fails', async () =>
     assert.equal(fetchCalls.some((url) => url.includes('assemblyai.com')), true);
   } finally {
     global.fetch = originalFetch;
-    process.env.DEEPGRAM_API_KEY = originalDeepgramApiKey;
-    process.env.ASSEMBLYAI_API_KEY = originalAssemblyApiKey;
+    restoreEnv('TENCENT_SECRET_ID', originalTencentSecretId);
+    restoreEnv('TENCENT_SECRET_KEY', originalTencentSecretKey);
+    restoreEnv('DEEPGRAM_API_KEY', originalDeepgramApiKey);
+    restoreEnv('ASSEMBLYAI_API_KEY', originalAssemblyApiKey);
+    restoreEnv('SPEECH_RECOGNITION_PROVIDER', originalForcedProvider);
   }
 });
 
@@ -249,10 +272,10 @@ test('handler returns routing metadata when Tencent fails and Deepgram succeeds'
   } finally {
     sdk.asr.v20190614.Client = originalTencentClient;
     global.fetch = originalFetch;
-    process.env.TENCENT_SECRET_ID = originalTencentSecretId;
-    process.env.TENCENT_SECRET_KEY = originalTencentSecretKey;
-    process.env.DEEPGRAM_API_KEY = originalDeepgramApiKey;
-    process.env.SPEECH_RECOGNITION_PROVIDER = originalForcedProvider;
+    restoreEnv('TENCENT_SECRET_ID', originalTencentSecretId);
+    restoreEnv('TENCENT_SECRET_KEY', originalTencentSecretKey);
+    restoreEnv('DEEPGRAM_API_KEY', originalDeepgramApiKey);
+    restoreEnv('SPEECH_RECOGNITION_PROVIDER', originalForcedProvider);
   }
 });
 
@@ -324,9 +347,107 @@ test('handler does not silently fall back when Tencent is forced and Tencent fai
   } finally {
     sdk.asr.v20190614.Client = originalTencentClient;
     global.fetch = originalFetch;
-    process.env.TENCENT_SECRET_ID = originalTencentSecretId;
-    process.env.TENCENT_SECRET_KEY = originalTencentSecretKey;
-    process.env.DEEPGRAM_API_KEY = originalDeepgramApiKey;
-    process.env.SPEECH_RECOGNITION_PROVIDER = originalForcedProvider;
+    restoreEnv('TENCENT_SECRET_ID', originalTencentSecretId);
+    restoreEnv('TENCENT_SECRET_KEY', originalTencentSecretKey);
+    restoreEnv('DEEPGRAM_API_KEY', originalDeepgramApiKey);
+    restoreEnv('SPEECH_RECOGNITION_PROVIDER', originalForcedProvider);
+  }
+});
+
+test('handler uses explicit Tencent secret credentials instead of ProfileCredential file lookup', async () => {
+  const sdk = require('tencentcloud-sdk-nodejs');
+  const originalTencentClient = sdk.asr.v20190614.Client;
+  const originalTencentSecretId = process.env.TENCENT_SECRET_ID;
+  const originalTencentSecretKey = process.env.TENCENT_SECRET_KEY;
+  const originalDeepgramApiKey = process.env.DEEPGRAM_API_KEY;
+  const originalForcedProvider = process.env.SPEECH_RECOGNITION_PROVIDER;
+  let capturedConfig: unknown = null;
+
+  process.env.TENCENT_SECRET_ID = 'tencent-id';
+  process.env.TENCENT_SECRET_KEY = 'tencent-key';
+  delete process.env.DEEPGRAM_API_KEY;
+  delete process.env.SPEECH_RECOGNITION_PROVIDER;
+
+  sdk.asr.v20190614.Client = class FakeTencentClient {
+    constructor(config: unknown) {
+      capturedConfig = config;
+    }
+
+    SentenceRecognition(
+      _request: unknown,
+      cb: (error: Error | null, response?: { Result?: string; RequestId?: string; AudioDuration?: number }) => void
+    ): void {
+      cb(null, {
+        Result: 'a big dog',
+        RequestId: 'req-123',
+        AudioDuration: 900,
+      });
+    }
+  };
+
+  const req = Readable.from([Buffer.from('fake-wav-audio')]) as Readable & {
+    method: string;
+    headers: Record<string, string>;
+  };
+  req.method = 'POST';
+  req.headers = {
+    'content-type': 'audio/wav'
+  };
+
+  const responseState: {
+    statusCode: number;
+    payload: unknown;
+  } = {
+    statusCode: 200,
+    payload: null
+  };
+
+  const res = {
+    status(code: number) {
+      responseState.statusCode = code;
+      return this;
+    },
+    json(payload: unknown) {
+      responseState.payload = payload;
+      return this;
+    }
+  };
+
+  try {
+    await handler(req, res);
+
+    assert.equal(responseState.statusCode, 200);
+    assert.deepEqual(capturedConfig, {
+      credential: {
+        secretId: 'tencent-id',
+        secretKey: 'tencent-key',
+      },
+      region: 'ap-shanghai',
+      profile: {
+        signMethod: 'TC3-HMAC-SHA256',
+        httpProfile: {
+          endpoint: 'asr.tencentcloudapi.com',
+          reqMethod: 'POST',
+          reqTimeout: 30,
+        },
+      },
+    });
+    assert.deepEqual(responseState.payload, {
+      transcript: 'a big dog',
+      provider: 'tencent',
+      requestId: 'req-123',
+      audioDurationMs: 900,
+      routing: {
+        attemptedProviders: ['tencent'],
+        providerErrors: [],
+        forcedProvider: 'auto'
+      }
+    });
+  } finally {
+    sdk.asr.v20190614.Client = originalTencentClient;
+    restoreEnv('TENCENT_SECRET_ID', originalTencentSecretId);
+    restoreEnv('TENCENT_SECRET_KEY', originalTencentSecretKey);
+    restoreEnv('DEEPGRAM_API_KEY', originalDeepgramApiKey);
+    restoreEnv('SPEECH_RECOGNITION_PROVIDER', originalForcedProvider);
   }
 });
