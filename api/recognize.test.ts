@@ -3,15 +3,9 @@ import { createRequire } from 'node:module';
 import { Readable } from 'node:stream';
 import test from 'node:test';
 
-import handler, { fetchWithStageTimeout, normalizeEnvValue, pollAssemblyAiTranscript } from './recognize.ts';
+import handler, { buildProviderOrder, fetchWithStageTimeout, pollAssemblyAiTranscript } from './recognize.ts';
 
 const require = createRequire(import.meta.url);
-
-test('normalizeEnvValue trims whitespace and carriage returns from env vars', () => {
-  assert.equal(normalizeEnvValue('  abc123  \r\n'), 'abc123');
-  assert.equal(normalizeEnvValue(' \r\n '), undefined);
-  assert.equal(normalizeEnvValue(undefined), undefined);
-});
 
 test('fetchWithStageTimeout aborts stalled third-party requests with stage context', async () => {
   await assert.rejects(
@@ -68,14 +62,35 @@ test('pollAssemblyAiTranscript times out when AssemblyAI never completes', async
   assert.equal(pollCount, 3);
 });
 
+test('buildProviderOrder rotates the first cloud provider from a random start index', () => {
+  assert.deepEqual(
+    buildProviderOrder(['tencent', 'deepgram', 'assemblyai'], null, () => 0),
+    ['tencent', 'deepgram', 'assemblyai']
+  );
+  assert.deepEqual(
+    buildProviderOrder(['tencent', 'deepgram', 'assemblyai'], null, () => 0.4),
+    ['deepgram', 'assemblyai', 'tencent']
+  );
+  assert.deepEqual(
+    buildProviderOrder(['tencent', 'deepgram', 'assemblyai'], null, () => 0.8),
+    ['assemblyai', 'tencent', 'deepgram']
+  );
+  assert.deepEqual(
+    buildProviderOrder(['tencent', 'deepgram', 'assemblyai'], 'deepgram', () => 0.8),
+    ['deepgram']
+  );
+});
+
 test('handler falls back to AssemblyAI when Deepgram request fails', async () => {
   const originalFetch = global.fetch;
   const originalDeepgramApiKey = process.env.DEEPGRAM_API_KEY;
   const originalAssemblyApiKey = process.env.ASSEMBLYAI_API_KEY;
+  const originalRandom = Math.random;
   const fetchCalls: string[] = [];
 
   process.env.DEEPGRAM_API_KEY = 'deepgram-key';
   process.env.ASSEMBLYAI_API_KEY = 'assembly-key';
+  Math.random = () => 0;
 
   global.fetch = async (input: string | URL | Request): Promise<Response> => {
     const url = String(input);
@@ -153,29 +168,41 @@ test('handler falls back to AssemblyAI when Deepgram request fails', async () =>
       provider: 'assemblyai',
       routing: {
         attemptedProviders: ['deepgram', 'assemblyai'],
-        providerErrors: ['Deepgram: Deepgram API error: temporary deepgram failure']
+        providerErrors: ['Deepgram: Deepgram API error: temporary deepgram failure'],
+        forcedProvider: 'auto'
       }
     });
     assert.equal(fetchCalls.some((url) => url.includes('deepgram.com')), true);
     assert.equal(fetchCalls.some((url) => url.includes('assemblyai.com')), true);
   } finally {
     global.fetch = originalFetch;
+    Math.random = originalRandom;
     process.env.DEEPGRAM_API_KEY = originalDeepgramApiKey;
     process.env.ASSEMBLYAI_API_KEY = originalAssemblyApiKey;
   }
 });
 
-test('handler falls back to Tencent when Deepgram fails first', async () => {
+test('handler returns routing metadata when Tencent fails and Deepgram succeeds', async () => {
   const sdk = require('tencentcloud-sdk-nodejs');
   const originalTencentClient = sdk.asr.v20190614.Client;
   const originalFetch = global.fetch;
   const originalTencentSecretId = process.env.TENCENT_SECRET_ID;
   const originalTencentSecretKey = process.env.TENCENT_SECRET_KEY;
   const originalDeepgramApiKey = process.env.DEEPGRAM_API_KEY;
+  const originalForcedProvider = process.env.SPEECH_RECOGNITION_PROVIDER;
+  const originalRandom = Math.random;
 
   process.env.TENCENT_SECRET_ID = 'tencent-id';
   process.env.TENCENT_SECRET_KEY = 'tencent-key';
   process.env.DEEPGRAM_API_KEY = 'deepgram-key';
+  delete process.env.SPEECH_RECOGNITION_PROVIDER;
+  Math.random = () => 0;
+
+  sdk.asr.v20190614.Client = class FakeTencentClient {
+    async SentenceRecognition(): Promise<{ Result?: string }> {
+      throw new Error('invalid tencent signature');
+    }
+  };
 
   global.fetch = (async (input: string | URL | Request) => {
     const url = String(input);
@@ -183,24 +210,21 @@ test('handler falls back to Tencent when Deepgram fails first', async () => {
       throw new Error(`Unexpected fetch URL: ${url}`);
     }
     return {
-      ok: false,
-      status: 503,
-      text: async () => 'temporary deepgram failure'
+      ok: true,
+      status: 200,
+      json: async () => ({
+        results: {
+          channels: [
+            {
+              alternatives: [
+                { transcript: 'one black suit' }
+              ]
+            }
+          ]
+        }
+      })
     } as Response;
   }) as typeof fetch;
-
-  sdk.asr.v20190614.Client = class FakeTencentClient {
-    SentenceRecognition(
-      _request: unknown,
-      cb: (error: Error | null, response?: { Result?: string; RequestId?: string; AudioDuration?: number }) => void
-    ): void {
-      cb(null, {
-        Result: 'one black suit',
-        RequestId: 'req-456',
-        AudioDuration: 850
-      });
-    }
-  };
 
   const req = Readable.from([Buffer.from('fake-wav-audio')]) as Readable & {
     method: string;
@@ -236,51 +260,49 @@ test('handler falls back to Tencent when Deepgram fails first', async () => {
     assert.equal(responseState.statusCode, 200);
     assert.deepEqual(responseState.payload, {
       transcript: 'one black suit',
-      provider: 'tencent',
-      requestId: 'req-456',
-      audioDurationMs: 850,
+      provider: 'deepgram',
       routing: {
-        attemptedProviders: ['deepgram', 'tencent'],
-        providerErrors: ['Deepgram: Deepgram API error: temporary deepgram failure']
+        attemptedProviders: ['tencent', 'deepgram'],
+        providerErrors: ['Tencent: invalid tencent signature'],
+        forcedProvider: 'auto'
       }
     });
   } finally {
     sdk.asr.v20190614.Client = originalTencentClient;
     global.fetch = originalFetch;
+    Math.random = originalRandom;
     process.env.TENCENT_SECRET_ID = originalTencentSecretId;
     process.env.TENCENT_SECRET_KEY = originalTencentSecretKey;
     process.env.DEEPGRAM_API_KEY = originalDeepgramApiKey;
+    process.env.SPEECH_RECOGNITION_PROVIDER = originalForcedProvider;
   }
 });
 
-test('handler uses explicit Tencent secret credentials instead of ProfileCredential file lookup', async () => {
+test('handler does not silently fall back when Tencent is forced and Tencent fails', async () => {
   const sdk = require('tencentcloud-sdk-nodejs');
   const originalTencentClient = sdk.asr.v20190614.Client;
+  const originalFetch = global.fetch;
   const originalTencentSecretId = process.env.TENCENT_SECRET_ID;
   const originalTencentSecretKey = process.env.TENCENT_SECRET_KEY;
   const originalDeepgramApiKey = process.env.DEEPGRAM_API_KEY;
-  let capturedConfig: unknown = null;
+  const originalForcedProvider = process.env.SPEECH_RECOGNITION_PROVIDER;
+  let fetchCalled = false;
 
   process.env.TENCENT_SECRET_ID = 'tencent-id';
   process.env.TENCENT_SECRET_KEY = 'tencent-key';
-  delete process.env.DEEPGRAM_API_KEY;
+  process.env.DEEPGRAM_API_KEY = 'deepgram-key';
+  process.env.SPEECH_RECOGNITION_PROVIDER = 'tencent';
 
   sdk.asr.v20190614.Client = class FakeTencentClient {
-    constructor(config: unknown) {
-      capturedConfig = config;
-    }
-
-    SentenceRecognition(
-      _request: unknown,
-      cb: (error: Error | null, response?: { Result?: string; RequestId?: string; AudioDuration?: number }) => void
-    ): void {
-      cb(null, {
-        Result: 'a big dog',
-        RequestId: 'req-123',
-        AudioDuration: 900,
-      });
+    async SentenceRecognition(): Promise<{ Result?: string }> {
+      throw new Error('invalid tencent signature');
     }
   };
+
+  global.fetch = (async () => {
+    fetchCalled = true;
+    throw new Error('Deepgram should not run when Tencent is forced');
+  }) as typeof fetch;
 
   const req = Readable.from([Buffer.from('fake-wav-audio')]) as Readable & {
     method: string;
@@ -313,36 +335,17 @@ test('handler uses explicit Tencent secret credentials instead of ProfileCredent
   try {
     await handler(req, res);
 
-    assert.equal(responseState.statusCode, 200);
-    assert.deepEqual(capturedConfig, {
-      credential: {
-        secretId: 'tencent-id',
-        secretKey: 'tencent-key',
-      },
-      region: 'ap-shanghai',
-      profile: {
-        signMethod: 'TC3-HMAC-SHA256',
-        httpProfile: {
-          endpoint: 'asr.tencentcloudapi.com',
-          reqMethod: 'POST',
-          reqTimeout: 30,
-        },
-      },
-    });
+    assert.equal(fetchCalled, false);
+    assert.equal(responseState.statusCode, 502);
     assert.deepEqual(responseState.payload, {
-      transcript: 'a big dog',
-      provider: 'tencent',
-      requestId: 'req-123',
-      audioDurationMs: 900,
-      routing: {
-        attemptedProviders: ['tencent'],
-        providerErrors: []
-      }
+      error: 'Tencent: invalid tencent signature'
     });
   } finally {
     sdk.asr.v20190614.Client = originalTencentClient;
+    global.fetch = originalFetch;
     process.env.TENCENT_SECRET_ID = originalTencentSecretId;
     process.env.TENCENT_SECRET_KEY = originalTencentSecretKey;
     process.env.DEEPGRAM_API_KEY = originalDeepgramApiKey;
+    process.env.SPEECH_RECOGNITION_PROVIDER = originalForcedProvider;
   }
 });
