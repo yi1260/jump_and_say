@@ -3,6 +3,7 @@ import React, { useEffect, useRef } from 'react';
 import { bindActivePhaserGame, ensurePhaserAudioUnlocked, getPhaserAudioConfig } from '../services/audioController';
 import { MainScene } from '../game/scenes/MainScene';
 import { PlatformScene } from '../game/scenes/PlatformScene';
+import { MarioScene } from '../game/scenes/MarioScene';
 import { PreloadScene } from '../game/scenes/PreloadScene';
 import { GameplayMode, PronunciationSummary, Theme, ThemeId } from '../types';
 

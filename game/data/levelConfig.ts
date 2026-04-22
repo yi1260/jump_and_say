@@ -5,7 +5,7 @@
  * Each book corresponds to one answer gate with ~8 questions from Round1.
  */
 
-import type { ThemeQuestion } from '../types';
+import type { ThemeQuestion } from '../../types';
 
 export interface BookConfig {
   bookId: string;                 // Book identifier (e.g., 'raz-level-a-001')

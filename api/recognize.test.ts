@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { Readable } from 'node:stream';
 import test from 'node:test';
 
-import handler, { fetchWithStageTimeout, normalizeEnvValue, pollAssemblyAiTranscript } from './recognize.ts';
+import handler, { buildProviderOrder, fetchWithStageTimeout, normalizeEnvValue, pollAssemblyAiTranscript } from './recognize.ts';
 
 const require = createRequire(import.meta.url);
 
@@ -76,6 +76,25 @@ test('pollAssemblyAiTranscript times out when AssemblyAI never completes', async
   assert.equal(pollCount, 3);
 });
 
+test('buildProviderOrder rotates the first cloud provider from a random start index', () => {
+  assert.deepEqual(
+    buildProviderOrder(['tencent', 'deepgram', 'assemblyai'], null, () => 0),
+    ['tencent', 'deepgram', 'assemblyai']
+  );
+  assert.deepEqual(
+    buildProviderOrder(['tencent', 'deepgram', 'assemblyai'], null, () => 0.4),
+    ['deepgram', 'assemblyai', 'tencent']
+  );
+  assert.deepEqual(
+    buildProviderOrder(['tencent', 'deepgram', 'assemblyai'], null, () => 0.8),
+    ['assemblyai', 'tencent', 'deepgram']
+  );
+  assert.deepEqual(
+    buildProviderOrder(['tencent', 'deepgram', 'assemblyai'], 'deepgram', () => 0.8),
+    ['deepgram']
+  );
+});
+
 test('handler falls back to AssemblyAI when Deepgram request fails', async () => {
   const originalFetch = global.fetch;
   const originalTencentSecretId = process.env.TENCENT_SECRET_ID;
@@ -83,6 +102,7 @@ test('handler falls back to AssemblyAI when Deepgram request fails', async () =>
   const originalDeepgramApiKey = process.env.DEEPGRAM_API_KEY;
   const originalAssemblyApiKey = process.env.ASSEMBLYAI_API_KEY;
   const originalForcedProvider = process.env.SPEECH_RECOGNITION_PROVIDER;
+  const originalRandom = Math.random;
   const fetchCalls: string[] = [];
 
   delete process.env.TENCENT_SECRET_ID;
@@ -90,6 +110,7 @@ test('handler falls back to AssemblyAI when Deepgram request fails', async () =>
   process.env.DEEPGRAM_API_KEY = 'deepgram-key';
   process.env.ASSEMBLYAI_API_KEY = 'assembly-key';
   delete process.env.SPEECH_RECOGNITION_PROVIDER;
+  Math.random = () => 0;
 
   global.fetch = async (input: string | URL | Request): Promise<Response> => {
     const url = String(input);
@@ -175,6 +196,7 @@ test('handler falls back to AssemblyAI when Deepgram request fails', async () =>
     assert.equal(fetchCalls.some((url) => url.includes('assemblyai.com')), true);
   } finally {
     global.fetch = originalFetch;
+    Math.random = originalRandom;
     restoreEnv('TENCENT_SECRET_ID', originalTencentSecretId);
     restoreEnv('TENCENT_SECRET_KEY', originalTencentSecretKey);
     restoreEnv('DEEPGRAM_API_KEY', originalDeepgramApiKey);
@@ -191,18 +213,17 @@ test('handler returns routing metadata when Tencent fails and Deepgram succeeds'
   const originalTencentSecretKey = process.env.TENCENT_SECRET_KEY;
   const originalDeepgramApiKey = process.env.DEEPGRAM_API_KEY;
   const originalForcedProvider = process.env.SPEECH_RECOGNITION_PROVIDER;
+  const originalRandom = Math.random;
 
   process.env.TENCENT_SECRET_ID = 'tencent-id';
   process.env.TENCENT_SECRET_KEY = 'tencent-key';
   process.env.DEEPGRAM_API_KEY = 'deepgram-key';
   delete process.env.SPEECH_RECOGNITION_PROVIDER;
+  Math.random = () => 0;
 
   sdk.asr.v20190614.Client = class FakeTencentClient {
-    SentenceRecognition(
-      _request: unknown,
-      cb: (error: Error | null, response?: { Result?: string }) => void
-    ): void {
-      cb(new Error('invalid tencent signature'));
+    async SentenceRecognition(): Promise<{ Result?: string }> {
+      throw new Error('invalid tencent signature');
     }
   };
 
@@ -272,6 +293,7 @@ test('handler returns routing metadata when Tencent fails and Deepgram succeeds'
   } finally {
     sdk.asr.v20190614.Client = originalTencentClient;
     global.fetch = originalFetch;
+    Math.random = originalRandom;
     restoreEnv('TENCENT_SECRET_ID', originalTencentSecretId);
     restoreEnv('TENCENT_SECRET_KEY', originalTencentSecretKey);
     restoreEnv('DEEPGRAM_API_KEY', originalDeepgramApiKey);
@@ -295,11 +317,8 @@ test('handler does not silently fall back when Tencent is forced and Tencent fai
   process.env.SPEECH_RECOGNITION_PROVIDER = 'tencent';
 
   sdk.asr.v20190614.Client = class FakeTencentClient {
-    SentenceRecognition(
-      _request: unknown,
-      cb: (error: Error | null, response?: { Result?: string }) => void
-    ): void {
-      cb(new Error('invalid tencent signature'));
+    async SentenceRecognition(): Promise<{ Result?: string }> {
+      throw new Error('invalid tencent signature');
     }
   };
 
@@ -373,15 +392,12 @@ test('handler uses explicit Tencent secret credentials instead of ProfileCredent
       capturedConfig = config;
     }
 
-    SentenceRecognition(
-      _request: unknown,
-      cb: (error: Error | null, response?: { Result?: string; RequestId?: string; AudioDuration?: number }) => void
-    ): void {
-      cb(null, {
+    async SentenceRecognition(): Promise<{ Result?: string; RequestId?: string; AudioDuration?: number }> {
+      return {
         Result: 'a big dog',
         RequestId: 'req-123',
         AudioDuration: 900,
-      });
+      };
     }
   };
 

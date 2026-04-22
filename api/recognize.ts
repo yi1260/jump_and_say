@@ -101,14 +101,27 @@ const getForcedProvider = (): RecognitionProvider | null => {
   return null;
 };
 
-const buildProviderOrder = (
+export const buildProviderOrder = (
   availableProviders: RecognitionProvider[],
-  forcedProvider: RecognitionProvider | null
+  forcedProvider: RecognitionProvider | null,
+  random: () => number = Math.random
 ): RecognitionProvider[] => {
   if (forcedProvider) {
     return availableProviders.includes(forcedProvider) ? [forcedProvider] : [];
   }
-  return PROVIDER_ORDER.filter((provider) => availableProviders.includes(provider));
+
+  const orderedAvailableProviders = PROVIDER_ORDER.filter((provider) => (
+    availableProviders.includes(provider)
+  ));
+  if (orderedAvailableProviders.length <= 1) {
+    return orderedAvailableProviders;
+  }
+
+  const startIndex = Math.floor(random() * orderedAvailableProviders.length) % orderedAvailableProviders.length;
+  return [
+    ...orderedAvailableProviders.slice(startIndex),
+    ...orderedAvailableProviders.slice(0, startIndex)
+  ];
 };
 
 const withRoutingMetadata = (
@@ -254,23 +267,17 @@ const transcribeWithTencent = async (
   const startTime = Date.now();
   console.info('[Vercel] Tencent ASR start', { voiceFormat, audioLen: audioBuffer.length });
 
-  const resp = await withTimeout('tencent-sentence-recognition', TENCENT_TIMEOUT_MS, async () => (
-    new Promise<{ Result?: string; RequestId?: string; AudioDuration?: number }>((resolve, reject) => {
-      client.SentenceRecognition({
-        EngSerViceType: '16k_en',
-        VoiceFormat: voiceFormat,
-        SourceType: 1,
-        Data: audioBuffer.toString('base64'),
-        DataLen: audioBuffer.length,
-      }, (err: Error | null, response: { Result?: string; RequestId?: string; AudioDuration?: number }) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(response);
-        }
-      });
-    })
-  ));
+  const resp = await withTimeout(
+    'tencent-sentence-recognition',
+    TENCENT_TIMEOUT_MS,
+    async () => client.SentenceRecognition({
+      EngSerViceType: '16k_en',
+      VoiceFormat: voiceFormat,
+      SourceType: 1,
+      Data: audioBuffer.toString('base64'),
+      DataLen: audioBuffer.length,
+    }) as Promise<{ Result?: string; RequestId?: string; AudioDuration?: number }>
+  );
 
   console.info('[Vercel] Tencent ASR complete', {
     resultLen: resp.Result?.length || 0,
@@ -468,7 +475,6 @@ export default async function handler(req: any, res: any) {
       availableProviders.push('assemblyai');
     }
     const providerOrder = buildProviderOrder(availableProviders, forcedProvider);
-
     console.info('[Vercel] Speech provider routing', {
       forcedProvider: forcedProvider || 'auto',
       providerOrder,

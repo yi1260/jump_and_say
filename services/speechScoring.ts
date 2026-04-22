@@ -92,6 +92,7 @@ export interface RecognizeOnceOptions {
   lang: string;
   maxDurationMs: number;
   inputStream?: MediaStream | null;
+  shouldFallbackOnNoSpeech?: () => boolean;
 }
 
 export interface RecognizeOnceResult {
@@ -110,6 +111,31 @@ const getSpeechRecognitionCtor = (): SpeechRecognitionLikeConstructor | null => 
 
 const RECOGNITION_START_TIMEOUT_FLOOR_MS = 300;
 const RECOGNITION_END_GRACE_MS = 180;
+const NATIVE_RECOGNITION_TIMEOUT_MS = 3500;
+
+const isIosLikePlatform = (): boolean => {
+  if (typeof navigator === 'undefined') return false;
+  const userAgent = navigator.userAgent || '';
+  const platform = navigator.platform || '';
+  const maxTouchPoints = navigator.maxTouchPoints || 0;
+  return (
+    /iPad|iPhone|iPod/i.test(userAgent) ||
+    /iPad|iPhone|iPod/i.test(platform) ||
+    (platform === 'MacIntel' && maxTouchPoints > 1)
+  );
+};
+
+const isDesktopLikePlatform = (): boolean => {
+  if (typeof navigator === 'undefined') return false;
+  if (isIosLikePlatform()) return false;
+  const userAgent = navigator.userAgent || '';
+  return !/Android|webOS|BlackBerry|IEMobile|Opera Mini|Mobile|Tablet/i.test(userAgent);
+};
+
+const isViteDevMode = (): boolean => {
+  const meta = import.meta as ImportMeta & { env?: { DEV?: boolean } };
+  return meta.env?.DEV === true;
+};
 
 const clampScore = (score: number): number => {
   if (!Number.isFinite(score)) return 0;
@@ -202,14 +228,16 @@ const mapRecognitionError = (errorName: string): SpeechRecognitionResultReason =
   return 'error';
 };
 
-const canUseFallbackRecognition = (): boolean => {
-  if (typeof navigator === 'undefined') return false;
+const canUseFallbackRecognition = (inputStream?: MediaStream | null): boolean => {
   const hasMediaRecorder = typeof MediaRecorder !== 'undefined';
+  if (!hasMediaRecorder) return false;
+  if (inputStream) return true;
+  if (typeof navigator === 'undefined') return false;
   const hasGetUserMedia = Boolean(
     navigator.mediaDevices &&
     typeof navigator.mediaDevices.getUserMedia === 'function'
   );
-  return hasMediaRecorder && hasGetUserMedia;
+  return hasGetUserMedia;
 };
 
 class SpeechScoringService {
@@ -222,22 +250,48 @@ class SpeechScoringService {
 
   async recognizeOnce(options: RecognizeOnceOptions): Promise<RecognizeOnceResult> {
     const RecognitionCtor = getSpeechRecognitionCtor();
-    if (RecognitionCtor && !this.isNativeBroken) {
-      const nativeResult = await this.recognizeWithNative(options, RecognitionCtor);
+    const isIosLike = isIosLikePlatform();
+    const isDesktopLike = isDesktopLikePlatform();
+    const isDevMode = isViteDevMode();
+    const canFallback = canUseFallbackRecognition(options.inputStream);
+    const allowCloudFallback = canFallback && !isDevMode;
+    const shouldTryNative = Boolean(RecognitionCtor) && !this.isNativeBroken && (
+      isDevMode ||
+      isIosLike ||
+      isDesktopLike
+    );
+
+    if (shouldTryNative && RecognitionCtor) {
+      const nativeResult = await this.recognizeWithNative({
+        ...options,
+        maxDurationMs: Math.min(options.maxDurationMs, NATIVE_RECOGNITION_TIMEOUT_MS)
+      }, RecognitionCtor);
       if (nativeResult.transcript.trim().length > 0) {
         this.isNativeBroken = false;
         return nativeResult;
       }
 
-      if (!this.shouldFallbackAfterNativeFailure(nativeResult.reason)) {
+      const shouldFallbackOnNoSpeech = nativeResult.reason === 'no-speech'
+        ? this.safeShouldFallbackOnNoSpeech(options.shouldFallbackOnNoSpeech)
+        : false;
+
+      if (!this.shouldFallbackAfterNativeFailure(nativeResult.reason, shouldFallbackOnNoSpeech)) {
         return nativeResult;
       }
 
-      if (canUseFallbackRecognition()) {
+      if (allowCloudFallback) {
         console.info('[Pronounce] Native recognition failed; falling back to cloud recognition.', {
-          reason: nativeResult.reason
+          reason: nativeResult.reason,
+          isIosLike,
+          isDesktopLike,
+          isDevMode,
+          nativeDurationMs: nativeResult.durationMs,
+          shouldFallbackOnNoSpeech
         });
-        const fallbackResult = await this.recognizeWithFallback(options);
+        const fallbackResult = await this.recognizeWithFallback({
+          ...options,
+          maxDurationMs: Math.max(600, options.maxDurationMs - nativeResult.durationMs)
+        });
         if (fallbackResult.transcript.trim().length > 0) {
           return fallbackResult;
         }
@@ -247,10 +301,13 @@ class SpeechScoringService {
       return nativeResult;
     }
 
-    if (canUseFallbackRecognition()) {
+    if (allowCloudFallback) {
       console.info('[Pronounce] Native recognition unavailable; using cloud fallback directly.', {
         hasNativeRecognition: Boolean(RecognitionCtor),
-        isNativeBroken: this.isNativeBroken
+        isNativeBroken: this.isNativeBroken,
+        isIosLike,
+        isDesktopLike,
+        isDevMode
       });
       return this.recognizeWithFallback(options);
     }
@@ -264,8 +321,28 @@ class SpeechScoringService {
     };
   }
 
-  private shouldFallbackAfterNativeFailure(reason: SpeechRecognitionResultReason): boolean {
-    return reason === 'unsupported' || reason === 'network' || reason === 'error' || reason === 'aborted';
+  private safeShouldFallbackOnNoSpeech(shouldFallbackOnNoSpeech?: () => boolean): boolean {
+    if (!shouldFallbackOnNoSpeech) return false;
+    try {
+      return shouldFallbackOnNoSpeech();
+    } catch (error) {
+      console.warn('[Pronounce] Failed to evaluate no-speech fallback signal:', error);
+      return false;
+    }
+  }
+
+  private shouldFallbackAfterNativeFailure(
+    reason: SpeechRecognitionResultReason,
+    shouldFallbackOnNoSpeech: boolean
+  ): boolean {
+    return (
+      reason === 'unsupported' ||
+      reason === 'network' ||
+      reason === 'error' ||
+      reason === 'aborted' ||
+      reason === 'timeout' ||
+      (reason === 'no-speech' && shouldFallbackOnNoSpeech)
+    );
   }
 
   private async recognizeWithNative(

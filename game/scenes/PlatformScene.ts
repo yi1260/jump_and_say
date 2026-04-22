@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { PlatformPlayerControlSystem } from '../systems/PlatformPlayerControlSystem';
 import { PlatformEnemySystem } from '../systems/PlatformEnemySystem';
-import { PlatformWordGateSystem, Round1Result } from '../systems/PlatformWordGateSystem';
+import { PlatformWordGateSystem } from '../systems/PlatformWordGateSystem';
 import { level1Config, generateLevelElements } from '../data/levelConfig';
 
 /**
@@ -65,6 +65,9 @@ export class PlatformScene extends Phaser.Scene {
     this.score = 0;
     this.isGameOver = false;
     this.currentWord = '';
+    this.totalStars = 0;
+    this.paused = false;
+    this.levelWidth = level1Config.width;
   }
 
   preload() {
@@ -86,12 +89,17 @@ export class PlatformScene extends Phaser.Scene {
 
     // 门和方块素材
     this.load.svg('door_closed', '/assets/kenney/Vector/backup/Tiles/door_closed.svg');
+    this.load.svg('door_closed_top', '/assets/kenney/Vector/backup/Tiles/door_closed_top.svg');
     this.load.svg('door_open', '/assets/kenney/Vector/backup/Tiles/door_open.svg');
+    this.load.svg('door_open_top', '/assets/kenney/Vector/backup/Tiles/door_open_top.svg');
     this.load.svg('block_yellow', '/assets/kenney/Vector/backup/Tiles/block_yellow.svg');
+    this.load.svg('key_yellow', '/assets/kenney/Vector/backup/Tiles/key_yellow.svg');
+    this.load.svg('terrain_grass_horizontal_overhang_left', '/assets/kenney/Vector/backup/Tiles/terrain_grass_horizontal_overhang_left.svg');
+    this.load.svg('terrain_grass_horizontal_overhang_right', '/assets/kenney/Vector/backup/Tiles/terrain_grass_horizontal_overhang_right.svg');
 
     // 音效（使用可选加载，失败不影响游戏）
-    this.load.audio('sfx_jump', '/assets/sounds/jump.mp3');
-    this.load.audio('sfx_coin', '/assets/sounds/coin.mp3');
+    this.load.audio('sfx_jump', '/assets/kenney/Sounds/sfx_jump-high.mp3');
+    this.load.audio('sfx_coin', '/assets/kenney/Sounds/sfx_coin.mp3');
 
     // 创建占位符纹理（用于 Round1 中的问题图片）
     this.createPlaceholderTexture();
@@ -174,8 +182,6 @@ export class PlatformScene extends Phaser.Scene {
       this
     );
 
-    // 初始化控制系统
-    this.playerControlSystem = new PlatformPlayerControlSystem(this, this.player);
     // 音效初始化
     try {
       this.jumpSound = this.sound.add('sfx_jump', { volume: 0.3 });

@@ -8,9 +8,11 @@ declare global {
   }
 }
 
-// Initialize Eruda for mobile debugging in development or if debug param is present
 const urlParams = new URLSearchParams(window.location.search);
-const isDebug = import.meta.env.DEV || urlParams.get('debug') === 'true';
+const shouldInitEruda =
+  urlParams.get('debug') === 'true' ||
+  urlParams.get('eruda') === 'true';
+const isDebug = import.meta.env.DEV || shouldInitEruda;
 const isDiag =
   isDebug ||
   urlParams.get('diag') === '1' ||
@@ -24,7 +26,28 @@ const IOS_DEV_SW_RELOAD_MARKER = '__ios_dev_sw_cleanup_reloaded_v1';
 
 window.__APP_DIAG__ = isDiag;
 
-if (isDebug) {
+const isBenignCrossOriginScriptError = (event: Event): event is ErrorEvent => {
+  if (!(event instanceof ErrorEvent)) return false;
+  const hasGenericMessage = event.message === 'Script error.';
+  const hasNoUsefulLocation = event.lineno === 0 && event.colno === 0;
+  return hasGenericMessage && hasNoUsefulLocation && event.error == null;
+};
+
+if (isIOSLike) {
+  window.addEventListener(
+    'error',
+    (event) => {
+      if (!isBenignCrossOriginScriptError(event)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    },
+    true
+  );
+}
+
+// Eruda is useful on iPad, but enabling it for every dev load makes benign
+// cross-origin script noise look like app errors. Use ?debug=true when needed.
+if (shouldInitEruda) {
   import('eruda').then((eruda) => {
     eruda.default.init();
     console.log('Eruda initialized');

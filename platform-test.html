@@ -16,6 +16,33 @@
       width: 100vw;
       height: 100vh;
     }
+
+    @media (max-width: 640px) {
+      #controls {
+        left: 8px;
+        right: 8px;
+        top: 8px;
+        max-height: 42vh;
+        overflow: auto;
+        padding: 10px !important;
+        font-size: 12px !important;
+      }
+
+      #controls h3 {
+        font-size: 16px;
+      }
+
+      #controls ul {
+        font-size: 11px !important;
+      }
+
+      #controls button {
+        width: calc(50% - 4px);
+        margin-left: 0 !important;
+        padding: 7px 8px !important;
+        font-size: 12px !important;
+      }
+    }
   </style>
 </head>
 <body>
@@ -46,13 +73,30 @@
   <script type="module">
     import Phaser from 'phaser';
     import { PlatformScene } from './game/scenes/PlatformScene.ts';
+    import { MarioScene } from './game/scenes/MarioScene.ts';
 
+    const getViewportDpr = () => Math.min(window.devicePixelRatio || 1, 3);
+    const getGameSize = () => {
+      const dpr = getViewportDpr();
+      return {
+        width: Math.round(window.innerWidth * dpr),
+        height: Math.round(window.innerHeight * dpr),
+        zoom: 1 / dpr
+      };
+    };
+    const gameSize = getGameSize();
     const config = {
       type: Phaser.AUTO,
       parent: 'game-container',
-      width: 1280,
-      height: 720,
-      backgroundColor: '#87CEEB',
+      width: gameSize.width,
+      height: gameSize.height,
+      backgroundColor: '#FFFFFF',
+      render: {
+        antialias: true,
+        pixelArt: false,
+        roundPixels: false,
+        powerPreference: 'high-performance'
+      },
       physics: {
         default: 'arcade',
         arcade: {
@@ -60,17 +104,27 @@
           debug: false
         }
       },
-      scene: [PlatformScene],
+      scene: [MarioScene, PlatformScene],
       scale: {
-        mode: Phaser.Scale.FIT,
-        autoCenter: Phaser.Scale.CENTER_BOTH
+        mode: Phaser.Scale.NONE,
+        autoCenter: Phaser.Scale.NO_CENTER,
+        zoom: gameSize.zoom
       }
     };
 
     const game = new Phaser.Game(config);
+    window.__platformTestGame = game;
+
+    const resizeGame = () => {
+      const nextSize = getGameSize();
+      game.scale.setZoom(nextSize.zoom);
+      game.scale.resize(nextSize.width, nextSize.height);
+    };
+    window.addEventListener('resize', resizeGame);
+    window.addEventListener('orientationchange', resizeGame);
 
     document.getElementById('restart-btn').addEventListener('click', () => {
-      game.scene.start('PlatformScene');
+      game.scene.start('MarioScene');
     });
 
     document.getElementById('back-btn').addEventListener('click', () => {

@@ -2568,7 +2568,11 @@ export class Round1PronunciationFlow {
       const attempt = await speechScoringService.recognizeOnce({
         lang: 'en-US',
         maxDurationMs: Math.max(600, remainingMs),
-        inputStream
+        inputStream,
+        shouldFallbackOnNoSpeech: () => (
+          scene.volumeMonitorDetectedSignal ||
+          scene.blindBoxCurrentVolumePeak >= VOLUME_SILENCE_CUTOFF
+        )
       });
       console.info('[Pronounce] Recognition attempt finished.', {
         attemptNumber: retryCount + 1,

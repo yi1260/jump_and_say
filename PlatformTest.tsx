@@ -2,6 +2,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import Phaser from 'phaser';
 import { PlatformScene } from './game/scenes/PlatformScene';
+import { MarioScene } from './game/scenes/MarioScene';
 
 /**
  * 横版闯关模式测试入口
@@ -9,12 +10,28 @@ import { PlatformScene } from './game/scenes/PlatformScene';
  * 用于快速测试新的横版关卡原型
  * 启动方法：在浏览器控制台执行 document.body.innerHTML = ''; const script = document.createElement('script'); script.src = '/PlatformTest.tsx'; document.body.appendChild(script);
  */
-const config: Phaser.Types.Core.GameConfig = {
+const getViewportDpr = () => Math.min(window.devicePixelRatio || 1, 3);
+const getGameSize = () => {
+  const dpr = getViewportDpr();
+  return {
+    width: Math.round(window.innerWidth * dpr),
+    height: Math.round(window.innerHeight * dpr),
+    zoom: 1 / dpr
+  };
+};
+const gameSize = getGameSize();
+const config = {
   type: Phaser.AUTO,
   parent: 'platform-test-container',
-  width: 1280,
-  height: 720,
-  backgroundColor: '#87CEEB', // 天空蓝背景
+  width: gameSize.width,
+  height: gameSize.height,
+  backgroundColor: '#FFFFFF',
+  render: {
+    antialias: true,
+    pixelArt: false,
+    roundPixels: false,
+    powerPreference: 'high-performance'
+  },
   physics: {
     default: 'arcade',
     arcade: {
@@ -22,12 +39,13 @@ const config: Phaser.Types.Core.GameConfig = {
       debug: false // 设置为 true 可以看到碰撞边界
     }
   },
-  scene: [PlatformScene],
+  scene: [MarioScene, PlatformScene],
   scale: {
-    mode: Phaser.Scale.FIT,
-    autoCenter: Phaser.Scale.CENTER_BOTH
+    mode: Phaser.Scale.NONE,
+    autoCenter: Phaser.Scale.NO_CENTER,
+    zoom: gameSize.zoom
   }
-};
+} as Phaser.Types.Core.GameConfig;
 
 // 创建测试容器
 const container = document.createElement('div');
@@ -71,10 +89,19 @@ document.body.appendChild(controls);
 
 // 启动游戏
 const game = new Phaser.Game(config);
+(window as typeof window & { __platformTestGame?: Phaser.Game }).__platformTestGame = game;
+
+const resizeGame = () => {
+  const nextSize = getGameSize();
+  game.scale.setZoom(nextSize.zoom);
+  game.scale.resize(nextSize.width, nextSize.height);
+};
+window.addEventListener('resize', resizeGame);
+window.addEventListener('orientationchange', resizeGame);
 
 // 绑定按钮事件
 document.getElementById('restart-btn')?.addEventListener('click', () => {
-  game.scene.start('PlatformScene');
+  game.scene.start('MarioScene');
 });
 
 document.getElementById('close-btn')?.addEventListener('click', () => {
