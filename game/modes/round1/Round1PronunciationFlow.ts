@@ -59,6 +59,8 @@ const ROUND1_FEEDBACK_BADGE_VIEWPORT_HEIGHT_RATIO = 0.48;
 const ROUND1_TRY_AGAIN_SKIP_LIMIT = 3;
 const RECORDING_START_SFX_KEY = 'sfx_record_start';
 const RECORDING_START_SFX_VOLUME = 0.45;
+const QUESTION_AUDIO_PLAY_TIMEOUT_MS = 6000;
+const VOLUME_MONITOR_STREAM_TIMEOUT_MS = 4500;
 
 interface AnswerCardLayout {
   centerX: number;
@@ -90,8 +92,6 @@ interface BlindBoxRevealLayout {
   height: number;
 }
 
-type PronunciationHudStage = 'HIDDEN' | 'LISTENING' | 'RECORDING';
-
 interface BlindBoxCollisionPlayer {
   x: number;
   y: number;
@@ -109,6 +109,26 @@ interface BlindBoxCollisionBlock {
   getData(key: string): unknown;
   setData(key: string, value: unknown): void;
 }
+
+const raceWithTimeout = async <T>(
+  label: string,
+  timeoutMs: number,
+  task: () => Promise<T>
+): Promise<T> => new Promise<T>((resolve, reject) => {
+  const timeoutId = window.setTimeout(() => {
+    reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+  }, timeoutMs);
+
+  task()
+    .then((value) => {
+      window.clearTimeout(timeoutId);
+      resolve(value);
+    })
+    .catch((error) => {
+      window.clearTimeout(timeoutId);
+      reject(error);
+    });
+});
 
 interface Round1SceneInternal {
   add: Phaser.GameObjects.GameObjectFactory;
@@ -180,7 +200,6 @@ interface Round1SceneInternal {
   volumeMonitorReferenceLevel: number;
   volumeMonitorDetectedSignal: boolean;
   pronunciationHudMicVisible: boolean;
-  pronunciationHudStage: PronunciationHudStage;
   pronunciationHudVolumeLevel: number;
   pronunciationHudCountdownSeconds: number;
   pronunciationHudMicAnchorX: number;
@@ -330,7 +349,6 @@ export class Round1PronunciationFlow {
     const scene = this.scene;
     this.stopMicCountdown();
     scene.pronunciationHudMicVisible = false;
-    scene.pronunciationHudStage = 'HIDDEN';
     scene.pronunciationHudVolumeLevel = 0;
     scene.pronunciationHudCountdownSeconds = 0;
     scene.pronunciationHudMicAnchorX = 0.5;
@@ -654,7 +672,6 @@ export class Round1PronunciationFlow {
     await this.waitForDelay(360);
     if (!this.isActiveRoundToken(roundToken)) return;
 
-    this.setBlindBoxListenHintVisible(true);
     await this.playQuestionAudioByItem(questionItem);
     if (!this.isActiveRoundToken(roundToken)) return;
 
@@ -718,7 +735,10 @@ export class Round1PronunciationFlow {
         reason: recognitionResult.reason,
         durationMs: recognitionResult.durationMs
       };
-      console.info('[Pronounce] Round result:', roundResult);
+      console.info('[Pronounce] Round result:', {
+        ...roundResult,
+        provider: recognitionResult.provider || 'unknown'
+      });
 
       scene.blindBoxRoundPhase = 'RESULT';
       const feedbackAnimationTask = this.playBlindBoxFeedbackBadge(confidenceLevel);
@@ -818,12 +838,10 @@ export class Round1PronunciationFlow {
     this.updateBlindBoxVolumeMeterPosition();
   }
 
-  private setPronunciationHudStage(stage: PronunciationHudStage): void {
+  private setPronunciationHudMicVisible(visible: boolean): void {
     const scene = this.scene;
-    const micVisible = stage === 'RECORDING';
-    if (scene.pronunciationHudStage === stage && scene.pronunciationHudMicVisible === micVisible) return;
-    scene.pronunciationHudStage = stage;
-    scene.pronunciationHudMicVisible = micVisible;
+    if (scene.pronunciationHudMicVisible === visible) return;
+    scene.pronunciationHudMicVisible = visible;
     this.emitPronunciationHudState();
   }
 
@@ -1051,7 +1069,7 @@ export class Round1PronunciationFlow {
 
   private positionBlindBoxMicHintIcon(): void {
     const scene = this.scene;
-    const shouldShowMicHint = scene.isPronunciationFlowEnabled() && scene.pronunciationHudStage !== 'HIDDEN';
+    const shouldShowMicHint = scene.isPronunciationFlowEnabled() && scene.pronunciationHudMicVisible;
     if (!shouldShowMicHint) {
       if (scene.blindBoxMicPulseTween) {
         scene.blindBoxMicPulseTween.remove();
@@ -1135,10 +1153,7 @@ export class Round1PronunciationFlow {
     }
 
     if (scene.blindBoxMicHintText && scene.blindBoxMicHintText.active) {
-      const hintText = scene.pronunciationHudStage === 'LISTENING'
-        ? '请先听示范'
-        : `录音中（倒计时${Math.max(0, Math.round(scene.pronunciationHudCountdownSeconds))}秒）`;
-      scene.blindBoxMicHintText.setText(hintText);
+      scene.blindBoxMicHintText.setText(`录音中（倒计时${Math.max(0, Math.round(scene.pronunciationHudCountdownSeconds))}秒）`);
     }
 
     this.refreshMicCountdownRingLayout(iconDisplaySize);
@@ -1189,15 +1204,7 @@ export class Round1PronunciationFlow {
         scene.blindBoxMicPulseTween = null;
       }
     }
-    this.setPronunciationHudStage(visible ? 'RECORDING' : 'HIDDEN');
-  }
-
-  private setBlindBoxListenHintVisible(visible: boolean): void {
-    if (!visible) {
-      this.setPronunciationHudStage('HIDDEN');
-      return;
-    }
-    this.setPronunciationHudStage('LISTENING');
+    this.setPronunciationHudMicVisible(visible);
   }
 
   private destroyBlindBoxRevealVisuals(): void {
@@ -2038,12 +2045,24 @@ export class Round1PronunciationFlow {
     this.setBlindBoxVolumeLevel(0);
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
+      const requestStartedAt = performance.now();
+      console.info('[Pronounce] Volume monitor requesting microphone stream.', {
+        timeoutMs: VOLUME_MONITOR_STREAM_TIMEOUT_MS
+      });
+      const stream = await raceWithTimeout(
+        'volume-monitor-get-user-media',
+        VOLUME_MONITOR_STREAM_TIMEOUT_MS,
+        () => navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        })
+      );
+      console.info('[Pronounce] Volume monitor microphone stream ready.', {
+        durationMs: Math.max(0, Math.round(performance.now() - requestStartedAt)),
+        trackCount: stream.getTracks().length
       });
       scene.volumeMonitorStream = stream;
       const audioContext = new AudioContext();
@@ -2439,35 +2458,79 @@ export class Round1PronunciationFlow {
 
     if (audioKey && scene.cache.audio.exists(audioKey)) {
       scene.stopPronunciationSound(false);
-      await new Promise<void>((resolve) => {
+      const playbackResult = await new Promise<'completed' | 'timeout' | 'not-played' | 'error'>((resolve) => {
         try {
+          const playbackStartedAt = performance.now();
           const sound = scene.sound.add(audioKey);
           scene.pronunciationSound = sound;
+          let settled = false;
+          let timeoutId = 0;
 
-          const finalize = (): void => {
+          const finalize = (result: 'completed' | 'timeout' | 'not-played' | 'error'): void => {
+            if (settled) return;
+            settled = true;
+            if (timeoutId) {
+              window.clearTimeout(timeoutId);
+              timeoutId = 0;
+            }
             if (scene.pronunciationSound === sound) {
               scene.pronunciationSound = null;
             }
-            sound.destroy();
-            resolve();
+            try {
+              sound.destroy();
+            } catch (error) {
+              console.warn('[Pronounce] Failed to destroy question audio sound:', error);
+            }
+            console.info('[Pronounce] Question audio playback finalized.', {
+              question: questionItem.question,
+              audioKey,
+              result,
+              durationMs: Math.max(0, Math.round(performance.now() - playbackStartedAt))
+            });
+            resolve(result);
           };
 
-          sound.once('complete', finalize);
+          console.info('[Pronounce] Question audio playback started.', {
+            question: questionItem.question,
+            audioKey,
+            timeoutMs: QUESTION_AUDIO_PLAY_TIMEOUT_MS
+          });
+
+          sound.once('complete', () => finalize('completed'));
           sound.once('destroy', () => {
             if (scene.pronunciationSound === sound) {
               scene.pronunciationSound = null;
             }
           });
 
+          timeoutId = window.setTimeout(() => {
+            console.warn('[Pronounce] Question audio playback timed out; forcing fallback.', {
+              question: questionItem.question,
+              audioKey,
+              timeoutMs: QUESTION_AUDIO_PLAY_TIMEOUT_MS
+            });
+            finalize('timeout');
+          }, QUESTION_AUDIO_PLAY_TIMEOUT_MS);
+
           const played = sound.play({ volume: scene.PRONUNCIATION_VOLUME });
           if (!played) {
-            finalize();
+            finalize('not-played');
           }
         } catch (error) {
           console.warn('[Pronounce] Failed to play question audio, fallback to speech synthesis.', error);
-          resolve();
+          resolve('error');
         }
       });
+
+      if (playbackResult !== 'completed') {
+        console.warn('[Pronounce] Falling back to speech synthesis after question audio did not finish cleanly.', {
+          question: questionItem.question,
+          audioKey,
+          playbackResult
+        });
+        scene.stopPronunciationSound(false);
+        await this.speakWithSpeechSynthesis(questionItem.question);
+      }
       window.restoreBGMVolume?.();
       return;
     }
@@ -2505,7 +2568,19 @@ export class Round1PronunciationFlow {
       const attempt = await speechScoringService.recognizeOnce({
         lang: 'en-US',
         maxDurationMs: Math.max(600, remainingMs),
-        inputStream
+        inputStream,
+        shouldFallbackOnNoSpeech: () => (
+          scene.volumeMonitorDetectedSignal ||
+          scene.blindBoxCurrentVolumePeak >= VOLUME_SILENCE_CUTOFF
+        )
+      });
+      console.info('[Pronounce] Recognition attempt finished.', {
+        attemptNumber: retryCount + 1,
+        provider: attempt.provider || 'unknown',
+        reason: attempt.reason,
+        transcriptLength: attempt.transcript.trim().length,
+        durationMs: attempt.durationMs,
+        remainingMs
       });
       lastResult = {
         ...attempt,

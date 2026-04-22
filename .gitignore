@@ -10,6 +10,8 @@ lerna-debug.log*
 public/themes.*/
 # public/assets/
 public/mediapipe/
+public/output
+dev-dist
 
 node_modules
 dist
@@ -35,3 +37,6 @@ skills/*
 *.sw?
 
 # Backup folders
+.vercel
+.env*.local
+.iflow

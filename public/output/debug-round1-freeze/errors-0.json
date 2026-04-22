@@ -1,0 +1,10 @@
+[
+  {
+    "type": "console.error",
+    "text": "An unknown error occurred when fetching the script."
+  },
+  {
+    "type": "console.error",
+    "text": "[DIAG][SW] register error SecurityError: Failed to register a ServiceWorker for scope ('https://localhost:3001/') with script ('https://localhost:3001/dev-sw.js?dev-sw'): An unknown error occurred when fetching the script."
+  }
+]
